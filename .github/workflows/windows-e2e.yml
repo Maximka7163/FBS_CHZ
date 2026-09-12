@@ -76,6 +76,7 @@ jobs:
           ]
           wb = Workbook()
           ws = wb.active
+          ws.title = "КИЗ"
           ws.append(headers)
           row_no = 0
 
