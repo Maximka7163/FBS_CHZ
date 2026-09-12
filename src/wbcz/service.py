@@ -41,11 +41,11 @@ class ImportService:
 
 
 class DryRunService:
-    """Read KI state, calculate, persist preview. No mutation dependencies.
+    """Read KI state, calculate and persist a preview; never mutate CHZ.
 
-    There is intentionally no dry_run=False flag and no live implementation.
-    Local READY/ALREADY_DONE or document status NEVER substitutes for a lookup.
-    State decisions neither establish historical order nor document readiness.
+    The client may be an offline fake or a production read-only adapter. There
+    is intentionally no submit flag/path here. READY/ALREADY_DONE or a stored
+    document status never substitutes for a fresh state lookup.
     """
 
     def __init__(
