@@ -18,11 +18,6 @@ jobs:
         options: >-
           --health-cmd="pg_isready -U postgres -d wbcz_test"
           --health-interval=2s --health-timeout=3s --health-retries=20
-    env:
-      WBCZ_ENV: test
-      WBCZ_OWN_INN: "1234567890"
-      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
-      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -65,8 +60,19 @@ jobs:
           assert n==238
           w.save(p)
           PY
-      - run: alembic upgrade head
-      - run: python -m pytest -q
+      - name: Run alembic upgrade head
+        run: alembic upgrade head
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+      - name: Run pytest
+        run: python -m pytest -q
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+          WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
       - name: Build production frontend artifact
         run: docker build -f frontend/Dockerfile.production --target artifact .
       - name: Create safe CI production env
