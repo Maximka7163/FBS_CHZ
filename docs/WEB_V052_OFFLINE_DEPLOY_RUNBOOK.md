@@ -1,6 +1,6 @@
-# Web v0.5.2 — offline deployment runbook
+# Web v0.5.2.1 — operator-safe offline deployment runbook
 
-This runbook deploys the approved v0.5.1 application source **without GitHub access from the VPS**.
+This runbook deploys the approved v0.5.1 application source **without GitHub access from the VPS** and without exposing production database credentials to Qwen/server automation.
 
 Approved application source SHA:
 
@@ -11,7 +11,7 @@ cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
 Expected archive name:
 
 ```text
-sellari-marking-0.5.1-cc3054eefba5.tar.gz
+sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz
 ```
 
 The VPS must not receive a GitHub token, SSH deploy key or other repository credential.
@@ -20,31 +20,31 @@ Do not modify `/opt/sellari`, `/opt/deltametric` or `/var/www/sellari`.
 
 ## A. Trusted-PC preparation
 
-1. Download the private GitHub Actions artifact produced by the approved v0.5.2 bundle workflow on a trusted PC.
+1. Download the private GitHub Actions artifact produced by the approved operator-safe bundle workflow on a trusted PC.
 2. Extract the Actions wrapper ZIP locally. It must contain:
 
 ```text
-sellari-marking-0.5.1-cc3054eefba5.tar.gz
-sellari-marking-0.5.1-cc3054eefba5.tar.gz.sha256
+sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz
+sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256
 ```
 
 3. Verify the archive before transfer:
 
 ```bash
-sha256sum -c sellari-marking-0.5.1-cc3054eefba5.tar.gz.sha256
+sha256sum -c sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256
 ```
 
 Expected result:
 
 ```text
-sellari-marking-0.5.1-cc3054eefba5.tar.gz: OK
+sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz: OK
 ```
 
 4. Transfer only those two files to the VPS by the operator-approved channel, for example:
 
 ```bash
-scp sellari-marking-0.5.1-cc3054eefba5.tar.gz \
-    sellari-marking-0.5.1-cc3054eefba5.tar.gz.sha256 \
+scp sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz \
+    sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256 \
     <operator>@<vps>:/tmp/
 ```
 
@@ -58,17 +58,17 @@ sudo install -d -m 0750 /opt/sellari-marking/incoming
 sudo install -d -m 0750 /opt/sellari-marking/runtime
 sudo install -d -m 0750 /opt/sellari-marking/releases
 sudo install -d -m 0750 /opt/sellari-marking/backups
-sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5.tar.gz /opt/sellari-marking/incoming/
-sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5.tar.gz.sha256 /opt/sellari-marking/incoming/
-sudo chown root:root /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5.tar.gz*
-sudo chmod 0644 /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5.tar.gz*
+sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz /opt/sellari-marking/incoming/
+sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256 /opt/sellari-marking/incoming/
+sudo chown root:root /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz*
+sudo chmod 0644 /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz*
 ```
 
 ## C. Verify archive integrity on the VPS
 
 ```bash
 cd /opt/sellari-marking/incoming
-sha256sum -c sellari-marking-0.5.1-cc3054eefba5.tar.gz.sha256
+sha256sum -c sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256
 ```
 
 Do not continue unless the result is exactly `OK`.
@@ -78,7 +78,7 @@ Do not continue unless the result is exactly `OK`.
 ```bash
 APP_SHA=cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
 sudo install -d -m 0755 "/opt/sellari-marking/releases/${APP_SHA}"
-sudo tar -xzf /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5.tar.gz \
+sudo tar -xzf /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz \
   -C "/opt/sellari-marking/releases/${APP_SHA}" \
   --strip-components=1
 cd "/opt/sellari-marking/releases/${APP_SHA}"
@@ -98,45 +98,106 @@ Every line must end in `OK`.
 grep -F '"application_version": "0.5.1"' RELEASE.json
 grep -F '"source_git_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
 grep -F '"frontend_built_from_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
+grep -F '"bundle_format": "sellari-marking-offline-v2"' RELEASE.json
+grep -F '"operator_safe_env_bootstrap": true' RELEASE.json
 ```
 
-All three commands must print the matching line and exit successfully.
+All commands must print the matching line and exit successfully.
 
 The bundle contains no `.git` directory. Do not install GitHub credentials on the VPS.
 
-## F. Prepare production configuration
+## F. Initialize production environment without exposing the DB secret
 
-For a first deployment:
+For the first isolated marking deployment, run only the bundled deterministic bootstrap helper:
 
 ```bash
-sudo cp .env.production.example /opt/sellari-marking/runtime/.env.production
-sudo chmod 0600 /opt/sellari-marking/runtime/.env.production
-sudoedit /opt/sellari-marking/runtime/.env.production
+cd /opt/sellari-marking/releases/cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+sudo ./deploy/init-production-env.sh
 ```
 
-The operator must set real production values. In particular:
+Production default target:
+
+```text
+/opt/sellari-marking/runtime/.env.production
+```
+
+The helper:
+
+- runs with `set -eu` and `umask 077`;
+- creates the environment file with mode `0600`;
+- generates the PostgreSQL password locally on the VPS from 32 bytes of `/dev/urandom` and encodes it as 64 lowercase hex characters;
+- writes the same generated secret into `WBCZ_POSTGRES_PASSWORD` and the password component of `WBCZ_DATABASE_URL`;
+- never prints the generated secret;
+- refuses to overwrite an existing `.env.production`;
+- does not create an owner account.
+
+Expected safe output contains only:
+
+```text
+ENV_CREATED=YES
+PATH=/opt/sellari-marking/runtime/.env.production
+MODE=production
+BUILD_SHA=cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+TRUSTED_HOST=mark.sellari.ru
+COOKIE_SECURE=true
+DEBUG=false
+DB_SECRET_GENERATED=YES
+```
+
+The fixed deployment/staging participant identifier is:
+
+```text
+WBCZ_OWN_INN=1234567890
+```
+
+**THIS IS A MOCK/STAGING PARTICIPANT INN.** It is not production legal-entity configuration. Before any future real True API / Windows Bridge activation, replacing it with the real participant INN must be a separate trusted operation outside Qwen/server automation.
+
+The helper also fixes:
 
 ```text
 WBCZ_ENV=production
-WBCZ_BUILD_SHA=cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
-WBCZ_APP_VERSION=0.5.1
-WBCZ_TRUSTED_HOSTS=mark.sellari.ru
+WBCZ_SESSION_TTL_SECONDS=43200
 WBCZ_COOKIE_SECURE=true
+WBCZ_SESSION_COOKIE_NAME=wbcz_session
+WBCZ_CSRF_COOKIE_NAME=wbcz_csrf
 WBCZ_DEBUG=false
+WBCZ_TRUSTED_HOSTS=mark.sellari.ru
+WBCZ_APP_VERSION=0.5.1
+WBCZ_BUILD_SHA=cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+WBCZ_HEALTHCHECK_HOST=mark.sellari.ru
+WBCZ_POSTGRES_DB=wbcz
+WBCZ_POSTGRES_USER=wbcz
+WBCZ_BACKEND_IMAGE=sellari-marking-backend
+WBCZ_BACKEND_PORT=8765
 ```
 
-`WBCZ_DATABASE_URL` and PostgreSQL credentials must use the dedicated marking database only.
-
-Validate without starting anything:
+Validate Compose syntax/configuration **without rendering or saving interpolated configuration**:
 
 ```bash
 docker compose \
   --env-file /opt/sellari-marking/runtime/.env.production \
   -f docker-compose.prod.yml \
-  config >/tmp/sellari-marking-compose.yml
+  config -q
 ```
 
-## G. Build backend image from the bundle
+Do not redirect rendered Compose configuration to `/tmp` or any other file.
+
+## G. Qwen/server-automation secret boundary
+
+After environment initialization, Qwen/server automation is **not trusted for production secrets** and must not:
+
+- receive, choose or regenerate the database password in chat;
+- read `.env.production` with `cat`;
+- search secret values with `grep`;
+- print file contents with `sed -n` or equivalent tools;
+- run `docker compose config` in any mode that emits interpolated configuration;
+- run `docker inspect` against container environment data;
+- run `printenv` for the marking container;
+- print `WBCZ_DATABASE_URL` or `WBCZ_POSTGRES_PASSWORD`.
+
+Allowed diagnostics are limited to safe health/version/capabilities endpoints and container/process status that does not expose environment values.
+
+## H. Build backend image from the bundle
 
 No Git and no Node/npm are required on the VPS for the normal deployment path.
 
@@ -150,7 +211,7 @@ docker compose \
 
 The frontend is already present under `frontend/` as a production Vite dist artifact.
 
-## H. Start dedicated PostgreSQL only
+## I. Start dedicated PostgreSQL only
 
 ```bash
 docker compose \
@@ -166,7 +227,7 @@ docker compose \
 
 PostgreSQL must not have a public host port.
 
-## I. Apply migration explicitly
+## J. Apply migration explicitly
 
 Run exactly once for this deployment step, before backend workers:
 
@@ -179,7 +240,9 @@ docker compose \
 
 Do not run concurrent migration commands.
 
-## J. Bootstrap the first owner — trusted interactive operation
+## K. Bootstrap the first owner — separate trusted interactive operation
+
+Owner bootstrap is not part of the deployment helper and must never be automated by Qwen.
 
 Run this directly in the trusted operator terminal:
 
@@ -193,9 +256,9 @@ docker compose \
 
 The command requests `Password:` and `Confirm password:` through `getpass`.
 
-**Do not send the user password to Qwen, server automation, ChatGPT, shell history, environment variables or command-line arguments.** The password bootstrap is a separate trusted interactive operation.
+**Do not send the owner password to Qwen, server automation, ChatGPT, shell history, environment variables or command-line arguments.**
 
-## K. Start backend while DNS is still absent
+## L. Start backend while DNS is still absent
 
 ```bash
 docker compose \
@@ -214,6 +277,10 @@ curl --fail --silent --show-error \
 curl --fail --silent --show-error \
   -H 'Host: mark.sellari.ru' \
   http://127.0.0.1:8765/api/version
+
+curl --fail --silent --show-error \
+  -H 'Host: mark.sellari.ru' \
+  http://127.0.0.1:8765/api/capabilities
 ```
 
 Expected health response:
@@ -222,9 +289,9 @@ Expected health response:
 {"status":"ok","service":"wbcz-web"}
 ```
 
-The version response must contain the exact approved SHA.
+The version response must contain the exact approved SHA. Capabilities must preserve the safety boundary below.
 
-## L. Activate the static frontend release
+## M. Activate the static frontend release
 
 ```bash
 sudo ln -sfn \
@@ -234,7 +301,7 @@ sudo ln -sfn \
 
 Do not copy files into `/var/www/sellari`.
 
-## M. Stage a dedicated HTTP nginx server while DNS is absent
+## N. Stage a dedicated HTTP nginx server while DNS is absent
 
 The current host default server may display another site for unknown hosts. Therefore create a dedicated `server_name mark.sellari.ru` before DNS exists.
 
@@ -269,7 +336,7 @@ curl --fail --silent --show-error \
 
 At this stage DNS may still be absent.
 
-## N. Production activation order
+## O. Production activation order
 
 Only after the DNS-independent staging checks above pass:
 
@@ -279,18 +346,12 @@ Only after the DNS-independent staging checks above pass:
 4. Replace/extend the staging HTTP configuration with `deploy/nginx/mark.sellari.ru.conf.example` plus the real host-managed TLS directives.
 5. Run `sudo nginx -t`.
 6. Reload nginx using the host's normal procedure.
-7. Verify:
-
-```bash
-curl --fail https://mark.sellari.ru/api/health
-curl --fail https://mark.sellari.ru/api/version
-```
-
+7. Verify HTTPS health/version.
 8. Perform final browser acceptance: login, no registration route, XLSX upload, control, preview and logout.
 
 DNS is therefore **not a prerequisite** for the internal staging deployment.
 
-## O. Safety boundary that must remain unchanged
+## P. Safety boundary that must remain unchanged
 
 Production capabilities remain:
 
@@ -305,6 +366,6 @@ registration=false
 
 Do not install CryptoPro, УКЭП keys, production True API credentials or Windows Bridge components on this VPS for v0.5.1.
 
-## P. Backup and rollback
+## Q. Backup and rollback
 
 Before any later application/schema update follow `docs/WEB_V051_ROLLBACK.md` exactly. Create a PostgreSQL logical dump before migrations and retain the previous image/tag and frontend release directory. Do not automatically run database downgrade migrations unless a specific migration has been reviewed as safely reversible.
