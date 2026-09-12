@@ -1,0 +1,2 @@
+export type ImportItem={fingerprint:string;filename:string;uploaded_at:string;status:string;repeated:boolean;new_events:number;duplicate_events:number;rejected_rows:number;row_count:number;unique_kiz:number}
+export type EventItem={event_id:string;kiz:string;task_number:string;sticker:string;operation:string;occurred_at:string|null;receipt_number:string|null;fiscal_drive_number:string|null;amount:string;currency:string;legal_entity_sale:boolean|null;decision:string|null;reason:string|null;error:string|null;checked_at:string|null}

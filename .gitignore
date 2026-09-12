@@ -8,3 +8,8 @@ dist/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+node_modules/
+frontend/dist/
+frontend/dist-static/
+frontend/harness.html
+ui_screenshots/

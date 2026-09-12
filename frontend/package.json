@@ -1,0 +1,8 @@
+{
+  "name": "wbcz-ui",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "scripts": {"dev": "vite", "build": "tsc --noEmit && vite build", "typecheck": "tsc --noEmit"},
+  "devDependencies": {"typescript": "^5.6.3", "vite": "^6.0.0"}
+}
