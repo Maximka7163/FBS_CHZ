@@ -13,7 +13,6 @@ jobs:
     timeout-minutes: 20
     env:
       FINAL_SHA: 9f60cb6ca0d52521bc1f4dc7d837e7d6c65eb188
-      WBCZ_REF_XLSX: ${{ runner.temp }}\REF_WB_archive_9.xlsx
     steps:
       - name: Checkout validation carrier
         uses: actions/checkout@v4
@@ -21,18 +20,20 @@ jobs:
       - name: Reconstruct private regression workbook outside worktree
         shell: pwsh
         run: |
+          $target = Join-Path $env:RUNNER_TEMP "REF_WB_archive_9.xlsx"
           $parts = Get-ChildItem "e2e_private\chunk*" | Sort-Object Name
           if ($parts.Count -ne 10) { throw "Expected 10 workbook chunks, got $($parts.Count)" }
           $base64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
-          [System.IO.File]::WriteAllBytes($env:WBCZ_REF_XLSX, [Convert]::FromBase64String($base64))
-          $sha = (Get-FileHash $env:WBCZ_REF_XLSX -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllBytes($target, [Convert]::FromBase64String($base64))
+          $sha = (Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($sha -ne "8dce3be1e152bca5cd5c907eecbb4c105942627149ec79dcd828a2d332022f9b") { throw "Regression workbook SHA256 mismatch: $sha" }
+          "WBCZ_REF_XLSX=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "WORKBOOK_SHA256=$sha"
 
       - name: Checkout exact final HEAD
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.FINAL_SHA }}
+          ref: 9f60cb6ca0d52521bc1f4dc7d837e7d6c65eb188
           clean: true
 
       - name: Prove exact checkout and clean tree
@@ -82,7 +83,7 @@ jobs:
       - name: npm install
         working-directory: frontend
         shell: pwsh
-        run: npm install --no-audit --no-fund
+        run: npm install --no-audit --no-fund --no-package-lock
 
       - name: TypeScript tsc --noEmit
         working-directory: frontend
