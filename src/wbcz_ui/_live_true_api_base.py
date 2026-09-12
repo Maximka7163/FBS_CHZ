@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -37,6 +38,12 @@ _GOST_PUBLIC_KEY_OIDS = frozenset({
     "1.2.643.7.1.1.1.1",      # GOST R 34.10-2012 256
     "1.2.643.7.1.1.1.2",      # GOST R 34.10-2012 512
 })
+# Proof must describe the cipher suite negotiated for the actual MSSPI session.
+# Configuration/offered cipher names never satisfy this expression.
+_NEGOTIATED_GOST_CIPHER_RE = re.compile(
+    r"SECPKG_ATTR_CIPHER_INFO\s*:\s*CipherSuite\s*:\s*(?:0x)?(c100|c101|c102)\b",
+    re.IGNORECASE,
+)
 
 
 class ProductionMutationDisabled(RuntimeError):
@@ -222,12 +229,7 @@ def _find_cryptopro_binary(explicit: Path | None, filename: str) -> Path:
 
 
 class CryptoProGostTlsTunnel:
-    """Loopback HTTP -> CryptoPro stunnel-msspi -> production GOST TLS.
-
-    Python never establishes production TLS. The only TLS leg is created by the
-    CryptoPro-supported stunnel-msspi executable with MSSPI enabled, mandatory
-    remote certificate verification, chain validation, hostname check and SNI.
-    """
+    """Loopback HTTP -> CryptoPro stunnel-msspi -> production GOST TLS."""
 
     def __init__(
         self,
@@ -252,9 +254,7 @@ class CryptoProGostTlsTunnel:
 
     @property
     def executable(self) -> Path:
-        return _find_cryptopro_binary(
-            self._explicit, "stunnel_msspi.exe"
-        )
+        return _find_cryptopro_binary(self._explicit, "stunnel_msspi.exe")
 
     @property
     def local_port(self) -> int:
@@ -275,6 +275,7 @@ class CryptoProGostTlsTunnel:
             "hostname_check": self.target_host,
             "sni": self.target_host,
             "gost_session_verified": self._gost_session_seen(),
+            "negotiated_gost_cipher_id": self._negotiated_gost_cipher_id(),
             "openssl_tls_to_production": False,
         }
 
@@ -284,24 +285,25 @@ class CryptoProGostTlsTunnel:
             return 0
         return path.stat().st_size
 
-    def _gost_session_seen(self, start: int = 0) -> bool:
+    def _negotiated_gost_cipher_id(self, start: int = 0) -> str | None:
         path = self._log_path
         if path is None or not path.exists():
-            return False
+            return None
         with path.open("rb") as stream:
             stream.seek(start)
-            text = stream.read().decode("utf-8", errors="replace").upper()
-        if "GOST" in text:
-            return True
-        return any(
-            marker in text
-            for marker in ("(C100)", "(C101)", "(C102)", "(FF85)", "(0081)")
-        )
+            text = stream.read().decode("utf-8", errors="replace")
+        match = _NEGOTIATED_GOST_CIPHER_RE.search(text)
+        return match.group(1).upper() if match else None
+
+    def _gost_session_seen(self, start: int = 0) -> bool:
+        # Configuration text and offered cipher names are not session proof.
+        # Only an explicit negotiated MSSPI CipherSuite marker is accepted.
+        return self._negotiated_gost_cipher_id(start) is not None
 
     def assert_gost_session(self, start: int = 0) -> None:
         if not self._gost_session_seen(start):
             raise GostTlsUnavailable(
-                "CryptoPro TLS connection was established, but a GOST cipher suite could not be proven from stunnel-msspi diagnostics"
+                "CryptoPro TLS connection was established, but a negotiated GOST cipher suite could not be proven from stunnel-msspi diagnostics"
             )
 
     @staticmethod
@@ -311,7 +313,6 @@ class CryptoProGostTlsTunnel:
             return int(sock.getsockname()[1])
 
     def _config(self, port: int, log_path: Path) -> str:
-        # No verify=0, no verifyPeer=no and no OpenSSL compatibility mode.
         return "\n".join([
             "foreground = yes",
             "debug = 7",
@@ -323,15 +324,8 @@ class CryptoProGostTlsTunnel:
             f"accept = 127.0.0.1:{port}",
             f"connect = {self.target_host}:{self.target_port}",
             f"sni = {self.target_host}",
-            # True API v726 requires GOST-protected TLS. TLS 1.3 cipher suites
-            # are configured separately by stunnel, so lock this production leg
-            # to TLS 1.2 and offer GOST suites only. A non-GOST fallback cannot
-            # be negotiated.
             "sslVersion = TLSv1.2",
             "ciphers = GOST2012-GOST8912-GOST8912:GOST2001-GOST89-GOST89",
-            # CryptoPro stunnel_msspi verify=2 requires the remote certificate
-            # and validates it. checkHost additionally binds it to the True API
-            # host; SNI is fixed above. No insecure bypass is supported.
             "verify = 2",
             f"checkHost = {self.target_host}",
             "",
@@ -352,9 +346,7 @@ class CryptoProGostTlsTunnel:
             config_path = temp / "stunnel.conf"
             log_path = temp / "stunnel.log"
             self._log_path = log_path
-            config_path.write_text(
-                self._config(port, log_path), encoding="utf-8"
-            )
+            config_path.write_text(self._config(port, log_path), encoding="utf-8")
             creationflags = 0
             if os.name == "nt":
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -420,7 +412,9 @@ class ReadOnlyTrueApiTransport:
         timeout: float = 30.0,
         tunnel: CryptoProGostTlsTunnel | None = None,
         connection_factory: Callable[..., http.client.HTTPConnection] = http.client.HTTPConnection,
+        opener: Any = None,
     ) -> None:
+        del opener  # backward-compatible test keyword; never a TLS fallback
         if base_url.rstrip("/") != PRODUCTION_BASE_URL:
             raise ValueError(
                 "Only the official production True API v3 base is allowed"
@@ -456,8 +450,6 @@ class ReadOnlyTrueApiTransport:
     def _query(params: dict[str, str] | None) -> str:
         if not params:
             return ""
-        # Only pg=lp can reach this function, so no general URL encoder is
-        # needed and production generic-Python TLS code is deliberately absent.
         return "?pg=lp"
 
     def tls_diagnostics(self) -> dict[str, Any]:
@@ -474,7 +466,7 @@ class ReadOnlyTrueApiTransport:
         cis_count: int = 0,
     ) -> Any:
         method = method.upper()
-        # Exact safety barrier before tunnel startup or any network operation.
+        # Safety barrier runs before tunnel startup or any network operation.
         self.assert_allowed(method, path, params)
         target = PRODUCTION_BASE_PATH + path + self._query(params)
         headers = {
@@ -561,11 +553,7 @@ class ReadOnlyTrueApiTransport:
     def _request_id(headers: Any) -> str | None:
         if headers is None:
             return None
-        for name in (
-            "X-Request-ID",
-            "X-Correlation-ID",
-            "Traceparent",
-        ):
+        for name in ("X-Request-ID", "X-Correlation-ID", "Traceparent"):
             value = headers.get(name)
             if value:
                 return str(value)[:200]
@@ -597,9 +585,6 @@ class WindowsCryptoProCertificateInspector:
     def inspect(self) -> dict[str, Any]:
         if os.name != "nt" and self._runner is subprocess.run:
             raise TrueApiError("Certificate diagnostics require Windows")
-        # CERT_KEY_PROV_INFO_PROP_ID=2 exposes the linked provider without
-        # exporting or invoking the private key. Subject/container/PIN are not
-        # returned to the application or audit log.
         script = r'''
 $ErrorActionPreference='Stop'
 Add-Type -TypeDefinition @"
@@ -750,8 +735,6 @@ class WindowsCryptoProAuthSigner:
     def sign_auth_challenge(self, challenge: str) -> str:
         if not challenge:
             raise ValueError("Empty authentication challenge")
-        # This local check does not export/read the key or PIN. cryptcp itself
-        # accesses the linked CryptoPro private key by certificate thumbprint.
         self.inspector.inspect()
         with tempfile.TemporaryDirectory(prefix="wbcz-auth-") as directory:
             temp = Path(directory)
@@ -839,7 +822,6 @@ class TrueApiAuthenticator:
         return uuid, data
 
     def preflight(self) -> dict[str, Any]:
-        # Network-only: obtains a challenge but never invokes the signer.
         challenge = self.transport.request_json("GET", "/auth/key")
         uuid, data = self._challenge(challenge)
         return {
@@ -880,19 +862,14 @@ class TrueApiAuthenticator:
                 "UUID authentication response misses expireDate"
             )
         try:
-            expire_date = datetime.fromisoformat(
-                expire.replace("Z", "+00:00")
-            )
+            expire_date = datetime.fromisoformat(expire.replace("Z", "+00:00"))
             if expire_date.tzinfo is None:
                 expire_date = expire_date.replace(tzinfo=timezone.utc)
         except ValueError as exc:
             raise TrueApiProtocolError(
                 "Invalid expireDate in authentication response"
             ) from exc
-        return AuthSession(
-            token,
-            expire_date.astimezone(timezone.utc),
-        )
+        return AuthSession(token, expire_date.astimezone(timezone.utc))
 
 
 class TrueApiCisesInfoAdapter:
@@ -1017,8 +994,6 @@ class LiveTrueApiClient:
         return self._session.expire_date if self._session is not None else None
 
     def preflight(self) -> dict[str, Any]:
-        # The network preflight calls only GET /auth/key. The signer is never
-        # invoked. Certificate diagnostics use a separate local inspector.
         result = self.authenticator.preflight()
         certificate = (
             self.certificate_inspector.inspect()
@@ -1058,7 +1033,6 @@ class LiveTrueApiClient:
         self._last_request_at = time.monotonic()
 
     def prime(self, kizes: Iterable[str]) -> None:
-        # Explicit auth gate occurs before any /cises/info call.
         bearer = self._bearer()
         unique = list(dict.fromkeys(kizes))
         missing = [kiz for kiz in unique if kiz not in self._cache]
