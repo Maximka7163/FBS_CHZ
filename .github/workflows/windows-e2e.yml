@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - ci/windows-e2e-temp
+    paths:
+      - e2e_private/READY
   workflow_dispatch:
 
 jobs:
@@ -16,6 +18,16 @@ jobs:
       - name: Checkout branch
         uses: actions/checkout@v4
 
+      - name: Reconstruct private regression workbook
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "e2e_private\chunk*" | Sort-Object Name
+          if ($parts.Count -ne 10) { throw "Expected 10 workbook chunks, got $($parts.Count)" }
+          $base64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          [System.IO.File]::WriteAllBytes($env:WBCZ_REF_XLSX, [Convert]::FromBase64String($base64))
+          $sha = (Get-FileHash $env:WBCZ_REF_XLSX -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne "8dce3be1e152bca5cd5c907eecbb4c105942627149ec79dcd828a2d332022f9b") { throw "Regression workbook SHA256 mismatch: $sha" }
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -25,11 +37,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-
-      - name: Verify real regression workbook is present
-        shell: pwsh
-        run: |
-          if (-not (Test-Path $env:WBCZ_REF_XLSX)) { throw "REF_WB_archive_9.xlsx is required for the real Windows E2E run" }
 
       - name: Install Python application and test dependencies
         shell: pwsh
