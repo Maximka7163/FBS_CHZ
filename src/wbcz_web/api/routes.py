@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from wbcz_web.auth import new_csrf_token
@@ -22,8 +23,19 @@ router = APIRouter(prefix="/api")
 
 
 @router.get("/health")
-def health() -> dict:
-    return {"status": "ok", "service": "wbcz-web", "version": "0.5"}
+def health(request: Request) -> dict:
+    try:
+        with request.app.state.session_factory() as db:
+            db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="service unavailable") from exc
+    return {"status": "ok", "service": "wbcz-web"}
+
+
+@router.get("/version")
+def version(request: Request) -> dict:
+    config = request.app.state.config
+    return {"application_version": config.app_version, "build_sha": config.build_sha}
 
 
 @router.get("/auth/csrf")
@@ -51,16 +63,10 @@ def login(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        user, token = AuthService(db, request.app.state.config).login(
-            payload.username, payload.password
-        )
+        user, token = AuthService(db, request.app.state.config).login(payload.username, payload.password)
     except AuthenticationError as exc:
-        # LOGIN_FAILED is deliberately committed before the HTTP 401 leaves the
-        # request scope; otherwise the dependency rollback would erase audit.
         db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     config = request.app.state.config
     response.set_cookie(
         config.session_cookie_name,
@@ -82,21 +88,14 @@ def logout(
     identity: AuthenticatedIdentity = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    AuthService(db, request.app.state.config).logout(
-        identity.session_id, identity.user_id
-    )
+    AuthService(db, request.app.state.config).logout(identity.session_id, identity.user_id)
     response.delete_cookie(request.app.state.config.session_cookie_name, path="/")
     return {"ok": True}
 
 
 @router.get("/me")
 def me(identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
-    return {
-        "id": identity.user_id,
-        "username": identity.username,
-        "is_admin": identity.is_admin,
-        "is_active": True,
-    }
+    return {"id": identity.user_id, "username": identity.username, "is_admin": identity.is_admin, "is_active": True}
 
 
 @router.get("/capabilities")
@@ -124,9 +123,7 @@ async def upload_file(
         raise HTTPException(status_code=400, detail="Поддерживаются только файлы .xlsx")
     data = await upload.read(50 * 1024 * 1024 + 1)
     if len(data) > 50 * 1024 * 1024:
-        raise HTTPException(
-            status_code=413, detail="Файл превышает допустимый размер 50 MiB"
-        )
+        raise HTTPException(status_code=413, detail="Файл превышает допустимый размер 50 MiB")
     try:
         record = FileImportService(db).import_xlsx(filename, data, identity.user_id)
     except UploadError as exc:
@@ -135,19 +132,12 @@ async def upload_file(
 
 
 @router.get("/files")
-def list_files(
-    identity: AuthenticatedIdentity = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> list[dict]:
+def list_files(identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
     return [import_view(row) for row in ImportRepository(db).list_recent()]
 
 
 @router.get("/files/{import_id}")
-def get_file(
-    import_id: str,
-    identity: AuthenticatedIdentity = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> dict:
+def get_file(import_id: str, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
     row = ImportRepository(db).get(import_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Импорт не найден")
@@ -155,35 +145,21 @@ def get_file(
 
 
 @router.get("/files/{import_id}/events")
-def file_events(
-    import_id: str,
-    identity: AuthenticatedIdentity = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> list[dict]:
+def file_events(import_id: str, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
     repo = ImportRepository(db)
     if repo.get(import_id) is None:
         raise HTTPException(status_code=404, detail="Импорт не найден")
-    return [
-        event_view(db, row, repo.latest_check(row.event_id))
-        for row in repo.ordered_event_records(import_id)
-    ]
+    return [event_view(db, row, repo.latest_check(row.event_id)) for row in repo.ordered_event_records(import_id)]
 
 
 @router.get("/events/{event_id}")
-def event_detail(
-    event_id: str,
-    identity: AuthenticatedIdentity = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> dict:
+def event_detail(event_id: str, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
     repo = ImportRepository(db)
     row = repo.event(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Событие не найдено")
     result = event_view(db, row, repo.latest_check(event_id))
-    result["history"] = [
-        event_view(db, item, repo.latest_check(item.event_id))
-        for item in repo.history_for_kiz(row.kiz)
-    ]
+    result["history"] = [event_view(db, item, repo.latest_check(item.event_id)) for item in repo.history_for_kiz(row.kiz)]
     result["history_order_ambiguous"] = repo.history_order_ambiguous(row.kiz)
     return result
 
@@ -198,9 +174,7 @@ def control(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        return ControlService(db, request.app.state.config.own_inn).run(
-            import_id, identity.user_id, payload.mode, payload.event_ids
-        )
+        return ControlService(db, request.app.state.config.own_inn).run(import_id, identity.user_id, payload.mode, payload.event_ids)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -216,8 +190,6 @@ def operation_preview(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        return ControlService(db, request.app.state.config.own_inn).preview(
-            payload.import_id, identity.user_id, payload.mode, payload.event_ids
-        )
+        return ControlService(db, request.app.state.config.own_inn).preview(payload.import_id, identity.user_id, payload.mode, payload.event_ids)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

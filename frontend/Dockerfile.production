@@ -1,0 +1,9 @@
+FROM node:22-alpine AS build
+WORKDIR /work/frontend
+COPY frontend/package.json frontend/tsconfig.json frontend/vite.config.ts frontend/index.html ./
+COPY frontend/src ./src
+RUN npm install --no-audit --no-fund --no-package-lock
+RUN npm run typecheck && npm run build
+
+FROM scratch AS artifact
+COPY --from=build /work/frontend/dist/ /

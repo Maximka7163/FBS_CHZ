@@ -1,0 +1,75 @@
+services:
+  marking-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${WBCZ_POSTGRES_DB:?WBCZ_POSTGRES_DB is required}
+      POSTGRES_USER: ${WBCZ_POSTGRES_USER:?WBCZ_POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${WBCZ_POSTGRES_PASSWORD:?WBCZ_POSTGRES_PASSWORD is required}
+    expose:
+      - "5432"
+    volumes:
+      - marking_pgdata:/var/lib/postgresql/data
+    networks:
+      - marking_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  marking-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args:
+        APP_VERSION: ${WBCZ_APP_VERSION:?WBCZ_APP_VERSION is required}
+        BUILD_SHA: ${WBCZ_BUILD_SHA:?WBCZ_BUILD_SHA is required}
+    image: ${WBCZ_BACKEND_IMAGE:-sellari-marking-backend}:${WBCZ_BUILD_SHA:?WBCZ_BUILD_SHA is required}
+    restart: unless-stopped
+    depends_on:
+      marking-postgres:
+        condition: service_healthy
+    environment:
+      WBCZ_ENV: ${WBCZ_ENV:?WBCZ_ENV is required}
+      WBCZ_DATABASE_URL: ${WBCZ_DATABASE_URL:?WBCZ_DATABASE_URL is required}
+      WBCZ_OWN_INN: ${WBCZ_OWN_INN:?WBCZ_OWN_INN is required}
+      WBCZ_SESSION_TTL_SECONDS: ${WBCZ_SESSION_TTL_SECONDS:-43200}
+      WBCZ_COOKIE_SECURE: ${WBCZ_COOKIE_SECURE:?WBCZ_COOKIE_SECURE is required}
+      WBCZ_SESSION_COOKIE_NAME: ${WBCZ_SESSION_COOKIE_NAME:-wbcz_session}
+      WBCZ_CSRF_COOKIE_NAME: ${WBCZ_CSRF_COOKIE_NAME:-wbcz_csrf}
+      WBCZ_DEBUG: ${WBCZ_DEBUG:-false}
+      WBCZ_TRUSTED_HOSTS: ${WBCZ_TRUSTED_HOSTS:?WBCZ_TRUSTED_HOSTS is required}
+      WBCZ_APP_VERSION: ${WBCZ_APP_VERSION:?WBCZ_APP_VERSION is required}
+      WBCZ_BUILD_SHA: ${WBCZ_BUILD_SHA:?WBCZ_BUILD_SHA is required}
+      WBCZ_HEALTHCHECK_HOST: ${WBCZ_HEALTHCHECK_HOST:-mark.sellari.ru}
+    ports:
+      - "127.0.0.1:${WBCZ_BACKEND_PORT:-8765}:8765"
+    networks:
+      - marking_internal
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  marking_pgdata:
+    name: sellari_marking_pgdata
+
+networks:
+  marking_internal:
+    name: sellari_marking_internal
+    internal: true
