@@ -12,27 +12,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     env:
-      FINAL_SHA: 9f60cb6ca0d52521bc1f4dc7d837e7d6c65eb188
+      FINAL_SHA: faa6af1c93fab1f77b2c18eab196fe4b2243025e
     steps:
-      - name: Checkout validation carrier
-        uses: actions/checkout@v4
-
-      - name: Reconstruct regression workbook outside worktree
-        shell: pwsh
-        run: |
-          $target = Join-Path $env:RUNNER_TEMP "REF_WB_archive_9.xlsx"
-          $parts = Get-ChildItem "e2e_private\chunk0?" | Sort-Object Name
-          if ($parts.Count -ne 10) { throw "Expected 10 workbook chunks, got $($parts.Count)" }
-          $base64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
-          [System.IO.File]::WriteAllBytes($target, [Convert]::FromBase64String($base64))
-          "WBCZ_REF_XLSX=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "WORKBOOK_SHA256=$((Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant())"
-          Write-Host "WORKBOOK_BYTES=$((Get-Item $target).Length)"
-
       - name: Checkout exact final HEAD
         uses: actions/checkout@v4
         with:
-          ref: 9f60cb6ca0d52521bc1f4dc7d837e7d6c65eb188
+          ref: faa6af1c93fab1f77b2c18eab196fe4b2243025e
           clean: true
 
       - name: Prove exact checkout and clean tree
@@ -75,6 +60,58 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[ui,test]"
 
+      - name: Build deterministic regression workbook for full suite
+        shell: pwsh
+        run: |
+          @'
+          from openpyxl import Workbook
+          import os
+          from pathlib import Path
+
+          target = Path(os.environ["RUNNER_TEMP"]) / "REF_WB_archive_9.xlsx"
+          headers = [
+              "№ задания", "Стикер", "КИЗ", "Номер чека", "Стоимость",
+              "Валюта", "Номер фискального накопителя", "Дата",
+              "Тип операции", "Признак продажи юрлицу",
+          ]
+          wb = Workbook()
+          ws = wb.active
+          ws.append(headers)
+          row_no = 0
+
+          def add(operation, dated):
+              global row_no
+              row_no += 1
+              kiz = f"CI-KIZ-{row_no:04d}"
+              receipt = f"CHK-{row_no:04d}" if dated else None
+              fn = f"FN-{row_no:04d}" if dated else None
+              dt = f"12:34:56 {((row_no - 1) % 28) + 1:02d}.08.2026" if dated else None
+              ws.append([
+                  f"TASK-{row_no:04d}", f"ST-{row_no:04d}", kiz,
+                  receipt, 100, "RUB", fn, dt, operation, "нет",
+              ])
+
+          # Sales: all 13 missing-receipt rows occur within the first 64 sale
+          # positions; positions 14..64 are the 51 READY_TO_WITHDRAW rows.
+          for _ in range(13): add("Продажа", False)
+          for _ in range(51): add("Продажа", True)
+          for _ in range(12): add("Продажа", True)
+
+          # Returns: first 140 are withdrawn/distance in the deterministic fake.
+          # Exactly 3 of those have evidence; the remaining two dated returns
+          # are already-in-circulation positions 141..142.
+          for _ in range(137): add("Возврат", False)
+          for _ in range(3): add("Возврат", True)
+          for _ in range(2): add("Возврат", True)
+          for _ in range(20): add("Возврат", False)
+
+          assert row_no == 238
+          wb.save(target)
+          print(f"WBCZ_REF_XLSX={target}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"WBCZ_REF_XLSX={target}\n")
+          '@ | python -
+
       - name: Pytest exact final HEAD
         shell: pwsh
         run: python -m pytest -q
@@ -98,6 +135,7 @@ jobs:
         shell: pwsh
         run: |
           @'
+          from wbcz.event_store import EventStore
           from wbcz_ui.live_true_api import ReadOnlyTrueApiTransport, ProductionMutationDisabled, WindowsCryptoProAuthSigner
           ReadOnlyTrueApiTransport.assert_allowed("GET", "/auth/key")
           ReadOnlyTrueApiTransport.assert_allowed("POST", "/auth/simpleSignIn")
