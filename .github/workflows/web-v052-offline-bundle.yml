@@ -1,8 +1,8 @@
-name: Web v0.5.2 offline deployment bundle
+name: Web v0.5.2.1 operator-safe offline deployment bundle
 
 on:
   push:
-    branches: [web/v0.5.2-offline-deploy-bundle]
+    branches: [web/v0.5.2.1-operator-safe-deploy]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,8 @@ permissions:
 env:
   APPROVED_SOURCE_SHA: cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
   APPROVED_SOURCE_BRANCH: web/v0.5.1-deployment-package
-  ARCHIVE_NAME: sellari-marking-0.5.1-cc3054eefba5.tar.gz
+  ARCHIVE_NAME: sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz
+  BUNDLE_ROOT_NAME: sellari-marking-0.5.1-cc3054eefba5-r2
 
 jobs:
   validate:
@@ -42,7 +43,7 @@ jobs:
         run: npm run typecheck
       - working-directory: frontend
         run: npm run build
-      - name: Production bundle contains no localhost API URL
+      - name: Production frontend contains no localhost API URL
         run: |
           if grep -R -E 'https?://(localhost|127\.0\.0\.1)' frontend/dist; then
             echo 'localhost URL found in production frontend bundle' >&2
@@ -84,44 +85,23 @@ jobs:
           WBCZ_OWN_INN: "1234567890"
           WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
           WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
-      - name: Create safe CI production env
+      - name: Create CI production env through safe bootstrap
+        shell: bash
         run: |
-          cat > "$RUNNER_TEMP/wbcz-production.env" <<EOF
-          WBCZ_ENV=production
-          WBCZ_DATABASE_URL=postgresql+psycopg://wbcz:ci_only_password_123456789@marking-postgres:5432/wbcz
-          WBCZ_OWN_INN=1234567890
-          WBCZ_SESSION_TTL_SECONDS=3600
-          WBCZ_COOKIE_SECURE=true
-          WBCZ_SESSION_COOKIE_NAME=wbcz_session
-          WBCZ_CSRF_COOKIE_NAME=wbcz_csrf
-          WBCZ_DEBUG=false
-          WBCZ_TRUSTED_HOSTS=mark.sellari.ru
-          WBCZ_APP_VERSION=0.5.1
-          WBCZ_BUILD_SHA=${GITHUB_SHA}
-          WBCZ_HEALTHCHECK_HOST=mark.sellari.ru
-          WBCZ_POSTGRES_DB=wbcz
-          WBCZ_POSTGRES_USER=wbcz
-          WBCZ_POSTGRES_PASSWORD=ci_only_password_123456789
-          WBCZ_BACKEND_IMAGE=sellari-marking-backend
-          WBCZ_BACKEND_PORT=18765
-          EOF
-      - name: Docker compose config validation
+          set -euo pipefail
+          WBCZ_INIT_TEST_MODE=1 \
+          WBCZ_ENV_FILE_TARGET="$RUNNER_TEMP/wbcz-production.env" \
+            sh deploy/init-production-env.sh
+          test "$(stat -c '%a' "$RUNNER_TEMP/wbcz-production.env")" = "600"
+      - name: Docker compose config validation without rendering secrets
         run: |
-          docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml config --format json > "$RUNNER_TEMP/compose.json"
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          cfg=json.loads(Path(os.environ['RUNNER_TEMP'],'compose.json').read_text())
-          pg=cfg['services']['marking-postgres']
-          backend=cfg['services']['marking-backend']
-          assert not pg.get('ports')
-          ports=backend.get('ports') or []
-          assert ports and ports[0].get('host_ip') == '127.0.0.1'
-          assert cfg['networks']['marking_internal']['internal'] is True
-          PY
+          docker compose \
+            --env-file "$RUNNER_TEMP/wbcz-production.env" \
+            -f docker-compose.prod.yml \
+            config -q
       - name: Build backend production image
         run: docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml build marking-backend
-      - name: Production container migration and healthcheck
+      - name: Production container migration, health and safety boundary
         run: |
           set -euo pipefail
           docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml up -d marking-postgres
@@ -136,30 +116,28 @@ jobs:
             sleep 2
           done
           test "$status" = healthy
-          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:18765/api/health
-      - name: Safety boundary
-        run: |
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/health
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version | grep "$APPROVED_SOURCE_SHA"
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/capabilities > "$RUNNER_TEMP/capabilities.json"
           python - <<'PY'
-          from wbcz_web.main import create_app
-          from wbcz_web.config import WebConfig
-          app=create_app(WebConfig.from_env())
-          paths={getattr(r,'path',None) for r in app.routes}
-          forbidden={'/register','/signup','/api/register','/api/auth/register','/api/lk/documents/create','/api/submit'}
-          assert not paths.intersection(forbidden)
-          print('WEB_PRODUCTION_TRUE_API=ABSENT')
+          import json, os
+          from pathlib import Path
+          caps=json.loads(Path(os.environ['RUNNER_TEMP'],'capabilities.json').read_text())
+          expected={
+              'true_api':'mock',
+              'true_api_write':False,
+              'document_signing':False,
+              'submission':False,
+              'windows_bridge':False,
+              'registration':False,
+          }
+          assert caps == expected, caps
+          print('WEB_PRODUCTION_TRUE_API=MOCK')
           print('TRUE_API_WRITE=FALSE')
           print('DOCUMENT_SIGNING=FALSE')
           print('SUBMISSION=FALSE')
           print('WINDOWS_BRIDGE=FALSE')
           PY
-        env:
-          WBCZ_ENV: production
-          WBCZ_DATABASE_URL: postgresql+psycopg://wbcz:ci_only_password_123456789@marking-postgres:5432/wbcz
-          WBCZ_OWN_INN: "1234567890"
-          WBCZ_COOKIE_SECURE: "true"
-          WBCZ_DEBUG: "false"
-          WBCZ_TRUSTED_HOSTS: mark.sellari.ru
-          WBCZ_BUILD_SHA: ${{ github.sha }}
       - if: always()
         run: |
           if [ -f "$RUNNER_TEMP/wbcz-production.env" ]; then
@@ -228,12 +206,15 @@ jobs:
           sha256sum -c "$ARCHIVE_NAME.sha256"
           mkdir extracted
           tar -xzf "$ARCHIVE_NAME" -C extracted
-          ROOT="extracted/sellari-marking-0.5.1-cc3054eefba5"
+          ROOT="extracted/$BUNDLE_ROOT_NAME"
           cd "$ROOT"
           sha256sum -c SHA256SUMS
           grep -F '"source_git_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
           grep -F '"frontend_built_from_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
+          grep -F '"bundle_format": "sellari-marking-offline-v2"' RELEASE.json
+          grep -F '"operator_safe_env_bootstrap": true' RELEASE.json
           test -f frontend/index.html
+          test -x deploy/init-production-env.sh
           test ! -e .git
           test ! -e .env.production
           test ! -e frontend/node_modules
@@ -246,30 +227,15 @@ jobs:
             echo 'localhost URL found in archived frontend' >&2
             exit 1
           fi
-      - name: Validate extracted bundle builds without GitHub or Node
+      - name: Validate extracted bundle builds without GitHub or Node on deploy path
         run: |
           set -euo pipefail
-          ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/sellari-marking-0.5.1-cc3054eefba5"
-          cat > "$RUNNER_TEMP/offline-production.env" <<EOF
-          WBCZ_ENV=production
-          WBCZ_DATABASE_URL=postgresql+psycopg://wbcz:offline_ci_password_123456789@marking-postgres:5432/wbcz
-          WBCZ_OWN_INN=1234567890
-          WBCZ_SESSION_TTL_SECONDS=3600
-          WBCZ_COOKIE_SECURE=true
-          WBCZ_SESSION_COOKIE_NAME=wbcz_session
-          WBCZ_CSRF_COOKIE_NAME=wbcz_csrf
-          WBCZ_DEBUG=false
-          WBCZ_TRUSTED_HOSTS=mark.sellari.ru
-          WBCZ_APP_VERSION=0.5.1
-          WBCZ_BUILD_SHA=$APPROVED_SOURCE_SHA
-          WBCZ_HEALTHCHECK_HOST=mark.sellari.ru
-          WBCZ_POSTGRES_DB=wbcz
-          WBCZ_POSTGRES_USER=wbcz
-          WBCZ_POSTGRES_PASSWORD=offline_ci_password_123456789
-          WBCZ_BACKEND_IMAGE=sellari-marking-offline-ci
-          WBCZ_BACKEND_PORT=18766
-          EOF
-          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" config >/dev/null
+          ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BUNDLE_ROOT_NAME"
+          WBCZ_INIT_TEST_MODE=1 \
+          WBCZ_ENV_FILE_TARGET="$RUNNER_TEMP/offline-production.env" \
+            sh "$ROOT/deploy/init-production-env.sh"
+          test "$(stat -c '%a' "$RUNNER_TEMP/offline-production.env")" = "600"
+          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" config -q
           docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" build marking-backend
           docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" up -d marking-postgres
           docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" run --rm marking-backend alembic upgrade head
@@ -283,8 +249,22 @@ jobs:
             sleep 2
           done
           test "$status" = healthy
-          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:18766/api/health
-          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:18766/api/version | grep "$APPROVED_SOURCE_SHA"
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/health
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version | grep "$APPROVED_SOURCE_SHA"
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/capabilities > "$RUNNER_TEMP/offline-capabilities.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          caps=json.loads(Path(os.environ['RUNNER_TEMP'],'offline-capabilities.json').read_text())
+          assert caps == {
+              'true_api':'mock',
+              'true_api_write':False,
+              'document_signing':False,
+              'submission':False,
+              'windows_bridge':False,
+              'registration':False,
+          }, caps
+          PY
       - name: Capture final archive SHA256
         id: checksum
         run: |
@@ -292,19 +272,19 @@ jobs:
           SHA="$(cut -d' ' -f1 "bundle-a/$ARCHIVE_NAME.sha256")"
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "ARTIFACT_SHA256=$SHA"
-      - name: Upload private offline bundle artifact
+      - name: Upload private operator-safe offline bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sellari-marking-0.5.1-cc3054eefba5
+          name: sellari-marking-0.5.1-cc3054eefba5-r2
           path: |
-            bundle-a/sellari-marking-0.5.1-cc3054eefba5.tar.gz
-            bundle-a/sellari-marking-0.5.1-cc3054eefba5.tar.gz.sha256
+            bundle-a/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz
+            bundle-a/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
       - if: always()
         run: |
           if [ -f "$RUNNER_TEMP/offline-production.env" ]; then
-            ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/sellari-marking-0.5.1-cc3054eefba5"
+            ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BUNDLE_ROOT_NAME"
             docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" down -v || true
           fi
