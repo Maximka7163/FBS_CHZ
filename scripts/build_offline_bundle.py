@@ -76,6 +76,15 @@ def _copy_file(source_root: Path, bundle_root: Path, relative: str) -> None:
     shutil.copyfile(source, target)
 
 
+def _copy_packaging_file(packaging_root: Path, bundle_root: Path, relative: str) -> None:
+    source = packaging_root / relative
+    if not source.is_file():
+        raise FileNotFoundError(f"required packaging file missing: {relative}")
+    target = bundle_root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+
+
 def _copy_tree(source_root: Path, bundle_root: Path, relative: str) -> None:
     source = source_root / relative
     if not source.is_dir():
@@ -237,13 +246,9 @@ def build_bundle(
         for relative in DOC_FILES:
             _copy_file(source_root, bundle_root, relative)
         _copy_file(source_root, bundle_root, "deploy/nginx/mark.sellari.ru.conf.example")
+        _copy_packaging_file(packaging_root, bundle_root, "deploy/nginx/mark.sellari.ru.http-staging.conf.example")
         _copy_frontend_dist(source_root, bundle_root)
-        offline_runbook = packaging_root / "docs" / "WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md"
-        if not offline_runbook.is_file():
-            raise FileNotFoundError("v0.5.2 offline deploy runbook missing")
-        target_runbook = bundle_root / "docs" / offline_runbook.name
-        target_runbook.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(offline_runbook, target_runbook)
+        _copy_packaging_file(packaging_root, bundle_root, "docs/WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md")
         _write_release_metadata(
             bundle_root,
             source_sha=source_sha,
