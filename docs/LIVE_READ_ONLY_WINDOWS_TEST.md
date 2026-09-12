@@ -1,25 +1,26 @@
-# Первый LIVE READ-ONLY тест на Windows
+# v0.4 LIVE READ-ONLY: первый тест на Windows
 
-Эта инструкция относится только к v0.4. В этой версии приложение умеет аутентифицироваться в production True API с помощью УКЭП и читать состояния КИЗ. Создание, подписание и отправка документов в ГИС МТ отсутствуют.
+Эта инструкция относится только к ветке `ui/v0.3-first-real-ui` и v0.4 LIVE READ-ONLY. Она специально разделяет проверку ГОСТ TLS, авторизацию и чтение одного КИЗ на три независимых действия.
 
-## 1. Что установить
+В v0.4 отсутствуют production document signing, `LK_RECEIPT`, `LP_RETURN`, `/lk/documents/create`, cancellation и retry submission. Любая production route вне read-only allowlist блокируется локально до network I/O.
+
+## Что должно быть установлено
 
 Нужно:
 
 - Windows 10/11;
-- CryptoPro CSP с действующей лицензией;
-- сертификат вашей УКЭП, установленный вместе с приватным ключом в хранилище текущего пользователя Windows (`CurrentUser\\My`);
+- КриптоПро CSP 5.0 с компонентом `stunnel_msspi.exe` из установленного комплекта КриптоПро CSP;
+- `cryptcp.exe` из КриптоПро CSP;
+- действующий сертификат УКЭП в `CurrentUser\\My`, связанный с приватным ключом КриптоПро;
 - Python 3.12;
-- Node.js 20 или 22;
+- Node.js 20/22, пока frontend запускается через Vite;
 - исходники ветки `ui/v0.3-first-real-ui`.
 
-Браузерный CryptoPro-плагин для этой реализации не нужен. Подпись authentication challenge выполняется backend-процессом через сертификат в Windows certificate store и криптопровайдер CryptoPro.
+Не используйте произвольный OpenSSL/stunnel вместо `stunnel_msspi.exe` КриптоПро. Не отключайте проверку сертификата сервера. Не экспортируйте приватный ключ и не передавайте PIN приложению, в GitHub, ChatGPT или облако.
 
-Не экспортируйте приватный ключ. Не загружайте контейнер ключа, PIN, пароль или токены в ChatGPT, GitHub, облако или файлы проекта.
+## Подготовка сертификата
 
-## 2. Проверить сертификат
-
-Откройте обычный PowerShell от своего пользователя Windows и выполните:
+Откройте обычный PowerShell от своего пользователя Windows:
 
 ```powershell
 Get-ChildItem Cert:\CurrentUser\My |
@@ -27,19 +28,22 @@ Get-ChildItem Cert:\CurrentUser\My |
   Select-Object Subject, Thumbprint, NotAfter, HasPrivateKey
 ```
 
-Найдите нужный сертификат УКЭП вашей организации.
+Найдите нужную УКЭП. Ожидается `HasPrivateKey = True`, срок действия не истёк, Subject относится к нужной организации/ИП. Скопируйте только Thumbprint.
 
-Ожидается:
+Приложение дополнительно само проверит перед авторизацией:
 
+- сертификат найден по точному Thumbprint;
 - `HasPrivateKey = True`;
-- срок `NotAfter` ещё не истёк;
-- `Subject` соответствует нужной организации/ИП.
+- срок действия сертификата;
+- GOST public-key OID;
+- привязку закрытого ключа к провайдеру CryptoPro;
+- наличие `cryptcp.exe`.
 
-Скопируйте только `Thumbprint`. Приватный ключ копировать или экспортировать не нужно.
+PIN и содержимое приватного ключа при этой диагностике не читаются.
 
-## 3. Установить Python-зависимости
+## Установка приложения
 
-В корне проекта откройте PowerShell:
+В корне проекта:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -47,224 +51,209 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[ui,test]"
 ```
 
-## 4. Установить frontend-зависимости
-
-Во втором PowerShell:
+Frontend:
 
 ```powershell
 cd frontend
 npm install
 npm run typecheck
 npm run build
-```
-
-После проверки вернитесь в режим разработки:
-
-```powershell
 npm run dev
 ```
 
-Ожидаемый адрес frontend: `http://127.0.0.1:5173`.
+Ожидаемый frontend: `http://127.0.0.1:5173`.
 
-## 5. Включить LIVE READ-ONLY
+## Включение LIVE READ-ONLY
 
-В PowerShell, из которого будет запущен backend, задайте переменные. Подставьте свой ИНН и Thumbprint:
+Откройте отдельный PowerShell в корне проекта. Подставьте свой ИНН и Thumbprint:
 
 ```powershell
 $env:WBCZ_TRUE_API_MODE="live-read-only"
 $env:WBCZ_PARTICIPANT_INN="ВАШ_ИНН"
-$env:WBCZ_UKEP_THUMBPRINT="THUMBPRINT_СЕРТИФИКАТА"
+$env:WBCZ_UKEP_THUMBPRINT="ВАШ_THUMBPRINT"
 $env:WBCZ_LIVE_AUDIT_LOG="$PWD\live_true_api.jsonl"
 ```
 
-Не задавайте другой `WBCZ_TRUE_API_BASE_URL`. v0.4 разрешает только официальный production base URL True API.
+Обычно пути к CryptoPro определяются автоматически. Если нет, задайте их явно, используя именно файлы установленного КриптоПро CSP:
 
-Настройка МОД (`FIAS_ID`/`KPP`) для этой проверки не нужна: v0.4 не создаёт документы.
+```powershell
+$env:WBCZ_CRYPTOPRO_STUNNEL="C:\Program Files\Crypto Pro\CSP\stunnel_msspi.exe"
+$env:WBCZ_CRYPTOPRO_CRYPTCP="C:\Program Files\Crypto Pro\CSP\cryptcp.exe"
+```
 
-## 6. Запустить backend
+Не меняйте `WBCZ_TRUE_API_BASE_URL`: v0.4 разрешает только production `https://markirovka.crpt.ru/api/v3/true-api`.
 
-В том же PowerShell:
+Запустите backend:
 
 ```powershell
 .\.venv\Scripts\python.exe -m wbcz_ui --db .\wbcz-live-readonly.sqlite
 ```
 
-Ожидается запуск на `http://127.0.0.1:8765`.
-
-В отдельном PowerShell можно проверить режим:
+Перед тестом проверьте:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/api/status | Format-List
 ```
 
-Ожидаемые признаки:
+Ожидается минимум:
 
 ```text
-mode              : live-read-only
-true_api          : True
-auth_signing      : True
-document_signing  : False
-submission        : False
-product_group     : lp
+mode             : live-read-only
+true_api         : True
+auth_signing     : True
+document_signing : False
+submission       : False
+product_group    : lp
 ```
 
-Если `document_signing` или `submission` неожиданно `True`, тест прекратить.
+Если `document_signing` или `submission` вдруг `True`, остановите тест.
 
-## 7. Открыть приложение
+---
 
-После `npm run dev` откройте Edge/Chrome:
+## Шаг 1 — TLS preflight
+
+1. Откройте Edge/Chrome: `http://127.0.0.1:5173`.
+2. Вверху должно быть: **«Реальный контроль ЧЗ · отправка отключена»**.
+3. Нажмите **«Проверить подключение»**.
+
+На этом шаге приложение имеет право выполнить только:
 
 ```text
-http://127.0.0.1:5173
+GET /api/v3/true-api/auth/key
 ```
 
-В верхней части интерфейса должна быть компактная метка:
+Что происходит технически:
 
-**«Реальный контроль ЧЗ · отправка отключена»**
+- Python открывает только локальный HTTP-сокет `127.0.0.1`;
+- production TLS устанавливает `stunnel_msspi.exe` КриптоПро CSP через MSSPI/SSPI;
+- production leg принудительно ограничен TLS 1.2 и GOST-only cipher list;
+- `verify=2`, `checkHost=markirovka.crpt.ru` и SNI включены;
+- после каждого production-запроса приложение требует явный MSSPI negotiated-session marker `SECPKG_ATTR_CIPHER_INFO: CipherSuite: c100/c101/c102`;
+- строка конфигурации `ciphers = GOST...` сама по себе доказательством handshake не считается;
+- никакой signer на этом шаге не вызывается.
 
-Рабочей кнопки «Отправить», «Выполнить» или подписи production-документа быть не должно.
+Ожидаемый UI:
 
-## 8. Загрузить WB XLSX
+**«CryptoPro TLS доступен · True API доступен · УКЭП готова · challenge получен»**
 
-Нажмите область загрузки или перетащите `REF_WB_archive_9.xlsx`.
+Системного окна подписи/PIN на этом шаге быть не должно. Если оно неожиданно появилось — остановитесь и не переходите дальше.
 
-Ожидается:
+Если серверный сертификат не прошёл проверку, negotiated GOST CipherSuite нельзя однозначно подтвердить по MSSPI diagnostics или `stunnel_msspi.exe` недоступен, preflight завершается `GostTlsUnavailable`/понятной ошибкой и не делает fallback на обычный HTTPS.
 
-- 238 событий;
-- 238 уникальных КИЗ;
-- 76 продаж;
-- 162 возврата;
-- 0 rejected rows.
-
-Загрузка XLSX сама по себе не обращается к True API и ничего не подписывает.
-
-## 9. Первый LIVE-тест — только один заранее выбранный КИЗ
-
-1. Возьмите один КИЗ, состояние которого вы можете вручную проверить в Честном знаке/MarkZnak.
-2. В поле поиска вставьте этот полный КИЗ.
-3. Отметьте найденную строку чекбоксом.
-4. В селекторе объёма проверки выберите **«1 КИЗ»**.
-5. Убедитесь, что в интерфейсе всё ещё написано **«Реальный контроль ЧЗ · отправка отключена»**.
-6. Нажмите **«Проверить КИЗ»**.
-
-До этого нажатия production True API не вызывается.
-
-## 10. Что происходит с УКЭП
-
-При первом live-запросе backend выполняет только authentication flow:
-
-1. `GET /auth/key`;
-2. получает `uuid` и challenge `data`;
-3. передаёт только challenge в локальный Windows/CryptoPro signer;
-4. отправляет подпись challenge в `POST /auth/simpleSignIn`;
-5. получает временный production token;
-6. выполняет `POST /api/v3/true-api/cises/info?pg=lp` для выбранного КИЗ.
-
-УКЭП **не подписывает документ вывода/возврата**. В v0.4 такого callable пути нет.
-
-CryptoPro/Windows может показать системное окно доступа к контейнеру или ввода PIN. В зависимости от настроек контейнера окно может и не появиться, если доступ уже разрешён/закэширован.
-
-Если окно появляется:
-
-- ожидайте выбор/использование вашего сертификата и доступ к его приватному ключу;
-- PIN вводите только в системное/CryptoPro окно;
-- приложение не просит PIN в браузере или командной строке;
-- не экспортируйте приватный ключ.
-
-Системное окно может не показывать человекочитаемое назначение challenge. Гарантия назначения обеспечивается архитектурой v0.4: signer имеет только `sign_auth_challenge`, а production transport разрешает только auth и `cises/info`.
-
-## 11. Проверить результат одного КИЗ
-
-После успешного запроса строка должна получить backend-рекомендацию, например:
-
-- «Нужно вывести»;
-- «Нужно вернуть»;
-- «Уже обработано»;
-- «Требует проверки»;
-- «Ошибка».
-
-Не интерпретируйте `MANUAL_REVIEW` как ошибку программы: это штатный fail-safe результат, например при отсутствии чека, несовпадении владельца или неизвестном состоянии.
-
-## 12. Проверить audit
-
-В PowerShell:
-
-```powershell
-Get-Content .\live_true_api.jsonl -Tail 20
-```
-
-Для первого запроса ожидаются metadata-записи с endpoint:
+Для диагностики успешного TLS preflight ожидается именно negotiated-session запись вида:
 
 ```text
-/auth/key
-/auth/simpleSignIn
-/cises/info
+SECPKG_ATTR_CIPHER_INFO: CipherSuite: c100, ...
 ```
 
-и полями вроде:
+Также допускаются документированные для используемого CryptoPro TLS 1.2 `c101` и `c102`. Любое простое упоминание слова `GOST`, включая строку настройки cipher list, намеренно игнорируется как proof.
 
-- `timestamp`;
-- `mode: LIVE_READ_ONLY`;
-- `cis_count`;
-- `http_status`;
-- `request_id`, если сервер его вернул.
+## Шаг 2 — авторизация
 
-В audit не должны попадать token, полная auth signature, private key или PIN.
+После успешного preflight нажмите **«Авторизоваться»**.
 
-## 13. Сравнить с Честным знаком / MarkZnak
+Приложение выполняет только:
 
-Для того же КИЗ вручную откройте его в привычном интерфейсе Честного знака/MarkZnak и сравните минимум:
+```text
+GET  /api/v3/true-api/auth/key
+local CryptoPro cryptcp attached CMS signature of challenge
+POST /api/v3/true-api/auth/simpleSignIn
+```
 
-- текущий статус: в обороте / выбыл;
-- если выбыл — причина выбытия;
+В `/auth/simpleSignIn` отправляется `unitedToken=true`. После ответа сохраняются только временные runtime token/expireDate; token и подпись не пишутся в audit.
+
+`cryptcp.exe` выбирает сертификат по вашему Thumbprint в `CurrentUser\My`, создаёт присоединённую DER/strict CMS-подпись authentication challenge и обращается к закрытому ключу через CryptoPro provider. Приватный ключ не экспортируется. В командной строке приложения PIN не передаётся.
+
+Если контейнер требует PIN, его вводите только в системном окне CryptoPro. Не вводите PIN в браузер, PowerShell-команду или файл конфигурации.
+
+Ожидаемый UI после успешного ответа:
+
+**«Авторизация успешна. Отправка документов отключена.»**
+
+После авторизации UI автоматически переводит безопасный первый сценарий в:
+
+```text
+Режим: Контроль
+Scope: 1 КИЗ
+```
+
+Важно: успешная авторизация сама по себе **не вызывает `/cises/info`**, не создаёт preview и не создаёт production documents.
+
+## Шаг 3 — CONTROL одного КИЗ
+
+Только после успешной авторизации:
+
+1. Загрузите `REF_WB_archive_9.xlsx`, если файл ещё не открыт.
+2. Возьмите один заранее выбранный КИЗ, который сможете вручную проверить в Честном знаке/MarkZnak.
+3. Вставьте его полный КИЗ в поиск так, чтобы в таблице осталась нужная строка.
+4. Убедитесь: режим **«Контроль»**, scope **«1 КИЗ»**. В режиме «Контроль» чекбоксы операций специально скрыты.
+5. Нажмите **«Проверить КИЗ»**.
+
+Теперь разрешён ровно один production read:
+
+```text
+POST /api/v3/true-api/cises/info?pg=lp
+```
+
+После ответа над таблицей появится **«Диагностика одного КИЗ»**. Она показывает только нормализованные backend-данные:
+
+```text
+status
+statusEx
+withdrawReason
+ownerInn + совпадает/не совпадает
+productGroup
+backend decision
+reason code
+```
+
+Token, auth signature и raw True API response не выводятся во frontend.
+
+## Шаг 4 — сравнение с Честным знаком / MarkZnak
+
+Для того же КИЗ вручную откройте карточку/контроль КИЗ в Честном знаке или MarkZnak и сравните:
+
+- статус: в обороте / выбыл;
+- особое состояние, если отображается;
+- причину выбытия;
 - владельца;
-- контекст товарной группы одежды (`lp`).
+- товарную группу;
+- исходное событие WB и backend decision/reason code.
 
-Затем сравните с рекомендацией приложения и исходной операцией WB.
+Если есть расхождение — не запускайте массовую проверку. Сохраните только безопасный `live_true_api.jsonl` и остановите backend.
 
-Если состояние расходится, не переходите к массовой проверке. Сохраните безопасный audit metadata и остановите тест.
+Только после совпадения одного КИЗ можно отдельно проверить небольшой выбранный набор. И только после этого — весь файл.
 
-## 14. Проверить небольшой набор
+## Audit
 
-Только после успешного теста одного КИЗ:
-
-1. выберите несколько строк чекбоксами;
-2. в селекторе объёма выберите **«Выбранные»**;
-3. нажмите **«Проверить КИЗ»**;
-4. проверьте несколько результатов вручную.
-
-## 15. Проверить весь файл
-
-Только после успешного малого набора:
-
-1. в селекторе выберите **«Весь файл»**;
-2. нажмите **«Проверить КИЗ»**;
-3. дождитесь завершения;
-4. при необходимости выберите строки и нажмите **«Проверить состав»**.
-
-Preview — только расчёт состава по сохранённым backend-решениям. Он не создаёт и не отправляет документы.
-
-## 16. Как остановить LIVE режим
-
-Остановите backend `Ctrl+C`. Затем в новом PowerShell не задавайте LIVE-переменные либо выполните:
+Проверить metadata audit:
 
 ```powershell
-Remove-Item Env:WBCZ_TRUE_API_MODE -ErrorAction SilentlyContinue
-Remove-Item Env:WBCZ_PARTICIPANT_INN -ErrorAction SilentlyContinue
-Remove-Item Env:WBCZ_UKEP_THUMBPRINT -ErrorAction SilentlyContinue
-Remove-Item Env:WBCZ_LIVE_AUDIT_LOG -ErrorAction SilentlyContinue
+Get-Content .\live_true_api.jsonl -Tail 30
 ```
 
-После обычного запуска `/api/status` должен показывать `offline-dry-run`.
+Допустимые поля:
 
-## Safety guarantee v0.4
+- timestamp;
+- `mode = LIVE_READ_ONLY`;
+- method/endpoint;
+- число КИЗ;
+- HTTP status;
+- request/correlation ID, если сервер его вернул;
+- безопасная error metadata.
 
-Подключение УКЭП само по себе ничего не выводит и не возвращает в оборот.
+Не должны логироваться token, auth signature, private key, PIN или секретные данные сертификата.
 
-В v0.4 физически доступны только:
+## Production safety boundary v0.4
 
-- `GET /api/v3/true-api/auth/key`;
-- `POST /api/v3/true-api/auth/simpleSignIn`;
-- `POST /api/v3/true-api/cises/info?pg=lp`.
+Через production transport разрешены только:
 
-Любая другая production route блокируется локально исключением `ProductionMutationDisabled` до HTTP-запроса. Production document signing, `LK_RECEIPT`, `LP_RETURN`, cancellation и submission retry в v0.4 отсутствуют.
+```text
+GET  /api/v3/true-api/auth/key
+POST /api/v3/true-api/auth/simpleSignIn
+POST /api/v3/true-api/cises/info?pg=lp
+```
+
+Любой другой endpoint, включая `/lk/documents/create`, `LK_RECEIPT`, `LP_RETURN`, cancellation и retry, вызывает `ProductionMutationDisabled` **до запуска network I/O**.
+
+Подключение УКЭП само по себе ничего не выводит и не возвращает в оборот. УКЭП v0.4 используется только для authentication challenge.
