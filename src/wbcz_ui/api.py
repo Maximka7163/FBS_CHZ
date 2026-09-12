@@ -5,11 +5,20 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .application import UiApplication
+from .application import OperationMode, UiApplication
 
 
 class PreviewRequest(BaseModel):
-    event_ids: list[str]
+    import_id: str | None = None
+    mode: OperationMode = OperationMode.AUTO
+    selected_event_ids: list[str] | None = None
+    # Backward-compatible input for the existing UI/API regression tests.
+    event_ids: list[str] | None = None
+
+    def selected(self) -> list[str]:
+        if self.selected_event_ids is not None:
+            return self.selected_event_ids
+        return self.event_ids or []
 
 
 def create_app(db_path: str | Path = "wbcz-ui.sqlite") -> FastAPI:
@@ -55,6 +64,11 @@ def create_app(db_path: str | Path = "wbcz-ui.sqlite") -> FastAPI:
 
     @app.post("/api/operation-preview")
     def preview(request: PreviewRequest):
-        return service.operation_preview(request.event_ids)
+        try:
+            return service.operation_preview(
+                request.selected(), mode=request.mode, import_id=request.import_id
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     return app
