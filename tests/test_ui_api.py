@@ -8,9 +8,13 @@ REF = Path(os.environ.get('WBCZ_REF_XLSX', '/mnt/data/REF_WB_archive_9.xlsx'))
 
 def test_status_and_history_api(tmp_path):
     client = TestClient(create_app(tmp_path / 'api.sqlite'))
-    assert client.get('/api/status').json() == {
-        'mode': 'offline-dry-run', 'true_api': False, 'signing': False, 'submission': False
-    }
+    status = client.get('/api/status').json()
+    assert status['mode'] == 'offline-dry-run'
+    assert status['true_api'] is False
+    assert status['auth_signing'] is False
+    assert status['document_signing'] is False
+    assert status['submission'] is False
+    assert status['product_group'] == 'lp'
     with REF.open('rb') as f:
         response = client.post('/api/imports', files={'file': ('REF_WB_archive_9.xlsx', f, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
     assert response.status_code == 200
@@ -40,5 +44,5 @@ def test_events_check_detail_preview_api(tmp_path):
     assert detail['kiz'] == after[0]['kiz']
     assert detail['history']
     preview = client.post('/api/operation-preview', json={'event_ids': [event['event_id'] for event in after]}).json()
-    assert len(preview['included']) == 204
-    assert len(preview['excluded']) == 34
+    assert len(preview['included']) == 54
+    assert len(preview['excluded']) == 184
