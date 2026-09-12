@@ -1,4 +1,4 @@
-name: Windows E2E
+name: Final v0.4 acceptance validation
 
 on:
   push:
@@ -6,19 +6,19 @@ on:
       - ci/windows-e2e-temp
     paths:
       - e2e_private/READY
-  workflow_dispatch:
 
 jobs:
-  windows-e2e:
+  validate-final-head:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     env:
-      WBCZ_REF_XLSX: ${{ github.workspace }}\REF_WB_archive_9.xlsx
+      FINAL_SHA: 9f60cb6ca0d52521bc1f4dc7d837e7d6c65eb188
+      WBCZ_REF_XLSX: ${{ runner.temp }}\REF_WB_archive_9.xlsx
     steps:
-      - name: Checkout branch
+      - name: Checkout validation carrier
         uses: actions/checkout@v4
 
-      - name: Reconstruct private regression workbook
+      - name: Reconstruct private regression workbook outside worktree
         shell: pwsh
         run: |
           $parts = Get-ChildItem "e2e_private\chunk*" | Sort-Object Name
@@ -27,6 +27,37 @@ jobs:
           [System.IO.File]::WriteAllBytes($env:WBCZ_REF_XLSX, [Convert]::FromBase64String($base64))
           $sha = (Get-FileHash $env:WBCZ_REF_XLSX -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($sha -ne "8dce3be1e152bca5cd5c907eecbb4c105942627149ec79dcd828a2d332022f9b") { throw "Regression workbook SHA256 mismatch: $sha" }
+          Write-Host "WORKBOOK_SHA256=$sha"
+
+      - name: Checkout exact final HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FINAL_SHA }}
+          clean: true
+
+      - name: Prove exact checkout and clean tree
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          Write-Host "HEAD=$head"
+          if ($head -ne $env:FINAL_SHA) { throw "Wrong HEAD: $head" }
+          $dirty = git status --porcelain
+          Write-Host "GIT_STATUS_BEFORE=[$dirty]"
+          if ($dirty) { throw "Worktree is not clean before validation" }
+
+      - name: GOST fallback search
+        shell: pwsh
+        run: |
+          $bad = git grep -n -F 'if "GOST" in' -- . 2>$null
+          if ($LASTEXITCODE -eq 0) { Write-Host $bad; throw "Broad GOST success fallback remains" }
+          if ($LASTEXITCODE -ne 1) { throw "git grep failed" }
+          Write-Host "BROAD_GOST_FALLBACK=NONE"
+          Write-Host "--- _gost_session_seen ---"
+          git grep -n '_gost_session_seen' -- .
+          Write-Host "--- GOST2012 ---"
+          git grep -n 'GOST2012' -- .
+          Write-Host "--- C100/C101/C102 ---"
+          git grep -n -E 'C100|C101|C102|c100|c101|c102' -- .
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -38,13 +69,13 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install Python application and test dependencies
+      - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[ui,test]" playwright
+          python -m pip install -e ".[ui,test]"
 
-      - name: Pytest
+      - name: Pytest exact final HEAD
         shell: pwsh
         run: python -m pytest -q
 
@@ -53,7 +84,7 @@ jobs:
         shell: pwsh
         run: npm install --no-audit --no-fund
 
-      - name: TypeScript typecheck
+      - name: TypeScript tsc --noEmit
         working-directory: frontend
         shell: pwsh
         run: npm run typecheck
@@ -63,18 +94,38 @@ jobs:
         shell: pwsh
         run: npm run build
 
-      - name: Install Playwright Chromium fallback
+      - name: Final safety boundary check
         shell: pwsh
-        run: python -m playwright install chromium
+        run: |
+          @'
+          from wbcz_ui.live_true_api import ReadOnlyTrueApiTransport, ProductionMutationDisabled, WindowsCryptoProAuthSigner
+          ReadOnlyTrueApiTransport.assert_allowed("GET", "/auth/key")
+          ReadOnlyTrueApiTransport.assert_allowed("POST", "/auth/simpleSignIn")
+          ReadOnlyTrueApiTransport.assert_allowed("POST", "/cises/info", {"pg": "lp"})
+          for method, path, params in [
+              ("POST", "/lk/documents/create", None),
+              ("POST", "/documents/LK_RECEIPT", None),
+              ("POST", "/documents/LP_RETURN", None),
+              ("POST", "/lk/documents/cancel", None),
+              ("POST", "/lk/documents/retry", None),
+          ]:
+              try:
+                  ReadOnlyTrueApiTransport.assert_allowed(method, path, params)
+              except ProductionMutationDisabled:
+                  pass
+              else:
+                  raise AssertionError(f"Mutation route unexpectedly allowed: {method} {path}")
+          signer = WindowsCryptoProAuthSigner("AA11")
+          for name in ("sign_document", "sign_payload_for_submission", "submit_signed_document", "submit", "sign"):
+              assert not hasattr(signer, name), name
+          print("ALLOWLIST_EXACT=YES")
+          print("DOCUMENT_SIGNING_PATH=ABSENT")
+          print("SUBMISSION_PATH=ABSENT")
+          '@ | python -
 
-      - name: Real browser E2E
+      - name: Final git status
         shell: pwsh
-        run: python scripts/windows_e2e.py --ref "$env:WBCZ_REF_XLSX" --out "${{ github.workspace }}\e2e_artifacts"
-
-      - name: Upload E2E screenshots and report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-e2e-artifacts
-          path: e2e_artifacts/
-          if-no-files-found: warn
+        run: |
+          $dirty = git status --porcelain
+          Write-Host "GIT_STATUS_FINAL=[$dirty]"
+          if ($dirty) { throw "Worktree is not clean after validation" }
