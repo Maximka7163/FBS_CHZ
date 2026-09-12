@@ -4,18 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wbcz-core"
-version = "0.4.0"
-description = "WB FBS marking control core with live read-only True API"
+version = "0.5.0"
+description = "WB FBS marking control core plus isolated web dry-run service"
 requires-python = ">=3.12"
 dependencies = ["openpyxl>=3.1.5,<4"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10", "httpx>=0.27"]
 ui = ["fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.9"]
+web = ["fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.9", "sqlalchemy>=2.0.36,<3", "psycopg[binary]>=3.2,<4", "alembic>=1.14,<2", "argon2-cffi>=23.1,<26"]
 
 [project.scripts]
 wbcz = "wbcz.cli:main"
 wbcz-ui = "wbcz_ui.__main__:main"
+wbcz-web = "wbcz_web.__main__:main"
+wbcz-web-admin = "wbcz_web.admin:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
