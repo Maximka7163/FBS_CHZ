@@ -242,13 +242,18 @@ class FakeTransport:
 
 def test_cises_info_safe_batching():
     transport = FakeTransport()
+    auth = FakeAuth()
     client = LiveTrueApiClient(
         transport,
-        FakeAuth(),
+        auth,
         batch_limit=2,
         max_requests_per_second=50,
     )
+    # This test starts after the explicit authentication step; priming itself
+    # must never manufacture or refresh a production session implicitly.
+    client._session = auth.authenticate()
     client.prime(["K1", "K2", "K3", "K4", "K5"])
+    assert auth.calls == 1
     assert [
         len(call[2]["body"]["cis"])
         for call in transport.calls
@@ -394,6 +399,7 @@ def test_live_audit_contains_metadata_but_not_secret_fields(tmp_path):
 class AppLiveClient:
     def __init__(self):
         self.states = {}
+        self.authenticated = True
 
     def prime(self, kizes):
         for kiz in kizes:
