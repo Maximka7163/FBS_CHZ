@@ -1,0 +1,73 @@
+name: Windows E2E
+
+on:
+  push:
+    branches:
+      - ci/windows-e2e-temp
+  workflow_dispatch:
+
+jobs:
+  windows-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      WBCZ_REF_XLSX: ${{ github.workspace }}\REF_WB_archive_9.xlsx
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify real regression workbook is present
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:WBCZ_REF_XLSX)) { throw "REF_WB_archive_9.xlsx is required for the real Windows E2E run" }
+
+      - name: Install Python application and test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[ui,test]" playwright
+
+      - name: Pytest
+        shell: pwsh
+        run: python -m pytest -q
+
+      - name: npm install
+        working-directory: frontend
+        shell: pwsh
+        run: npm install --no-audit --no-fund
+
+      - name: TypeScript typecheck
+        working-directory: frontend
+        shell: pwsh
+        run: npm run typecheck
+
+      - name: Vite production build
+        working-directory: frontend
+        shell: pwsh
+        run: npm run build
+
+      - name: Install Playwright Chromium fallback
+        shell: pwsh
+        run: python -m playwright install chromium
+
+      - name: Real browser E2E
+        shell: pwsh
+        run: python scripts/windows_e2e.py --ref "$env:WBCZ_REF_XLSX" --out "${{ github.workspace }}\e2e_artifacts"
+
+      - name: Upload E2E screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-e2e-artifacts
+          path: e2e_artifacts/
+          if-no-files-found: warn
