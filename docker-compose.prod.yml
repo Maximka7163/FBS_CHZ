@@ -52,6 +52,7 @@ services:
       - "127.0.0.1:${WBCZ_BACKEND_PORT:-8765}:8765"
     networks:
       - marking_internal
+      - marking_proxy
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=128m
@@ -73,3 +74,5 @@ networks:
   marking_internal:
     name: sellari_marking_internal
     internal: true
+  marking_proxy:
+    name: sellari_marking_proxy
