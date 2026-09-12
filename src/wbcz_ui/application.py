@@ -5,14 +5,40 @@ from dataclasses import asdict
 from pathlib import Path
 import sqlite3
 import tempfile
+from enum import StrEnum
 from typing import Any, Iterable
 
 from wbcz.event_store import EventStore
-from wbcz.models import Decision, Event, KiState, Operation
+from wbcz.models import Decision, Event, KiState, Operation, Outcome
 from wbcz.service import DryRunService, ImportService
 from wbcz.true_api import FakeTrueApiClient, TrueApiError
 
 OWN_INN = "1234567890"
+
+
+class OperationMode(StrEnum):
+    AUTO = "AUTO"
+    CONTROL = "CONTROL"
+    WITHDRAW_ONLY = "WITHDRAW_ONLY"
+    RETURN_ONLY = "RETURN_ONLY"
+
+
+_PREVIEW_REASON_TEXT = {
+    "NOT_CHECKED": "Событие ещё не проверено",
+    "OTHER_OWNER": "Другой владелец КИЗ",
+    "OWNER_UNKNOWN": "Владелец КИЗ не определён",
+    "NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL": "Причина выбытия требует ручной проверки",
+    "UNKNOWN_STATUS": "Неизвестное состояние КИЗ",
+    "UNKNOWN_OR_CONFLICTING_STATUS_EX": "Состояние КИЗ требует ручной проверки",
+    "INCONSISTENT_WITHDRAW_REASON": "Противоречивое состояние выбытия",
+    "LEGAL_ENTITY_RULES_UNDEFINED": "Требуется ручная проверка правила продажи",
+    "STATE_LOOKUP_OR_NORMALIZATION_FAILED": "Не удалось получить состояние КИЗ",
+    "SALE_ALREADY_WITHDRAWN_DISTANCE": "Операция уже не требуется",
+    "RETURN_ALREADY_IN_CIRCULATION": "Операция уже не требуется",
+    "HISTORY_ORDER_AMBIGUOUS": "История событий КИЗ неоднозначна",
+    "MODE_REQUIRES_RETURN": "По текущему состоянию требуется возврат в оборот",
+    "MODE_REQUIRES_WITHDRAW": "По текущему состоянию требуется вывод из оборота",
+}
 
 
 def _event_dict(event: Event) -> dict[str, Any]:
@@ -189,12 +215,44 @@ class UiApplication:
             events = [store.get_event(event_id) for event_id in event_ids]
             client = FakeTrueApiClient(self._offline_responses(events))
             runner = DryRunService(store, client, OWN_INN, source="offline-ui")
-            results = [runner.check_event(event.event_id) for event in events]
+            results = []
+            for event in events:
+                result = runner.check_event(event.event_id)
+                # The core decision remains authoritative. The application layer only
+                # adds a conservative safety guard when EventStore explicitly says
+                # that multiple WB events for one KIZ cannot be ordered reliably.
+                if store.history_order_ambiguous(event.kiz):
+                    outcome = Outcome(Decision.MANUAL_REVIEW, "HISTORY_ORDER_AMBIGUOUS")
+                    result = store.save_check(
+                        event.event_id, None, outcome, source="offline-ui-history-guard"
+                    )
+                results.append(result)
             counts = Counter(result.outcome.decision.value for result in results)
             return {"checked": len(results), "counts": dict(counts)}
 
-    def operation_preview(self, event_ids: list[str]) -> dict[str, Any]:
+    def operation_preview(
+        self,
+        event_ids: list[str],
+        mode: OperationMode | str = OperationMode.AUTO,
+        import_id: str | None = None,
+    ) -> dict[str, Any]:
+        mode = OperationMode(mode)
+        if mode is OperationMode.CONTROL:
+            raise ValueError("CONTROL is read-only and has no operation preview")
+
         with EventStore(self.db_path) as store:
+            if import_id is not None:
+                allowed = {
+                    row["event_id"]
+                    for row in store._connection.execute(
+                        "SELECT event_id FROM import_rows WHERE fingerprint=? AND event_id IS NOT NULL",
+                        (import_id,),
+                    ).fetchall()
+                }
+                missing = [event_id for event_id in event_ids if event_id not in allowed]
+                if missing:
+                    raise ValueError("Selected event does not belong to the requested import")
+
             previews = {row["event_id"]: row for row in store.previews()}
             included: list[dict[str, Any]] = []
             excluded: list[dict[str, Any]] = []
@@ -202,17 +260,60 @@ class UiApplication:
                 event = store.get_event(event_id)
                 preview = previews.get(event_id)
                 decision = preview["decision"] if preview else None
-                item = {"event_id": event_id, "kiz": event.kiz, "operation": event.operation.value, "decision": decision}
-                if decision in {Decision.READY_TO_WITHDRAW.value, Decision.READY_TO_RETURN.value}:
+                item = {
+                    "event_id": event_id,
+                    "kiz": event.kiz,
+                    "operation": event.operation.value,
+                    "decision": decision,
+                }
+
+                eligible = False
+                exclusion_reason: str | None = None
+                if mode is OperationMode.AUTO:
+                    eligible = decision in {
+                        Decision.READY_TO_WITHDRAW.value,
+                        Decision.READY_TO_RETURN.value,
+                    }
+                elif mode is OperationMode.WITHDRAW_ONLY:
+                    eligible = decision == Decision.READY_TO_WITHDRAW.value
+                    if decision == Decision.READY_TO_RETURN.value:
+                        exclusion_reason = "MODE_REQUIRES_RETURN"
+                elif mode is OperationMode.RETURN_ONLY:
+                    eligible = decision == Decision.READY_TO_RETURN.value
+                    if decision == Decision.READY_TO_WITHDRAW.value:
+                        exclusion_reason = "MODE_REQUIRES_WITHDRAW"
+
+                if eligible:
                     included.append(item)
-                else:
-                    item["reason"] = preview["reason"] if preview else "NOT_CHECKED"
-                    excluded.append(item)
-            return {
-                "selected": len(event_ids),
+                    continue
+
+                if exclusion_reason is None:
+                    exclusion_reason = preview["reason"] if preview else "NOT_CHECKED"
+                item["reason"] = exclusion_reason
+                item["reason_text"] = _PREVIEW_REASON_TEXT.get(exclusion_reason, exclusion_reason)
+                excluded.append(item)
+
+            withdraw_count = sum(
+                x["decision"] == Decision.READY_TO_WITHDRAW.value for x in included
+            )
+            return_count = sum(
+                x["decision"] == Decision.READY_TO_RETURN.value for x in included
+            )
+            response = {
+                "mode": mode.value,
+                "selected_count": len(event_ids),
+                "eligible_count": len(included),
+                "withdraw_count": withdraw_count,
+                "return_count": return_count,
+                "excluded_count": len(excluded),
                 "included": included,
                 "excluded": excluded,
-                "withdraw": sum(x["decision"] == Decision.READY_TO_WITHDRAW.value for x in included),
-                "returns": sum(x["decision"] == Decision.READY_TO_RETURN.value for x in included),
                 "production_submission_available": False,
             }
+            # Backward-compatible aliases keep the existing 88-test contract intact.
+            response.update({
+                "selected": response["selected_count"],
+                "withdraw": response["withdraw_count"],
+                "returns": response["return_count"],
+            })
+            return response
