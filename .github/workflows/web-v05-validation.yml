@@ -62,7 +62,7 @@ jobs:
           from wbcz_web.main import create_app
           from wbcz_web.config import WebConfig
           app=create_app(WebConfig.from_env())
-          paths={r.path for r in app.routes}
+          paths={r.path for r in app.routes if hasattr(r,'path')}
           forbidden={'/register','/signup','/api/register','/api/auth/register','/api/lk/documents/create','/api/submit'}
           assert not paths.intersection(forbidden)
           print('WEB_PRODUCTION_TRUE_API=ABSENT')
