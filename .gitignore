@@ -8,6 +8,7 @@ dist/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+live_true_api.jsonl
 node_modules/
 frontend/dist/
 frontend/dist-static/
