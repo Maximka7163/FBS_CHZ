@@ -89,7 +89,6 @@ class LiveReadOnlyConfig:
                 raise ValueError("WBCZ_UKEP_THUMBPRINT is required in live read-only mode")
             if not inn.isascii() or not inn.isdigit() or len(inn) not in (10, 12):
                 raise ValueError("WBCZ_PARTICIPANT_INN must contain 10 or 12 digits")
-            # v0.4 production is hard-bound to the official production True API base.
             if base_url != PRODUCTION_BASE_URL:
                 raise ValueError("v0.4 live mode allows only the official production True API v3 base URL")
         return cls(enabled, inn, thumbprint, base_url, audit, location)
@@ -154,7 +153,9 @@ class ReadOnlyTrueApiTransport:
     def assert_allowed(method: str, path: str, params: dict[str, str] | None = None) -> None:
         method = method.upper()
         if (method, path) not in _ALLOWED_ENDPOINTS:
-            raise ProductionMutationDisabled(f"Production endpoint is disabled in v0.4: {method} {path}")
+            raise ProductionMutationDisabled(
+                f"Production endpoint is disabled in v0.4: {method} {path}"
+            )
         if path == "/cises/info":
             if params != {"pg": "lp"}:
                 raise ProductionMutationDisabled("cises/info is allowed only with pg=lp")
@@ -190,24 +191,37 @@ class ReadOnlyTrueApiTransport:
                 request_id = self._request_id(response.headers)
                 raw = response.read()
                 self.audit.record(
-                    method=method, endpoint=path, cis_count=cis_count,
-                    http_status=status, request_id=request_id,
+                    method=method,
+                    endpoint=path,
+                    cis_count=cis_count,
+                    http_status=status,
+                    request_id=request_id,
                 )
         except HTTPError as exc:
             request_id = self._request_id(exc.headers)
             body_text = exc.read(4096).decode("utf-8", errors="replace")
             self.audit.record(
-                method=method, endpoint=path, cis_count=cis_count,
-                http_status=exc.code, request_id=request_id,
+                method=method,
+                endpoint=path,
+                cis_count=cis_count,
+                http_status=exc.code,
+                request_id=request_id,
                 error=f"HTTP {exc.code}",
             )
-            raise TrueApiHttpError(exc.code, f"True API HTTP {exc.code}: {body_text[:500]}") from exc
+            raise TrueApiHttpError(
+                exc.code, f"True API HTTP {exc.code}: {body_text[:500]}"
+            ) from exc
         except URLError as exc:
             self.audit.record(
-                method=method, endpoint=path, cis_count=cis_count,
-                http_status=None, error=type(exc.reason).__name__,
+                method=method,
+                endpoint=path,
+                cis_count=cis_count,
+                http_status=None,
+                error=type(exc.reason).__name__,
             )
-            raise TrueApiHttpError(None, f"True API transport error: {exc.reason}") from exc
+            raise TrueApiHttpError(
+                None, f"True API transport error: {exc.reason}"
+            ) from exc
         try:
             return json.loads(raw.decode("utf-8")) if raw else None
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -232,7 +246,9 @@ class WindowsCryptoProAuthSigner:
     as required by True API auth. There is intentionally no document-sign method.
     """
 
-    def __init__(self, certificate_thumbprint: str, powershell: str = "powershell.exe") -> None:
+    def __init__(
+        self, certificate_thumbprint: str, powershell: str = "powershell.exe"
+    ) -> None:
         normalized = certificate_thumbprint.replace(" ", "").upper()
         if not normalized:
             raise ValueError("Certificate thumbprint is required")
@@ -278,7 +294,10 @@ try {
             check=False,
         )
         if completed.returncode != 0:
-            message = completed.stderr.strip() or "CryptoPro/Windows certificate signing failed"
+            message = (
+                completed.stderr.strip()
+                or "CryptoPro/Windows certificate signing failed"
+            )
             raise TrueApiError(message[:1000])
         signature = completed.stdout.strip()
         if not signature:
@@ -287,9 +306,15 @@ try {
 
 
 class TrueApiAuthenticator:
-    def __init__(self, transport: ReadOnlyTrueApiTransport, signer: AuthSigner) -> None:
+    def __init__(
+        self,
+        transport: ReadOnlyTrueApiTransport,
+        signer: AuthSigner,
+        participant_inn: str,
+    ) -> None:
         self.transport = transport
         self.signer = signer
+        self.participant_inn = participant_inn
 
     def authenticate(self) -> AuthSession:
         challenge = self.transport.request_json("GET", "/auth/key")
@@ -297,15 +322,28 @@ class TrueApiAuthenticator:
             raise TrueApiProtocolError("/auth/key returned an unexpected payload")
         uuid = challenge.get("uuid")
         data = challenge.get("data")
-        if not isinstance(uuid, str) or not uuid or not isinstance(data, str) or not data:
+        if (
+            not isinstance(uuid, str)
+            or not uuid
+            or not isinstance(data, str)
+            or not data
+        ):
             raise TrueApiProtocolError("/auth/key response misses uuid/data")
         signed = self.signer.sign_auth_challenge(data)
         response = self.transport.request_json(
-            "POST", "/auth/simpleSignIn",
-            body={"uuid": uuid, "data": signed, "unitedToken": True},
+            "POST",
+            "/auth/simpleSignIn",
+            body={
+                "uuid": uuid,
+                "data": signed,
+                "inn": self.participant_inn,
+                "unitedToken": True,
+            },
         )
         if not isinstance(response, dict):
-            raise TrueApiProtocolError("/auth/simpleSignIn returned an unexpected payload")
+            raise TrueApiProtocolError(
+                "/auth/simpleSignIn returned an unexpected payload"
+            )
         token = response.get("uuidToken")
         expire = response.get("expireDate")
         if not isinstance(token, str) or not token:
@@ -317,7 +355,9 @@ class TrueApiAuthenticator:
             if expire_date.tzinfo is None:
                 expire_date = expire_date.replace(tzinfo=timezone.utc)
         except ValueError as exc:
-            raise TrueApiProtocolError("Invalid expireDate in authentication response") from exc
+            raise TrueApiProtocolError(
+                "Invalid expireDate in authentication response"
+            ) from exc
         return AuthSession(token, expire_date.astimezone(timezone.utc))
 
 
@@ -334,7 +374,10 @@ class TrueApiCisesInfoAdapter:
             raise TrueApiProtocolError("cises/info item is not an object")
         if item.get("errorCode") or item.get("errorMessage"):
             raise TrueApiError(
-                f"cises/info error for selected KI: {item.get('errorCode') or ''} {item.get('errorMessage') or ''}".strip()
+                (
+                    "cises/info error for selected KI: "
+                    f"{item.get('errorCode') or ''} {item.get('errorMessage') or ''}"
+                ).strip()
             )
         info = item.get("cisInfo", item)
         if not isinstance(info, dict):
@@ -343,19 +386,30 @@ class TrueApiCisesInfoAdapter:
         if isinstance(echoed, str) and echoed != requested_cis:
             raise TrueApiProtocolError("cises/info returned a mismatched KI")
         raw_status = info.get("status")
-        status = self._STATUS.get(str(raw_status).upper(), f"UNKNOWN:{raw_status}")
+        status = self._STATUS.get(
+            str(raw_status).upper(), f"UNKNOWN:{raw_status}"
+        )
         raw_status_ex = info.get("statusEx")
         if raw_status_ex is None or str(raw_status_ex).upper() in {"", "EMPTY"}:
             status_ex = None
         else:
+            # v0.4 does not guess semantics of non-empty statusEx values.
             status_ex = f"UNKNOWN:{raw_status_ex}"
         product_group = info.get("productGroup")
         return KiState(
             status=status,
             statusEx=status_ex,
-            withdrawReason=info.get("withdrawReason") if isinstance(info.get("withdrawReason"), str) else None,
-            ownerInn=info.get("ownerInn") if isinstance(info.get("ownerInn"), str) else None,
-            productGroup=product_group if isinstance(product_group, str) else None,
+            withdrawReason=(
+                info.get("withdrawReason")
+                if isinstance(info.get("withdrawReason"), str)
+                else None
+            ),
+            ownerInn=(
+                info.get("ownerInn") if isinstance(info.get("ownerInn"), str) else None
+            ),
+            productGroup=(
+                product_group if isinstance(product_group, str) else None
+            ),
         )
 
 
@@ -372,9 +426,13 @@ class LiveTrueApiClient:
         adapter: TrueApiCisesInfoAdapter | None = None,
     ) -> None:
         if not 1 <= batch_limit <= CISES_INFO_BATCH_LIMIT:
-            raise ValueError(f"batch_limit must be between 1 and {CISES_INFO_BATCH_LIMIT}")
+            raise ValueError(
+                f"batch_limit must be between 1 and {CISES_INFO_BATCH_LIMIT}"
+            )
         if not 0 < max_requests_per_second <= CISES_INFO_MAX_RPS:
-            raise ValueError(f"max_requests_per_second must be <= {CISES_INFO_MAX_RPS}")
+            raise ValueError(
+                f"max_requests_per_second must be <= {CISES_INFO_MAX_RPS}"
+            )
         self.transport = transport
         self.authenticator = authenticator
         self.batch_limit = batch_limit
@@ -392,11 +450,17 @@ class LiveTrueApiClient:
         audit = JsonlLiveAudit(config.audit_log_path)
         transport = ReadOnlyTrueApiTransport(config.base_url, audit)
         signer = WindowsCryptoProAuthSigner(config.certificate_thumbprint)
-        return cls(transport, TrueApiAuthenticator(transport, signer))
+        authenticator = TrueApiAuthenticator(
+            transport, signer, config.participant_inn
+        )
+        return cls(transport, authenticator)
 
     def _bearer(self) -> str:
         now = datetime.now(timezone.utc)
-        if self._session is None or self._session.expire_date <= now + timedelta(minutes=1):
+        if (
+            self._session is None
+            or self._session.expire_date <= now + timedelta(minutes=1)
+        ):
             self._session = self.authenticator.authenticate()
         return self._session.bearer_token
 
@@ -414,17 +478,33 @@ class LiveTrueApiClient:
             batch = missing[start:start + self.batch_limit]
             if not batch:
                 continue
-            self._throttle()
-            payload = self.transport.request_json(
-                "POST", "/cises/info", params={"pg": "lp"}, body=batch,
-                bearer_token=self._bearer(), cis_count=len(batch),
-            )
-            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-                items = payload["results"]
-            elif isinstance(payload, list):
-                items = payload
-            else:
-                raise TrueApiProtocolError("cises/info returned an unexpected top-level payload")
+            try:
+                self._throttle()
+                payload = self.transport.request_json(
+                    "POST",
+                    "/cises/info",
+                    params={"pg": "lp"},
+                    body={"cis": batch},
+                    bearer_token=self._bearer(),
+                    cis_count=len(batch),
+                )
+                if isinstance(payload, dict) and isinstance(
+                    payload.get("results"), list
+                ):
+                    items = payload["results"]
+                elif isinstance(payload, list):
+                    items = payload
+                else:
+                    raise TrueApiProtocolError(
+                        "cises/info returned an unexpected top-level payload"
+                    )
+            except Exception as exc:
+                # A transport/auth/batch error is retained per KI so one failed
+                # production read never becomes a false positive recommendation.
+                for kiz in batch:
+                    self._cache[kiz] = exc
+                continue
+
             by_requested: dict[str, Any] = {}
             for item in items:
                 if not isinstance(item, dict):
@@ -437,7 +517,9 @@ class LiveTrueApiClient:
             for kiz in batch:
                 item = by_requested.get(kiz)
                 if item is None:
-                    self._cache[kiz] = TrueApiProtocolError("cises/info omitted requested KI")
+                    self._cache[kiz] = TrueApiProtocolError(
+                        "cises/info omitted requested KI"
+                    )
                     continue
                 try:
                     self._cache[kiz] = self.adapter.normalize(kiz, item)
