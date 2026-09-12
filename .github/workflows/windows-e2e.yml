@@ -21,13 +21,12 @@ jobs:
         shell: pwsh
         run: |
           $target = Join-Path $env:RUNNER_TEMP "REF_WB_archive_9.xlsx"
-          $parts = Get-ChildItem "e2e_private\chunk*" | Sort-Object Name
-          if ($parts.Count -ne 11) { throw "Expected 11 workbook chunks, got $($parts.Count)" }
+          $parts = Get-ChildItem "e2e_private\chunk0?" | Sort-Object Name
+          if ($parts.Count -ne 10) { throw "Expected 10 workbook chunks, got $($parts.Count)" }
           $base64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
           [System.IO.File]::WriteAllBytes($target, [Convert]::FromBase64String($base64))
-          $sha = (Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant()
           "WBCZ_REF_XLSX=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "WORKBOOK_SHA256=$sha"
+          Write-Host "WORKBOOK_SHA256=$((Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant())"
           Write-Host "WORKBOOK_BYTES=$((Get-Item $target).Length)"
 
       - name: Checkout exact final HEAD
