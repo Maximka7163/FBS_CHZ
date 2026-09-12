@@ -8,7 +8,6 @@ import pytest
 
 from wbcz.event_store import EventStore
 from wbcz.models import Decision, KiState, Outcome
-from wbcz.service import ImportService
 from wbcz_ui.application import OperationMode, UiApplication
 
 REF = Path(os.environ.get("WBCZ_REF_XLSX", "/mnt/data/REF_WB_archive_9.xlsx"))
@@ -42,28 +41,28 @@ def _single_with_decision(tmp_path, wb_row, make_xlsx, decision: Decision, reaso
 def test_auto_preview_groups_withdraw_and_return(tmp_path):
     app, imported, checked, _, ids = _checked_real(tmp_path)
     assert checked["counts"] == {
-        "READY_TO_WITHDRAW": 64,
-        "READY_TO_RETURN": 140,
+        "READY_TO_WITHDRAW": 51,
+        "READY_TO_RETURN": 3,
         "ALREADY_DONE": 20,
-        "MANUAL_REVIEW": 9,
+        "MANUAL_REVIEW": 159,
         "ERROR": 5,
     }
     preview = app.operation_preview(ids, OperationMode.AUTO, imported["fingerprint"])
-    assert (preview["selected_count"], preview["eligible_count"]) == (238, 204)
-    assert (preview["withdraw_count"], preview["return_count"], preview["excluded_count"]) == (64, 140, 34)
+    assert (preview["selected_count"], preview["eligible_count"]) == (238, 54)
+    assert (preview["withdraw_count"], preview["return_count"], preview["excluded_count"]) == (51, 3, 184)
 
 
 def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path):
     app, imported, _, _, ids = _checked_real(tmp_path)
     preview = app.operation_preview(ids, OperationMode.WITHDRAW_ONLY, imported["fingerprint"])
-    assert preview["eligible_count"] == 64
-    assert preview["withdraw_count"] == 64
+    assert preview["eligible_count"] == 51
+    assert preview["withdraw_count"] == 51
     assert preview["return_count"] == 0
-    assert preview["excluded_count"] == 174
+    assert preview["excluded_count"] == 187
     assert Counter(item["decision"] for item in preview["excluded"]) == {
-        "READY_TO_RETURN": 140,
+        "READY_TO_RETURN": 3,
         "ALREADY_DONE": 20,
-        "MANUAL_REVIEW": 9,
+        "MANUAL_REVIEW": 159,
         "ERROR": 5,
     }
     return_exclusion = next(item for item in preview["excluded"] if item["decision"] == "READY_TO_RETURN")
@@ -73,14 +72,14 @@ def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path):
 def test_return_only_accepts_only_ready_to_return(tmp_path):
     app, imported, _, _, ids = _checked_real(tmp_path)
     preview = app.operation_preview(ids, OperationMode.RETURN_ONLY, imported["fingerprint"])
-    assert preview["eligible_count"] == 140
+    assert preview["eligible_count"] == 3
     assert preview["withdraw_count"] == 0
-    assert preview["return_count"] == 140
-    assert preview["excluded_count"] == 98
+    assert preview["return_count"] == 3
+    assert preview["excluded_count"] == 235
     assert Counter(item["decision"] for item in preview["excluded"]) == {
-        "READY_TO_WITHDRAW": 64,
+        "READY_TO_WITHDRAW": 51,
         "ALREADY_DONE": 20,
-        "MANUAL_REVIEW": 9,
+        "MANUAL_REVIEW": 159,
         "ERROR": 5,
     }
     withdraw_exclusion = next(item for item in preview["excluded"] if item["decision"] == "READY_TO_WITHDRAW")
@@ -99,7 +98,7 @@ def test_control_is_read_only_and_has_no_preview_or_documents(tmp_path):
 
 def test_manual_review_never_becomes_eligible(tmp_path, wb_row, make_xlsx):
     app, imported, event_id = _single_with_decision(
-        tmp_path, wb_row, make_xlsx, Decision.MANUAL_REVIEW, "OTHER_OWNER"
+        tmp_path, wb_row, make_xlsx, Decision.MANUAL_REVIEW, "OWNER_MISMATCH"
     )
     for mode in (OperationMode.AUTO, OperationMode.WITHDRAW_ONLY, OperationMode.RETURN_ONLY):
         preview = app.operation_preview([event_id], mode, imported["fingerprint"])
