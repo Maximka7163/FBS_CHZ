@@ -1,0 +1,44 @@
+# STAGING TEMPLATE ONLY. This file is not installed automatically.
+# Purpose: verify mark.sellari.ru routing before DNS exists and before TLS issuance.
+# After DNS and certificate issuance, replace/extend this with the approved HTTPS config.
+server {
+    listen 80;
+    server_name mark.sellari.ru;
+
+    root /opt/sellari-marking/current/frontend;
+    index index.html;
+
+    # WB parser accepts at most 50 MiB; 52 MiB leaves multipart/protocol overhead.
+    client_max_body_size 52m;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'" always;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-store";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
