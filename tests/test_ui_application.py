@@ -51,20 +51,22 @@ def test_real_offline_check_and_preview(tmp_path):
     result = app.check_import(item['fingerprint'])
     assert result['checked'] == 238
     assert result['counts'] == {
-        Decision.READY_TO_WITHDRAW.value: 64,
-        Decision.READY_TO_RETURN.value: 140,
+        Decision.READY_TO_WITHDRAW.value: 51,
+        Decision.READY_TO_RETURN.value: 3,
         Decision.ALREADY_DONE.value: 20,
-        Decision.MANUAL_REVIEW.value: 9,
+        Decision.MANUAL_REVIEW.value: 159,
         Decision.ERROR.value: 5,
     }
+    assert result['reasons']['SALE_RECEIPT_MISSING'] == 13
+    assert result['reasons']['RETURN_RECEIPT_MISSING'] == 137
     events = app.events_for_import(item['fingerprint'])
     assert Counter(e['decision'] for e in events) == Counter(result['counts'])
     preview = app.operation_preview([e['event_id'] for e in events])
     assert preview['selected'] == 238
-    assert len(preview['included']) == 204
-    assert len(preview['excluded']) == 34
-    assert preview['withdraw'] == 64
-    assert preview['returns'] == 140
+    assert len(preview['included']) == 54
+    assert len(preview['excluded']) == 184
+    assert preview['withdraw'] == 51
+    assert preview['returns'] == 3
     assert preview['production_submission_available'] is False
 
 
