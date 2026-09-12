@@ -1,30 +1,417 @@
-import {api,upload} from './api.js'
-import type {ImportItem,EventItem} from './types'
+import {api, upload} from './api.js'
+import type {ImportItem, EventItem} from './types'
 
-const app=document.querySelector<HTMLDivElement>('#app')!
-let current:any=null, events:EventItem[]=[], selected=new Set<string>(), filter='all', query='', checking=false, preview:any=null, detail:string|null=null
-const decLabel:Record<string,string>={READY_TO_WITHDRAW:'Нужно вывести',READY_TO_RETURN:'Нужно вернуть',ALREADY_DONE:'Уже обработано',MANUAL_REVIEW:'Требует проверки',ERROR:'Ошибка'}
-const reasonLabel:Record<string,string>={OTHER_OWNER:'Другой владелец',NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL:'Другая причина выбытия',STATE_LOOKUP_OR_NORMALIZATION_FAILED:'Нет ответа локальной проверки',SALE_ALREADY_WITHDRAWN_DISTANCE:'Уже выведен из оборота',RETURN_ALREADY_IN_CIRCULATION:'Уже в обороте'}
-const fmt=(s:string)=>new Date(s).toLocaleString('ru-RU',{dateStyle:'short',timeStyle:'short'})
-const date=(s:string|null)=>s?new Date(s).toLocaleDateString('ru-RU'):'—'
+const app = document.querySelector<HTMLDivElement>('#app')!
 
-async function init(){renderShell();await renderHome()}
-function renderShell(){app.innerHTML=`<div class="topbar"><div class="brand">markflow</div><div class="profile">MM</div></div><aside class="rail"><button class="rail-btn active" title="FBS WB">◆</button><button class="rail-btn" title="Файлы">▣</button><button class="rail-help" title="Помощь">?</button></aside><main id="main" class="main"></main>`}
+type Preview = {
+  selected: number
+  included: Array<{event_id:string;kiz:string;operation:string;decision:string}>
+  excluded: Array<{event_id:string;kiz:string;operation:string;decision:string|null;reason:string}>
+  withdraw: number
+  returns: number
+  production_submission_available: boolean
+}
+
+let current: any = null
+let events: EventItem[] = []
+let selected = new Set<string>()
+let filter = 'all'
+let query = ''
+let checking = false
+let preview: Preview | null = null
+let selectionSummary: Preview | null = null
+let detail: string | null = null
+let selectionRequest = 0
+
+const decLabel: Record<string,string> = {
+  READY_TO_WITHDRAW: 'Нужно вывести',
+  READY_TO_RETURN: 'Нужно вернуть',
+  ALREADY_DONE: 'Уже обработано',
+  MANUAL_REVIEW: 'Требует проверки',
+  ERROR: 'Ошибка',
+}
+const reasonLabel: Record<string,string> = {
+  OTHER_OWNER: 'Другой владелец',
+  OWNER_UNKNOWN: 'Владелец не определён',
+  NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL: 'Другая причина выбытия',
+  UNKNOWN_STATUS: 'Неизвестное состояние',
+  UNKNOWN_OR_CONFLICTING_STATUS_EX: 'Состояние требует ручной проверки',
+  INCONSISTENT_WITHDRAW_REASON: 'Противоречивое состояние выбытия',
+  LEGAL_ENTITY_RULES_UNDEFINED: 'Требуется ручная проверка правила продажи',
+  STATE_LOOKUP_OR_NORMALIZATION_FAILED: 'Нет результата локальной проверки',
+  SALE_ALREADY_WITHDRAWN_DISTANCE: 'Уже выведен из оборота',
+  RETURN_ALREADY_IN_CIRCULATION: 'Уже в обороте',
+  NOT_CHECKED: 'Событие ещё не проверено',
+}
+
+const fmt = (s:string) => new Date(s).toLocaleString('ru-RU', {dateStyle:'short', timeStyle:'short'})
+const date = (s:string|null) => s ? new Date(s).toLocaleDateString('ru-RU') : '—'
+const sleep = (ms:number) => new Promise(resolve => setTimeout(resolve, ms))
+
+const icons = {
+  mark: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.25c3.6 4.3 6.1 7.15 6.1 10.45A6.1 6.1 0 1 1 5.9 13.7C5.9 10.4 8.4 7.55 12 3.25Z" fill="currentColor"/><path d="M10 16.8c1.55.55 3.4-.15 4.1-1.75" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round"/></svg>`,
+  help: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.8 9.4a2.35 2.35 0 0 1 4.5 1c0 1.8-2.3 2-2.3 3.55" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="17" r="1" fill="currentColor"/></svg>`,
+  search: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="5.7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.2 15.2 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  file: `<svg viewBox="0 0 24 28" aria-hidden="true"><path d="M5 1.5h9l5 5V25a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 25V3A1.5 1.5 0 0 1 5.5 1.5Z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M14 1.8V7h5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m8 12 3 4m0-4-3 4m5-4h3m-3 2h2.6m-2.6 2h3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  eye: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 12s3.1-5 8.6-5 8.6 5 8.6 5-3.1 5-8.6 5-8.6-5-8.6-5Z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`,
+  chevron: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8.5 10 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  copy: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M15 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`,
+}
+
+async function init(){
+  renderShell()
+  await renderHome()
+}
+
+function renderShell(){
+  app.innerHTML = `
+    <header class="topbar">
+      <div class="brand">markflow</div>
+      <div class="topbar-right">
+        <span class="test-mode"><span class="mode-dot"></span>Тестовый режим</span>
+        <div class="profile" aria-label="Профиль">MM</div>
+      </div>
+    </header>
+    <aside class="rail" aria-label="Навигация">
+      <button class="rail-btn active" title="Вывод и ввод в оборот" aria-label="Вывод и ввод в оборот">${icons.mark}</button>
+      <button class="rail-help" title="Помощь" aria-label="Помощь">${icons.help}</button>
+    </aside>
+    <main id="main" class="main"></main>
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>`
+}
+
 function main(){return document.querySelector<HTMLElement>('#main')!}
 
-async function renderHome(){current=null;events=[];selected.clear();preview=null;const imports=await api<ImportItem[]>('/api/imports?limit=10');main().innerHTML=`<div class="page-title"><h1>Вывод и ввод в оборот (FBS WB)</h1><span class="help-dot">?</span></div><section class="upload-zone" id="drop"><input id="file" type="file" accept=".xlsx" hidden><div class="upload-copy"><strong>Перетащите файл сюда</strong><span>или нажмите для выбора</span><small>Поддерживается формат XLSX</small></div></section><section class="recent"><div class="section-head"><h2>Последние файлы</h2></div>${imports.length?historyTable(imports):'<div class="empty-history">Загруженных файлов пока нет</div>'}</section>`;const input=document.querySelector<HTMLInputElement>('#file')!,drop=document.querySelector<HTMLElement>('#drop')!;drop.onclick=()=>input.click();input.onchange=()=>input.files?.[0]&&loadFile(input.files[0]);drop.ondragover=e=>{e.preventDefault();drop.classList.add('drag')};drop.ondragleave=()=>drop.classList.remove('drag');drop.ondrop=e=>{e.preventDefault();drop.classList.remove('drag');const f=e.dataTransfer?.files[0];if(f)loadFile(f)};document.querySelectorAll<HTMLElement>('[data-open]').forEach(x=>x.onclick=()=>openImport(x.dataset.open!))}
-function historyTable(items:ImportItem[]){return `<div class="history-wrap"><table class="history"><thead><tr><th>Дата и время</th><th>Имя файла</th><th>Строк</th><th>КИЗ</th><th>Статус</th><th></th></tr></thead><tbody>${items.map(i=>`<tr><td>${fmt(i.uploaded_at)}</td><td class="file-name"><span class="xlsx">X</span>${esc(i.filename)}</td><td>${i.row_count}</td><td>${i.unique_kiz}</td><td>${i.repeated?'<span class="status repeat">Повторно загружен · новых 0</span>':i.status==='processed'?'<span class="status ok">Обработан</span>':'<span class="status bad">Ошибка</span>'}</td><td><button class="icon-btn" data-open="${i.fingerprint}" title="Открыть">◉</button></td></tr>`).join('')}</tbody></table></div>`}
-async function loadFile(file:File){try{const result=await upload(file);await openImport(result.fingerprint)}catch(e){alert(String(e))}}
-async function openImport(fp:string){current=await api<any>(`/api/imports/${fp}`);events=await api<EventItem[]>(`/api/imports/${fp}/events`);selected.clear();preview=null;renderWorkspace()}
-function renderWorkspace(){main().innerHTML=`<div class="workspace-head"><div><div class="page-title"><h1>Вывод и ввод в оборот (FBS WB)</h1><span class="help-dot">?</span></div><div class="file-context"><span class="xlsx">X</span><div><strong>${esc(current.filename)}</strong><small>Загружен ${fmt(current.uploaded_at)} · ${current.event_count} строк</small></div></div></div><div class="head-actions"><span class="mode">Тестовый режим</span><button id="replace" class="text-btn">Заменить файл</button></div></div><div class="check-line"><button id="check" class="secondary-btn">${events.some(e=>e.decision)?'Повторить проверку':'Проверить КИЗ'}</button><span id="check-status">${events.some(e=>e.decision)?'Локальная проверка выполнена':'Проверка: локальная'}</span></div><div class="toolbar"><div class="search-wrap">⌕<input id="search" placeholder="Поиск по КИЗ"></div><select id="filter"><option value="all">Все рекомендации</option><option value="READY_TO_WITHDRAW">Нужно вывести</option><option value="READY_TO_RETURN">Нужно вернуть</option><option value="ALREADY_DONE">Уже обработано</option><option value="MANUAL_REVIEW">Требует проверки</option><option value="ERROR">Ошибка</option></select><span class="shown" id="shown"></span></div><div class="table-shell"><table class="events"><thead><tr><th class="check-col"><input id="all" type="checkbox"></th><th>КИЗ</th><th>Операция WB</th><th>Дата WB</th><th>Рекомендация</th><th>Состояние</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div id="operation"></div>`;document.querySelector('#replace')!.addEventListener('click',renderHome);document.querySelector('#check')!.addEventListener('click',runCheck);document.querySelector<HTMLInputElement>('#search')!.oninput=e=>{query=(e.target as HTMLInputElement).value;renderRows()};document.querySelector<HTMLSelectElement>('#filter')!.onchange=e=>{filter=(e.target as HTMLSelectElement).value;renderRows()};document.querySelector<HTMLInputElement>('#all')!.onchange=e=>{const on=(e.target as HTMLInputElement).checked;visible().forEach(x=>on?selected.add(x.event_id):selected.delete(x.event_id));preview=null;renderRows();renderOperation()};renderRows();renderOperation()}
-function visible(){return events.filter(e=>(filter==='all'||e.decision===filter)&&(!query||e.kiz.includes(query.trim())))}
-function renderRows(){const body=document.querySelector<HTMLTableSectionElement>('#rows')!;const list=visible();document.querySelector('#shown')!.textContent=`${list.length} из ${events.length}`;body.innerHTML=list.map(e=>`<tr class="${selected.has(e.event_id)?'selected':''}"><td><input data-pick="${e.event_id}" type="checkbox" ${selected.has(e.event_id)?'checked':''}></td><td><code title="${esc(e.kiz)}">${short(e.kiz)}</code></td><td>${e.operation}</td><td>${date(e.occurred_at)}</td><td>${decisionBadge(e)}</td><td>${stateText(e)}</td><td><button class="icon-btn" data-detail="${e.event_id}" title="Подробности">⌄</button></td></tr>${detail===e.event_id?'<tr class="detail-row"><td colspan="7"><div id="detail"></div></td></tr>':''}`).join('');body.querySelectorAll<HTMLInputElement>('[data-pick]').forEach(x=>x.onchange=()=>{x.checked?selected.add(x.dataset.pick!):selected.delete(x.dataset.pick!);preview=null;renderRows();renderOperation()});body.querySelectorAll<HTMLElement>('[data-detail]').forEach(x=>x.onclick=async()=>{detail=detail===x.dataset.detail?null:x.dataset.detail!;renderRows();if(detail){const d=await api<any>(`/api/events/${detail}`);renderDetail(d)}})}
-function decisionBadge(e:EventItem){if(!e.decision)return '<span class="muted">Не проверено</span>';const tone=e.decision==='ERROR'?'danger':e.decision==='MANUAL_REVIEW'?'warn':e.decision==='ALREADY_DONE'?'neutral':'good';return `<span class="badge ${tone}">${decLabel[e.decision]||e.decision}</span>`}
-function stateText(e:EventItem){if(e.error)return '<span class="danger-text">Нет ответа</span>';if(e.reason&&e.decision==='MANUAL_REVIEW')return `<span class="warn-text">${reasonLabel[e.reason]||e.reason}</span>`;return e.checked_at?'<span class="muted">Проверено локально</span>':'<span class="muted">—</span>'}
-async function renderDetail(d:any){const el=document.querySelector('#detail');if(!el)return;el.innerHTML=`<div class="detail-grid"><section><h3>Полный КИЗ</h3><div class="copy-line"><code>${esc(d.kiz)}</code><button id="copy" class="text-btn">Копировать</button></div></section><section><h3>Событие WB</h3><p>${d.operation} · ${date(d.occurred_at)}</p><p class="muted">Задание ${esc(d.task_number)} · Стикер ${esc(d.sticker)}</p></section><section><h3>Проверка</h3><p>${d.decision?decLabel[d.decision]||d.decision:'Не проверено'}</p><p class="muted">${esc(reasonLabel[d.reason]||d.reason||d.error||'—')}</p></section></div><div class="history-block"><h3>История этого КИЗ</h3>${d.history.map((h:any)=>`<div class="history-event"><span>${h.operation}</span><span>${date(h.occurred_at)}</span><span>${esc(h.task_number)}</span></div>`).join('')}${d.history_order_ambiguous?'<p class="warning-note">Порядок части событий неоднозначен. Интерфейс не выбирает «последнее» событие самостоятельно.</p>':''}</div>`;document.querySelector('#copy')!.addEventListener('click',()=>navigator.clipboard.writeText(d.kiz))}
-async function runCheck(){checking=true;const b=document.querySelector<HTMLButtonElement>('#check')!;b.disabled=true;b.textContent='Проверяем…';document.querySelector('#check-status')!.innerHTML='<span class="spinner"></span>Локальная проверка';await api(`/api/imports/${current.fingerprint}/check`,{method:'POST'});events=await api<EventItem[]>(`/api/imports/${current.fingerprint}/events`);checking=false;renderWorkspace()}
-function renderOperation(){const op=document.querySelector<HTMLDivElement>('#operation');if(!op)return;if(!selected.size&&!preview){op.innerHTML='';return}const chosen=events.filter(e=>selected.has(e.event_id));const ready=chosen.filter(e=>e.decision==='READY_TO_WITHDRAW'||e.decision==='READY_TO_RETURN');const out=ready.filter(e=>e.decision==='READY_TO_WITHDRAW').length,ret=ready.length-out,excluded=chosen.length-ready.length;op.innerHTML=`<div class="operation-bar"><div class="op-counts"><span><b>${chosen.length}</b><small>Выбрано</small></span><span><b>${ready.length}</b><small>К выполнению</small></span><span><b>${out}</b><small>Вывод</small></span><span><b>${ret}</b><small>Возврат</small></span><span><b>${excluded}</b><small>Исключено</small></span></div><button id="preview" class="primary-btn">Проверить состав</button></div>${preview?previewHtml(preview):''}`;document.querySelector('#preview')!.addEventListener('click',async()=>{preview=await api<any>('/api/operation-preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({event_ids:[...selected]})});renderOperation()})}
-function previewHtml(p:any){const reasons=new Map<string,number>();p.excluded.forEach((x:any)=>reasons.set(x.reason,(reasons.get(x.reason)||0)+1));return `<div class="preview"><div class="preview-head"><div><h2>Проверка состава</h2><p>${esc(current.filename)} · выбран рабочий состав из ${p.selected} событий</p></div><span class="mode">Только preview</span></div><div class="preview-numbers"><span><b>${p.included.length}</b> войдут в состав</span><span><b>${p.withdraw}</b> вывод</span><span><b>${p.returns}</b> возврат</span><span><b>${p.excluded.length}</b> исключено</span></div>${p.excluded.length?`<div class="excluded"><h3>Исключены backend-решением</h3>${[...reasons].map(([r,n])=>`<div><span>${esc(reasonLabel[r]||r)}</span><b>${n}</b></div>`).join('')}</div>`:''}<p class="preview-note">Реальная отправка пока недоступна в тестовом режиме. Этот экран ничего не отправляет.</p></div>`}
-function short(s:string){return esc(s.length>36?s.slice(0,22)+'…'+s.slice(-10):s)}
+function setMainMode(mode:'home'|'workspace'){
+  main().className = `main ${mode === 'home' ? 'home-main' : 'workspace-main'}`
+}
+
+function pageTitle(){
+  return `<div class="page-title"><h1>Вывод и ввод в оборот (FBS WB)</h1><button class="title-help" title="Справка" aria-label="Справка">${icons.help}</button></div>`
+}
+
+async function renderHome(){
+  setMainMode('home')
+  current = null
+  events = []
+  selected.clear()
+  preview = null
+  selectionSummary = null
+  detail = null
+  filter = 'all'
+  query = ''
+  const imports = await api<ImportItem[]>('/api/imports?limit=10')
+  main().innerHTML = `
+    ${pageTitle()}
+    <section class="upload-zone" id="drop" tabindex="0" aria-label="Загрузить XLSX">
+      <input id="file" type="file" accept=".xlsx" hidden>
+      <div class="upload-copy">
+        <strong>Перетащите файл сюда</strong>
+        <span>или нажмите для выбора</span>
+        <small>Поддерживается формат XLSX</small>
+      </div>
+    </section>
+    <section class="recent">
+      <div class="section-head"><h2>Последние файлы</h2></div>
+      ${imports.length ? historyTable(imports) : '<div class="empty-history">Загруженных файлов пока нет</div>'}
+    </section>`
+
+  const input = document.querySelector<HTMLInputElement>('#file')!
+  const drop = document.querySelector<HTMLElement>('#drop')!
+  drop.onclick = () => input.click()
+  drop.onkeydown = e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); input.click() } }
+  input.onchange = () => input.files?.[0] && loadFile(input.files[0])
+  drop.ondragover = e => {e.preventDefault(); drop.classList.add('drag')}
+  drop.ondragleave = () => drop.classList.remove('drag')
+  drop.ondrop = e => {e.preventDefault(); drop.classList.remove('drag'); const f=e.dataTransfer?.files[0]; if(f) loadFile(f)}
+  document.querySelectorAll<HTMLElement>('[data-open]').forEach(x => x.onclick = () => openImport(x.dataset.open!))
+}
+
+function historyTable(items:ImportItem[]){
+  return `<div class="history-wrap"><table class="history">
+    <thead><tr><th>Дата и время</th><th>Имя файла</th><th>Событий</th><th>КИЗ</th><th>Статус</th><th class="action-head">Открыть</th></tr></thead>
+    <tbody>${items.map(i => {
+      const status = i.repeated
+        ? `<span class="status repeat">Повторно загружен <span class="status-detail">· новых 0 · duplicate ${i.duplicate_events}</span></span>`
+        : i.status === 'processed'
+          ? '<span class="status ok">Обработан</span>'
+          : '<span class="status bad">Ошибка</span>'
+      return `<tr>
+        <td class="date-cell">${fmt(i.uploaded_at)}</td>
+        <td class="file-name"><span class="xlsx-icon">${icons.file}</span><span>${esc(i.filename)}</span></td>
+        <td>${i.row_count}</td><td>${i.unique_kiz}</td><td>${status}</td>
+        <td class="action-cell"><button class="icon-btn open-file" data-open="${i.fingerprint}" title="Открыть файл" aria-label="Открыть файл">${icons.eye}</button></td>
+      </tr>`
+    }).join('')}</tbody>
+  </table></div>`
+}
+
+async function loadFile(file:File){
+  if(!file.name.toLowerCase().endsWith('.xlsx')){ showToast('Поддерживается только формат XLSX', 'error'); return }
+  try{
+    const result = await upload(file)
+    await openImport(result.fingerprint)
+  }catch(e){ showToast(readError(e), 'error') }
+}
+
+async function openImport(fp:string){
+  try{
+    current = await api<any>(`/api/imports/${fp}`)
+    events = await api<EventItem[]>(`/api/imports/${fp}/events`)
+    selected.clear()
+    preview = null
+    selectionSummary = null
+    detail = null
+    filter = 'all'
+    query = ''
+    renderWorkspace()
+  }catch(e){ showToast(readError(e), 'error') }
+}
+
+function renderWorkspace(){
+  setMainMode('workspace')
+  const checked = events.some(e => e.decision)
+  main().innerHTML = `
+    <section class="workspace">
+      <div class="workspace-header">
+        <div>
+          ${pageTitle()}
+          <div class="file-context">
+            <span class="xlsx-icon large">${icons.file}</span>
+            <div class="file-context-copy">
+              <strong>${esc(current.filename)}</strong>
+              <small>Загружен ${fmt(current.uploaded_at)} · ${current.event_count} событий · ${current.unique_kiz} КИЗ</small>
+            </div>
+          </div>
+        </div>
+        <button id="replace" class="text-btn replace-btn">Заменить файл</button>
+      </div>
+      <div class="toolbar">
+        <label class="search-wrap">${icons.search}<input id="search" autocomplete="off" placeholder="Поиск по КИЗ"></label>
+        <div class="select-wrap"><select id="filter" aria-label="Фильтр рекомендации">
+          <option value="all">Все рекомендации</option>
+          <option value="READY_TO_WITHDRAW">Нужно вывести</option>
+          <option value="READY_TO_RETURN">Нужно вернуть</option>
+          <option value="ALREADY_DONE">Уже обработано</option>
+          <option value="MANUAL_REVIEW">Требует проверки</option>
+          <option value="ERROR">Ошибка</option>
+        </select>${icons.chevron}</div>
+        <button id="check" class="secondary-btn check-btn">${checking ? '<span class="spinner"></span>Проверяем…' : checked ? 'Повторить проверку' : 'Проверить КИЗ'}</button>
+        <span id="check-status" class="check-status">${checking ? 'Обновляем строки' : checked ? 'Проверено локально' : 'Локальная проверка'}</span>
+        <span class="shown" id="shown"></span>
+      </div>
+      <div class="table-shell">
+        <table class="events">
+          <thead><tr>
+            <th class="check-col"><input id="all" type="checkbox" aria-label="Выбрать видимые строки"></th>
+            <th>КИЗ</th><th>Операция WB</th><th>Дата WB</th><th>Рекомендация</th><th>Состояние</th><th class="detail-col"></th>
+          </tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div id="operation" class="operation-zone"></div>
+    </section>`
+
+  document.querySelector('#replace')!.addEventListener('click', renderHome)
+  const checkButton = document.querySelector<HTMLButtonElement>('#check')!
+  checkButton.disabled = checking
+  checkButton.addEventListener('click', runCheck)
+  const search = document.querySelector<HTMLInputElement>('#search')!
+  search.value = query
+  search.oninput = e => {query=(e.target as HTMLInputElement).value; renderRows()}
+  const filterEl = document.querySelector<HTMLSelectElement>('#filter')!
+  filterEl.value = filter
+  filterEl.onchange = e => {filter=(e.target as HTMLSelectElement).value; renderRows()}
+  document.querySelector<HTMLInputElement>('#all')!.onchange = async e => {
+    const on=(e.target as HTMLInputElement).checked
+    visible().forEach(x => on ? selected.add(x.event_id) : selected.delete(x.event_id))
+    preview=null
+    await refreshSelectionSummary()
+    renderRows()
+    renderOperation()
+  }
+  renderRows()
+  renderOperation()
+}
+
+function visible(){
+  const needle = query.trim()
+  return events.filter(e => (filter === 'all' || e.decision === filter) && (!needle || e.kiz.includes(needle)))
+}
+
+function renderRows(){
+  const body = document.querySelector<HTMLTableSectionElement>('#rows')
+  if(!body) return
+  const list = visible()
+  const shown = document.querySelector('#shown')
+  if(shown) shown.textContent = `${list.length} из ${events.length}`
+  const all = document.querySelector<HTMLInputElement>('#all')
+  if(all){
+    const picked = list.filter(e => selected.has(e.event_id)).length
+    all.checked = list.length > 0 && picked === list.length
+    all.indeterminate = picked > 0 && picked < list.length
+  }
+
+  body.innerHTML = list.map(e => `
+    <tr class="event-row ${selected.has(e.event_id) ? 'selected' : ''}">
+      <td><input data-pick="${e.event_id}" type="checkbox" aria-label="Выбрать событие" ${selected.has(e.event_id)?'checked':''}></td>
+      <td><div class="kiz-cell"><code title="${esc(e.kiz)}">${short(e.kiz)}</code><button class="copy-kiz" data-copy="${esc(e.kiz)}" title="Копировать полный КИЗ" aria-label="Копировать полный КИЗ">${icons.copy}</button></div></td>
+      <td>${esc(e.operation)}</td>
+      <td>${date(e.occurred_at)}</td>
+      <td>${decisionBadge(e)}</td>
+      <td>${stateText(e)}</td>
+      <td><button class="icon-btn detail-btn ${detail===e.event_id?'open':''}" data-detail="${e.event_id}" title="Подробности" aria-label="Подробности">${icons.chevron}</button></td>
+    </tr>
+    ${detail===e.event_id ? '<tr class="detail-row"><td colspan="7"><div id="detail"></div></td></tr>' : ''}`
+  ).join('')
+
+  body.querySelectorAll<HTMLInputElement>('[data-pick]').forEach(x => x.onchange = async () => {
+    x.checked ? selected.add(x.dataset.pick!) : selected.delete(x.dataset.pick!)
+    preview = null
+    await refreshSelectionSummary()
+    renderRows()
+    renderOperation()
+  })
+  body.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach(x => x.onclick = async e => {
+    e.stopPropagation()
+    await navigator.clipboard.writeText(x.dataset.copy || '')
+    showToast('КИЗ скопирован')
+  })
+  body.querySelectorAll<HTMLElement>('[data-detail]').forEach(x => x.onclick = async () => {
+    detail = detail === x.dataset.detail ? null : x.dataset.detail!
+    renderRows()
+    if(detail){
+      const d=await api<any>(`/api/events/${detail}`)
+      renderDetail(d)
+    }
+  })
+}
+
+function decisionBadge(e:EventItem){
+  if(!e.decision) return '<span class="state-empty">Не проверено</span>'
+  const tone = e.decision === 'ERROR' ? 'danger' : e.decision === 'MANUAL_REVIEW' ? 'warn' : e.decision === 'ALREADY_DONE' ? 'neutral' : 'good'
+  return `<span class="badge ${tone}">${decLabel[e.decision] || e.decision}</span>`
+}
+
+function stateText(e:EventItem){
+  if(e.error) return '<span class="state-with-dot danger-text"><i></i>Нет результата</span>'
+  if(e.reason && e.decision === 'MANUAL_REVIEW') return `<span class="state-with-dot warn-text"><i></i>${esc(reasonLabel[e.reason] || e.reason)}</span>`
+  return e.checked_at ? '<span class="state-with-dot checked-text"><i></i>Проверено</span>' : '<span class="state-empty">—</span>'
+}
+
+async function renderDetail(d:any){
+  const el = document.querySelector('#detail')
+  if(!el) return
+  el.innerHTML = `
+    <div class="detail-grid">
+      <section class="detail-primary"><span class="detail-label">Полный КИЗ</span><div class="copy-line"><code>${esc(d.kiz)}</code><button id="copy" class="mini-action">${icons.copy}<span>Копировать</span></button></div></section>
+      <section><span class="detail-label">Исходное событие WB</span><p>${esc(d.operation)} · ${date(d.occurred_at)}</p><p class="muted">Задание ${esc(d.task_number)} · стикер ${esc(d.sticker)}</p></section>
+      <section><span class="detail-label">Результат проверки</span><p>${d.decision ? decLabel[d.decision] || d.decision : 'Не проверено'}</p><p class="muted">${esc(reasonLabel[d.reason] || d.reason || d.error || '—')}</p></section>
+    </div>
+    <div class="history-block">
+      <div class="history-title"><span class="detail-label">История этого КИЗ</span><span>${d.history.length} ${plural(d.history.length, 'событие', 'события', 'событий')}</span></div>
+      <div class="history-events">${d.history.map((h:any) => `<div class="history-event"><span>${esc(h.operation)}</span><span>${date(h.occurred_at)}</span><span class="muted">Задание ${esc(h.task_number)}</span></div>`).join('')}</div>
+      ${d.history_order_ambiguous ? '<p class="warning-note">Порядок части событий неоднозначен. Интерфейс не определяет «последнее» событие самостоятельно.</p>' : ''}
+    </div>`
+  document.querySelector('#copy')!.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(d.kiz)
+    showToast('КИЗ скопирован')
+  })
+}
+
+async function runCheck(){
+  if(checking) return
+  checking = true
+  preview = null
+  selectionSummary = null
+  renderWorkspace()
+  try{
+    await Promise.all([
+      api(`/api/imports/${current.fingerprint}/check`, {method:'POST'}),
+      sleep(500),
+    ])
+    events = await api<EventItem[]>(`/api/imports/${current.fingerprint}/events`)
+    if(selected.size) await refreshSelectionSummary()
+  }catch(e){
+    showToast(readError(e), 'error')
+  }finally{
+    checking = false
+    renderWorkspace()
+  }
+}
+
+async function refreshSelectionSummary(){
+  const request = ++selectionRequest
+  if(!selected.size){ selectionSummary=null; return }
+  try{
+    const result = await api<Preview>('/api/operation-preview', {
+      method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({event_ids:[...selected]})
+    })
+    if(request === selectionRequest) selectionSummary = result
+  }catch(e){
+    if(request === selectionRequest) selectionSummary = null
+    showToast(readError(e), 'error')
+  }
+}
+
+function renderOperation(){
+  const op = document.querySelector<HTMLDivElement>('#operation')
+  if(!op) return
+  if(!selected.size && !preview){ op.innerHTML=''; return }
+
+  const summary = selectionSummary
+  const values = summary ? {
+    selected: summary.selected,
+    ready: summary.included.length,
+    withdraw: summary.withdraw,
+    returns: summary.returns,
+    excluded: summary.excluded.length,
+  } : {selected:selected.size, ready:'—', withdraw:'—', returns:'—', excluded:'—'}
+
+  op.innerHTML = `
+    <div class="operation-bar ${preview?'with-preview':''}">
+      <div class="op-counts">
+        ${countItem(values.selected,'Выбрано')}${countItem(values.ready,'К выполнению')}${countItem(values.withdraw,'Вывод')}${countItem(values.returns,'Возврат')}${countItem(values.excluded,'Исключено')}
+      </div>
+      <button id="preview" class="primary-btn" ${selectionSummary?'':'disabled'}>Проверить состав</button>
+    </div>
+    ${preview ? previewHtml(preview) : ''}`
+
+  const btn = document.querySelector<HTMLButtonElement>('#preview')
+  if(btn) btn.addEventListener('click', async () => {
+    try{
+      preview = await api<Preview>('/api/operation-preview', {
+        method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({event_ids:[...selected]})
+      })
+      selectionSummary = preview
+      renderOperation()
+    }catch(e){ showToast(readError(e), 'error') }
+  })
+}
+
+function countItem(value:number|string,label:string){
+  return `<span><b>${value}</b><small>${label}</small></span>`
+}
+
+function previewHtml(p:Preview){
+  const reasons = new Map<string,number>()
+  p.excluded.forEach(x => reasons.set(x.reason, (reasons.get(x.reason) || 0) + 1))
+  return `<div class="preview">
+    <div class="preview-head"><div><h2>Проверка состава</h2><p>${esc(current.filename)} · состав рассчитан backend по сохранённым решениям</p></div><span class="preview-mode">Только preview</span></div>
+    <div class="preview-numbers">${countItem(p.included.length,'Войдут в состав')}${countItem(p.withdraw,'Вывод')}${countItem(p.returns,'Возврат')}${countItem(p.excluded.length,'Исключено')}</div>
+    ${p.excluded.length ? `<div class="excluded"><h3>Исключённые события</h3>${[...reasons].map(([r,n]) => `<div><span>${esc(reasonLabel[r] || r)}</span><b>${n}</b></div>`).join('')}</div>` : ''}
+    <div class="preview-note"><span class="note-dot"></span><span>Реальная подпись и отправка пока недоступны. Preview ничего не отправляет.</span></div>
+  </div>`
+}
+
+function short(s:string){return esc(s.length > 38 ? s.slice(0,24) + '…' + s.slice(-10) : s)}
+function plural(n:number, one:string, few:string, many:string){const m=n%100;if(m>=11&&m<=14)return many;const r=n%10;return r===1?one:r>=2&&r<=4?few:many}
+function readError(error:unknown){return error instanceof Error ? error.message : String(error)}
+function showToast(message:string,tone:'normal'|'error'='normal'){
+  const root=document.querySelector<HTMLDivElement>('#toast-root'); if(!root)return
+  const node=document.createElement('div'); node.className=`toast ${tone==='error'?'error':''}`; node.textContent=message; root.appendChild(node)
+  setTimeout(()=>node.classList.add('show'),0); setTimeout(()=>{node.classList.remove('show');setTimeout(()=>node.remove(),180)},2600)
+}
 function esc(s:any){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!))}
+
 init()
