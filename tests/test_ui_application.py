@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
 from pathlib import Path
 
 from wbcz.models import Decision
 from wbcz_ui.application import UiApplication
 
-REF = Path('/mnt/data/REF_WB_archive_9.xlsx')
+REF = Path(os.environ.get('WBCZ_REF_XLSX', '/mnt/data/REF_WB_archive_9.xlsx'))
 
 
 def test_real_import_history_repeat_and_reopen(tmp_path):
