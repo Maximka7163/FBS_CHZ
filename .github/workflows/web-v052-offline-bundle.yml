@@ -1,0 +1,310 @@
+name: Web v0.5.2 offline deployment bundle
+
+on:
+  push:
+    branches: [web/v0.5.2-offline-deploy-bundle]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APPROVED_SOURCE_SHA: cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+  APPROVED_SOURCE_BRANCH: web/v0.5.1-deployment-package
+  ARCHIVE_NAME: sellari-marking-0.5.1-cc3054eefba5.tar.gz
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_test"
+          --health-interval=2s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -e ".[ui,test,web]"
+      - working-directory: frontend
+        run: npm install --no-audit --no-fund --no-package-lock
+      - working-directory: frontend
+        run: npm run typecheck
+      - working-directory: frontend
+        run: npm run build
+      - name: Production bundle contains no localhost API URL
+        run: |
+          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' frontend/dist; then
+            echo 'localhost URL found in production frontend bundle' >&2
+            exit 1
+          fi
+      - name: Build deterministic WB regression workbook
+        shell: bash
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python - <<'PY'
+          from openpyxl import Workbook
+          from pathlib import Path
+          p=Path('/mnt/data/REF_WB_archive_9.xlsx')
+          h=['№ задания','Стикер','КИЗ','Номер чека','Стоимость','Валюта','Номер фискального накопителя','Дата','Тип операции','Признак продажи юрлицу']
+          w=Workbook();s=w.active;s.title='КИЗ';s.append(h);n=0
+          def add(op,dated):
+              global n
+              n+=1
+              s.append([f'T{n}',f'S{n}',f'CI-KIZ-{n:04d}',f'CHK-{n}' if dated else None,100,'RUB',f'FN-{n}' if dated else None,f'12:34:56 {((n-1)%28)+1:02d}.08.2026' if dated else None,op,'нет'])
+          for _ in range(13): add('Продажа',False)
+          for _ in range(63): add('Продажа',True)
+          for _ in range(137): add('Возврат',False)
+          for _ in range(3): add('Возврат',True)
+          for _ in range(2): add('Возврат',True)
+          for _ in range(20): add('Возврат',False)
+          assert n==238
+          w.save(p)
+          PY
+      - name: Run alembic upgrade head
+        run: alembic upgrade head
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+      - name: Run full pytest
+        run: python -m pytest -q
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+          WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+      - name: Create safe CI production env
+        run: |
+          cat > "$RUNNER_TEMP/wbcz-production.env" <<EOF
+          WBCZ_ENV=production
+          WBCZ_DATABASE_URL=postgresql+psycopg://wbcz:ci_only_password_123456789@marking-postgres:5432/wbcz
+          WBCZ_OWN_INN=1234567890
+          WBCZ_SESSION_TTL_SECONDS=3600
+          WBCZ_COOKIE_SECURE=true
+          WBCZ_SESSION_COOKIE_NAME=wbcz_session
+          WBCZ_CSRF_COOKIE_NAME=wbcz_csrf
+          WBCZ_DEBUG=false
+          WBCZ_TRUSTED_HOSTS=mark.sellari.ru
+          WBCZ_APP_VERSION=0.5.1
+          WBCZ_BUILD_SHA=${GITHUB_SHA}
+          WBCZ_HEALTHCHECK_HOST=mark.sellari.ru
+          WBCZ_POSTGRES_DB=wbcz
+          WBCZ_POSTGRES_USER=wbcz
+          WBCZ_POSTGRES_PASSWORD=ci_only_password_123456789
+          WBCZ_BACKEND_IMAGE=sellari-marking-backend
+          WBCZ_BACKEND_PORT=18765
+          EOF
+      - name: Docker compose config validation
+        run: |
+          docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml config --format json > "$RUNNER_TEMP/compose.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          cfg=json.loads(Path(os.environ['RUNNER_TEMP'],'compose.json').read_text())
+          pg=cfg['services']['marking-postgres']
+          backend=cfg['services']['marking-backend']
+          assert not pg.get('ports')
+          ports=backend.get('ports') or []
+          assert ports and ports[0].get('host_ip') == '127.0.0.1'
+          assert cfg['networks']['marking_internal']['internal'] is True
+          PY
+      - name: Build backend production image
+        run: docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml build marking-backend
+      - name: Production container migration and healthcheck
+        run: |
+          set -euo pipefail
+          docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml up -d marking-postgres
+          docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml run --rm marking-backend alembic upgrade head
+          docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml up -d marking-backend
+          CID="$(docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml ps -q marking-backend)"
+          status=starting
+          for i in $(seq 1 40); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$CID")"
+            [ "$status" = healthy ] && break
+            [ "$status" = unhealthy ] && { docker logs "$CID"; exit 1; }
+            sleep 2
+          done
+          test "$status" = healthy
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:18765/api/health
+      - name: Safety boundary
+        run: |
+          python - <<'PY'
+          from wbcz_web.main import create_app
+          from wbcz_web.config import WebConfig
+          app=create_app(WebConfig.from_env())
+          paths={getattr(r,'path',None) for r in app.routes}
+          forbidden={'/register','/signup','/api/register','/api/auth/register','/api/lk/documents/create','/api/submit'}
+          assert not paths.intersection(forbidden)
+          print('WEB_PRODUCTION_TRUE_API=ABSENT')
+          print('TRUE_API_WRITE=FALSE')
+          print('DOCUMENT_SIGNING=FALSE')
+          print('SUBMISSION=FALSE')
+          print('WINDOWS_BRIDGE=FALSE')
+          PY
+        env:
+          WBCZ_ENV: production
+          WBCZ_DATABASE_URL: postgresql+psycopg://wbcz:ci_only_password_123456789@marking-postgres:5432/wbcz
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_COOKIE_SECURE: "true"
+          WBCZ_DEBUG: "false"
+          WBCZ_TRUSTED_HOSTS: mark.sellari.ru
+          WBCZ_BUILD_SHA: ${{ github.sha }}
+      - if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/wbcz-production.env" ]; then
+            docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml down -v || true
+          fi
+
+  bundle:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bundle tooling
+        uses: actions/checkout@v4
+        with:
+          path: packaging
+      - name: Checkout exact approved application source
+        uses: actions/checkout@v4
+        with:
+          ref: cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+          path: source
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Prove exact source checkout
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$APPROVED_SOURCE_SHA"
+          echo "SOURCE_TIMESTAMP=$(git -C source show -s --format=%cI "$APPROVED_SOURCE_SHA")" >> "$GITHUB_ENV"
+      - name: Build exact-source production frontend
+        working-directory: source/frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm run build
+          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' dist; then
+            echo 'localhost URL found in exact-source production frontend bundle' >&2
+            exit 1
+          fi
+      - name: Build reproducible bundle twice
+        run: |
+          set -euo pipefail
+          python packaging/scripts/build_offline_bundle.py \
+            --source-root source \
+            --packaging-root packaging \
+            --output-dir bundle-a \
+            --source-sha "$APPROVED_SOURCE_SHA" \
+            --source-branch "$APPROVED_SOURCE_BRANCH" \
+            --build-timestamp-utc "$SOURCE_TIMESTAMP" \
+            --builder-sha "$GITHUB_SHA"
+          python packaging/scripts/build_offline_bundle.py \
+            --source-root source \
+            --packaging-root packaging \
+            --output-dir bundle-b \
+            --source-sha "$APPROVED_SOURCE_SHA" \
+            --source-branch "$APPROVED_SOURCE_BRANCH" \
+            --build-timestamp-utc "$SOURCE_TIMESTAMP" \
+            --builder-sha "$GITHUB_SHA"
+          cmp "bundle-a/$ARCHIVE_NAME" "bundle-b/$ARCHIVE_NAME"
+          cmp "bundle-a/$ARCHIVE_NAME.sha256" "bundle-b/$ARCHIVE_NAME.sha256"
+      - name: Verify archive and internal SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd bundle-a
+          sha256sum -c "$ARCHIVE_NAME.sha256"
+          mkdir extracted
+          tar -xzf "$ARCHIVE_NAME" -C extracted
+          ROOT="extracted/sellari-marking-0.5.1-cc3054eefba5"
+          cd "$ROOT"
+          sha256sum -c SHA256SUMS
+          grep -F '"source_git_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
+          grep -F '"frontend_built_from_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
+          test -f frontend/index.html
+          test ! -e .git
+          test ! -e .env.production
+          test ! -e frontend/node_modules
+          test ! -e src/wbcz_ui
+          if find . -type f \( -name '*.xlsx' -o -name '*.sqlite' -o -name '*.db' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \) | grep -q .; then
+            echo 'forbidden private/secret-like file found in archive' >&2
+            exit 1
+          fi
+          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' frontend; then
+            echo 'localhost URL found in archived frontend' >&2
+            exit 1
+          fi
+      - name: Validate extracted bundle builds without GitHub or Node
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/sellari-marking-0.5.1-cc3054eefba5"
+          cat > "$RUNNER_TEMP/offline-production.env" <<EOF
+          WBCZ_ENV=production
+          WBCZ_DATABASE_URL=postgresql+psycopg://wbcz:offline_ci_password_123456789@marking-postgres:5432/wbcz
+          WBCZ_OWN_INN=1234567890
+          WBCZ_SESSION_TTL_SECONDS=3600
+          WBCZ_COOKIE_SECURE=true
+          WBCZ_SESSION_COOKIE_NAME=wbcz_session
+          WBCZ_CSRF_COOKIE_NAME=wbcz_csrf
+          WBCZ_DEBUG=false
+          WBCZ_TRUSTED_HOSTS=mark.sellari.ru
+          WBCZ_APP_VERSION=0.5.1
+          WBCZ_BUILD_SHA=$APPROVED_SOURCE_SHA
+          WBCZ_HEALTHCHECK_HOST=mark.sellari.ru
+          WBCZ_POSTGRES_DB=wbcz
+          WBCZ_POSTGRES_USER=wbcz
+          WBCZ_POSTGRES_PASSWORD=offline_ci_password_123456789
+          WBCZ_BACKEND_IMAGE=sellari-marking-offline-ci
+          WBCZ_BACKEND_PORT=18766
+          EOF
+          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" config >/dev/null
+          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" build marking-backend
+          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" up -d marking-postgres
+          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" run --rm marking-backend alembic upgrade head
+          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" up -d marking-backend
+          CID="$(docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" ps -q marking-backend)"
+          status=starting
+          for i in $(seq 1 40); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$CID")"
+            [ "$status" = healthy ] && break
+            [ "$status" = unhealthy ] && { docker logs "$CID"; exit 1; }
+            sleep 2
+          done
+          test "$status" = healthy
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:18766/api/health
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:18766/api/version | grep "$APPROVED_SOURCE_SHA"
+      - name: Capture final archive SHA256
+        id: checksum
+        run: |
+          set -euo pipefail
+          SHA="$(cut -d' ' -f1 "bundle-a/$ARCHIVE_NAME.sha256")"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_SHA256=$SHA"
+      - name: Upload private offline bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sellari-marking-0.5.1-cc3054eefba5
+          path: |
+            bundle-a/sellari-marking-0.5.1-cc3054eefba5.tar.gz
+            bundle-a/sellari-marking-0.5.1-cc3054eefba5.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/offline-production.env" ]; then
+            ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/sellari-marking-0.5.1-cc3054eefba5"
+            docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" down -v || true
+          fi
