@@ -1,131 +1,99 @@
-# WB FBS → Честный знак: API-независимое ядро
+# WB FBS → Честный знак
 
-Python 3.12. Локальный SQLite. Единственный рабочий сценарий проверки —
-offline mock dry-run. Production True API, сеть, авторизация, CryptoPro,
-УКЭП и реальная отправка документов отсутствуют.
+v0.4 combines the existing offline-first WB FBS core with the first production **LIVE READ-ONLY** True API path.
 
-Версия проекта 0.2.0 исправляет импорт событий с отсутствующей датой и
-добавляет реальный строковый формат WB `HH:MM:SS DD.MM.YYYY`.
+Core properties remain unchanged: Python 3.12, local SQLite, existing `wb_parser`, `EventStore`, deterministic `event_id`, backend-only `control_engine` decisions, and no business rules in the frontend.
 
-## Установка и тесты: Windows PowerShell
+## v0.4 safety boundary
 
-    py -3.12 -m venv .venv
-    .\.venv\Scripts\python -m pip install -e ".[test]"
-    .\.venv\Scripts\python -m pytest
+LIVE mode may only:
 
-Другие ОС:
+- authenticate with UKEP through `GET /api/v3/true-api/auth/key` and `POST /api/v3/true-api/auth/simpleSignIn`;
+- read KI states through `POST /api/v3/true-api/cises/info?pg=lp`.
 
-    python3.12 -m venv .venv
-    .venv/bin/python -m pip install -e ".[test]"
-    .venv/bin/python -m pytest
+Production document creation/signing/submission is not implemented. The production transport uses an exact allowlist and raises `ProductionMutationDisabled` before HTTP I/O for every other route, including `/lk/documents/create`.
 
-Runtime-зависимость: openpyxl. SQLite — стандартная библиотека.
-Тестовая зависимость: pytest.
+Authentication challenge signing is a separate boundary. `WindowsCryptoProAuthSigner` exposes only `sign_auth_challenge(...)`; there is no production document-signing method in v0.4.
 
-Упаковщик создаёт каталог wbcz-core и ZIP со всеми файлами.
-Он не устанавливает зависимости и не запускает тесты автоматически.
-Существующие каталог и архив не перезаписываются.
+## WB FBS evidence guard
 
-## CLI
+For the standard WB archive flow, READY recommendations require both the current normalized KI state and WB evidence:
 
-Импорт:
+- sale + in circulation + receipt evidence + our owner → `READY_TO_WITHDRAW`;
+- sale + already withdrawn for distance sale → `ALREADY_DONE`;
+- sale + in circulation + missing receipt → `MANUAL_REVIEW / SALE_RECEIPT_MISSING`;
+- return + already in circulation → `ALREADY_DONE`;
+- return + withdrawn for distance sale + receipt evidence + our owner → `READY_TO_RETURN`;
+- return + withdrawn for distance sale + missing receipt → `MANUAL_REVIEW / RETURN_RECEIPT_MISSING`.
 
-    .\.venv\Scripts\wbcz --db state.sqlite import archive.xlsx
+Owner mismatch, ambiguous WB history, unknown CHZ state/statusEx and wrong product-group context are fail-safe manual-review outcomes. `ALREADY_DONE` is evaluated before the receipt requirement so missing receipt data never creates a needless new operation.
 
-Просмотр истории:
+## Installation: Windows PowerShell
 
-    .\.venv\Scripts\wbcz --db state.sqlite history
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[ui,test]"
+```
 
-Offline preview:
+Frontend:
 
-    .\.venv\Scripts\wbcz --db state.sqlite preview --states examples/mock_states.json --owner-inn 1234567890
+```powershell
+cd frontend
+npm install
+npm run typecheck
+npm run build
+npm run dev
+```
 
-Аудит:
+Backend (offline by default):
 
-    .\.venv\Scripts\wbcz --db state.sqlite audit
+```powershell
+.\.venv\Scripts\python.exe -m wbcz_ui --db .\wbcz-ui.sqlite
+```
 
-`examples/mock_states.json` содержит только DEMO-KI. Для своего импорта
-подготовьте локальные mock-состояния соответствующих КИЗ. Это внутренние
-нормализованные состояния, не production-схема True API.
+Open `http://127.0.0.1:5173`.
 
-Коды завершения CLI: 0 — команда выполнена; 1 — ошибка команды;
-2 — отклонённые строки импорта либо ошибки проверки состояния.
-Код 0 не означает готовность документов или успешную отправку.
+For the first UKEP/production read-only test follow `docs/LIVE_READ_ONLY_WINDOWS_TEST.md` exactly.
 
-## Данные WB и идентичность событий
+## Tests
 
-Обязательны лист «КИЗ» и все заголовки из `wb_parser.HEADERS`.
-Пустые значения даты, номера чека и ФН допустимы независимо друг от друга.
-Непустая некорректная дата отклоняет строку, а не превращается в неизвестную.
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
 
-Отсутствующая дата сохраняется как Python None, JSON null и SQLite NULL.
-Время импорта/аудита — отдельная метка наблюдения, не дата операции WB.
-Для дат без часового пояса принят UTC+3; известные даты нормализуются в UTC.
-Поддерживаются, в частности, `04:58:00 19.08.2026` и
-`22:45:00 15.08.2026`. Поддержка явно указанной календарной даты
-не используется для заполнения отсутствующей даты.
+The suite preserves the original v0.2 regression coverage, UI/application safety checks, operation-mode checks, and v0.4 read-only transport/auth/evidence tests.
 
-event_id — SHA-256 канонического содержимого события с префиксом
-`wb-event:v1:`. Неизвестная дата представлена null. Имя файла,
-fingerprint, номер строки и время импорта не участвуют в event_id.
-Идентификаторы датированных событий совместимы с прежней формулой.
+## Real WB regression
 
-Полностью одинаковые нормализованные строки, включая недатированные,
-считаются одним событием; каждое вхождение сохраняется в import_rows.
-Без дополнительных исходных данных нельзя различить два фактических
-события с полностью одинаковым содержимым. Исправленная строка с изменёнными
-полями получает другой ID; автоматического определения замен нет.
+`REF_WB_archive_9.xlsx` is expected to import as:
 
-## История и границы READY
+- 238 events;
+- 238 unique KIZ;
+- 76 sales;
+- 162 returns;
+- 68 events with date;
+- 170 without date;
+- 0 rejected rows;
+- sales: 63 with receipt evidence, 13 without;
+- returns: 5 with receipt evidence, 157 without.
 
-История отображает известные даты по времени, затем неизвестные по ID.
-Это только порядок отображения: неизвестные события не объявляются
-более поздними. ID не является свидетельством хронологии.
+The old synthetic READY counts are not an acceptance target after the evidence guard.
 
-Для нескольких событий одного КИЗ пропущенная или совпадающая дата
-даёт `history_order_ambiguous=true`. Один недатированный факт не имеет
-пары для упорядочивания. Значение false не подтверждает сверку истории.
+## Data and identity
 
-Каждая проверка независимо использует текущее mock-состояние.
-`check_all()` не воспроизводит исторические переходы.
-READY_TO_WITHDRAW / READY_TO_RETURN — только результаты state-machine,
-не готовность документа и не разрешение отправки. Полнота реквизитов,
-правила production-документов и историческая сверка не реализованы.
-ALREADY_DONE также не доказывает выполнение конкретного события WB.
+Missing WB date is stored as Python `None`, JSON `null`, and SQLite `NULL`. Known WB timestamps are normalized to UTC. `event_id` remains SHA-256 over canonical normalized event content with prefix `wb-event:v1:`; filename, source row number, import timestamp and fingerprint are not part of event identity.
 
-## SQLite v2 и аудит
+Repeated normalized events deduplicate in `events` while every import occurrence remains in `import_rows`. Multiple events for one KIZ are preserved. If their chronology cannot be established safely, application checks force `MANUAL_REVIEW / HISTORY_ORDER_AMBIGUOUS`.
 
-Схема v2 хранит nullable occurred_at. Автоматической миграции v1 нет.
-Сохраните старую БД вместе с историей и аудитом, выберите новый путь
-`--db` и повторно импортируйте исходные WB-файлы. Старую БД не удаляйте.
-Непустая БД без версии и некорректная NOT NULL-схема отклоняются.
+## SQLite and audit
 
-Повторные проверки сохраняются в checks; previews — заменяемая локальная
-проекция, не очередь отправки. Новое событие КИЗ сбрасывает его previews,
-но не удаляет проверки. Ошибка проверки заменяет прежнюю READY-проекцию.
+SQLite remains the working-state source; frontend `localStorage` is not used for business state. Existing schema v2 stores nullable `occurred_at`.
 
-Аудит дописывается в транзакции операции. Триггеры запрещают UPDATE/DELETE
-записей, но это не криптографически защищённый журнал: владелец файла БД
-может изменить схему. БД и экспорт аудита требуют ограничения доступа.
+LIVE True API metadata is additionally written to the configured JSONL audit with timestamp, LIVE mode, endpoint, KI count, HTTP status and request/correlation ID when available. Tokens, full auth signatures, private keys and PINs are not logged.
 
-## Регрессия и ограничения
+## Limitations
 
-Сохранены тесты T01–T12 и дополнительные проверки.
-`tests/test_wb_regression.py` покрывает пропуски даты/чека/ФН,
-формат WB с временем первым, NULL после повторного открытия, стабильность
-event_id, неоднозначную историю, защиту схемы и изоляцию dry-run.
+See `docs/KNOWN_LIMITATIONS.md`. In particular, standard WB FBS archive mode does not detect a later warehouse resale after an FBS refusal; future reconciliation with the WB financial report is required.
 
-Синтетическая регрессия:
-- 238 строк, 238 уникальных КИЗ, 0 отклонённых строк;
-- 76 продаж: 63 с датой/чеком/ФН, 13 без всех трёх полей;
-- 162 возврата: 5 с датой/чеком/ФН, 157 без всех трёх полей;
-- итого 68 датированных и 170 недатированных событий.
-
-Это воспроизведение заданных количеств, не результат запуска на реальном
-REF_WB_archive_9.xlsx. Mock-статусы не описывают реальные состояния КИЗ.
-
-Production True API, авторизация, CryptoPro/УКЭП, настоящая подпись,
-построение и отправка production-документов, GUI отсутствуют.
-Fake-адаптеры предназначены только для тестов и не подключены к dry-run.
-Получение document_id/ACCEPTED не считается успехом документа;
-в тестовой модели успех — только SUCCEEDED.
+v0.4 does not implement `LK_RECEIPT`, `LP_RETURN`, production document signing, document creation, cancellation, retry submission, or any other production mutation.
