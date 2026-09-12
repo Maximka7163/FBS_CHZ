@@ -127,16 +127,17 @@ class Event:
 
 @dataclass(frozen=True, slots=True)
 class KiState:
-    """Internal normalized model, NOT a production True API schema.
+    """Internal normalized model, NOT a raw True API response.
 
-    Known status/statusEx: IN_CIRCULATION, WITHDRAWN.
-    Known distance withdrawal reason: DISTANCE.
-    Unknown strings are intentionally retained for conservative decisions.
+    Known normalized status/statusEx values are intentionally small and
+    conservative. Production adapters must map raw True API values here and
+    leave anything unknown visible to the control engine instead of guessing.
     """
     status: str
     statusEx: str | None = None
     withdrawReason: str | None = None
     ownerInn: str | None = None
+    productGroup: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
