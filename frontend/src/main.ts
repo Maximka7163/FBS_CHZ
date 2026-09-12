@@ -3,14 +3,21 @@ import type {ImportItem, EventItem} from './types'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 
+type OperationMode = 'AUTO' | 'CONTROL' | 'WITHDRAW_ONLY' | 'RETURN_ONLY'
+
+type PreviewItem = {event_id:string;kiz:string;operation:string;decision:string|null;reason?:string;reason_text?:string}
 type Preview = {
-  selected: number
-  included: Array<{event_id:string;kiz:string;operation:string;decision:string}>
-  excluded: Array<{event_id:string;kiz:string;operation:string;decision:string|null;reason:string}>
-  withdraw: number
-  returns: number
+  mode: OperationMode
+  selected_count: number
+  eligible_count: number
+  withdraw_count: number
+  return_count: number
+  excluded_count: number
+  included: PreviewItem[]
+  excluded: PreviewItem[]
   production_submission_available: boolean
 }
+
 
 let current: any = null
 let events: EventItem[] = []
@@ -22,6 +29,7 @@ let preview: Preview | null = null
 let selectionSummary: Preview | null = null
 let detail: string | null = null
 let selectionRequest = 0
+let mode: OperationMode = 'AUTO'
 
 const decLabel: Record<string,string> = {
   READY_TO_WITHDRAW: 'Нужно вывести',
@@ -42,6 +50,20 @@ const reasonLabel: Record<string,string> = {
   SALE_ALREADY_WITHDRAWN_DISTANCE: 'Уже выведен из оборота',
   RETURN_ALREADY_IN_CIRCULATION: 'Уже в обороте',
   NOT_CHECKED: 'Событие ещё не проверено',
+  HISTORY_ORDER_AMBIGUOUS: 'История событий КИЗ неоднозначна',
+}
+
+const modeLabel: Record<OperationMode,string> = {
+  AUTO: 'Автоматически',
+  CONTROL: 'Контроль',
+  WITHDRAW_ONLY: 'Вывод из оборота',
+  RETURN_ONLY: 'Возврат в оборот',
+}
+const modeHint: Record<OperationMode,string> = {
+  AUTO: 'Backend сам разделит допустимый состав на вывод и возврат',
+  CONTROL: 'Только проверка состояния, без operation preview',
+  WITHDRAW_ONLY: 'В состав попадут только КИЗ с рекомендацией «Нужно вывести»',
+  RETURN_ONLY: 'В состав попадут только КИЗ с рекомендацией «Нужно вернуть»',
 }
 
 const fmt = (s:string) => new Date(s).toLocaleString('ru-RU', {dateStyle:'short', timeStyle:'short'})
@@ -164,6 +186,7 @@ async function openImport(fp:string){
     detail = null
     filter = 'all'
     query = ''
+    mode = 'AUTO'
     renderWorkspace()
   }catch(e){ showToast(readError(e), 'error') }
 }
@@ -171,6 +194,7 @@ async function openImport(fp:string){
 function renderWorkspace(){
   setMainMode('workspace')
   const checked = events.some(e => e.decision)
+  const selectable = mode !== 'CONTROL'
   main().innerHTML = `
     <section class="workspace">
       <div class="workspace-header">
@@ -185,6 +209,12 @@ function renderWorkspace(){
           </div>
         </div>
         <button id="replace" class="text-btn replace-btn">Заменить файл</button>
+      </div>
+      <div class="mode-row">
+        <div class="mode-switch" role="group" aria-label="Режим работы">
+          ${(['AUTO','CONTROL','WITHDRAW_ONLY','RETURN_ONLY'] as OperationMode[]).map(value => `<button class="mode-option ${mode===value?'active':''}" data-mode="${value}" aria-pressed="${mode===value}">${modeLabel[value]}</button>`).join('')}
+        </div>
+        <span class="mode-hint">${modeHint[mode]}</span>
       </div>
       <div class="toolbar">
         <label class="search-wrap">${icons.search}<input id="search" autocomplete="off" placeholder="Поиск по КИЗ"></label>
@@ -201,9 +231,9 @@ function renderWorkspace(){
         <span class="shown" id="shown"></span>
       </div>
       <div class="table-shell">
-        <table class="events">
+        <table class="events ${selectable?'':'control-table'}">
           <thead><tr>
-            <th class="check-col"><input id="all" type="checkbox" aria-label="Выбрать видимые строки"></th>
+            ${selectable ? '<th class="check-col"><input id="all" type="checkbox" aria-label="Выбрать видимые строки"></th>' : ''}
             <th>КИЗ</th><th>Операция WB</th><th>Дата WB</th><th>Рекомендация</th><th>Состояние</th><th class="detail-col"></th>
           </tr></thead>
           <tbody id="rows"></tbody>
@@ -213,6 +243,16 @@ function renderWorkspace(){
     </section>`
 
   document.querySelector('#replace')!.addEventListener('click', renderHome)
+  document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(button => button.onclick = () => {
+    const next = button.dataset.mode as OperationMode
+    if(next === mode) return
+    mode = next
+    selected.clear()
+    preview = null
+    selectionSummary = null
+    selectionRequest++
+    renderWorkspace()
+  })
   const checkButton = document.querySelector<HTMLButtonElement>('#check')!
   checkButton.disabled = checking
   checkButton.addEventListener('click', runCheck)
@@ -222,7 +262,8 @@ function renderWorkspace(){
   const filterEl = document.querySelector<HTMLSelectElement>('#filter')!
   filterEl.value = filter
   filterEl.onchange = e => {filter=(e.target as HTMLSelectElement).value; renderRows()}
-  document.querySelector<HTMLInputElement>('#all')!.onchange = async e => {
+  const all = document.querySelector<HTMLInputElement>('#all')
+  if(all) all.onchange = async e => {
     const on=(e.target as HTMLInputElement).checked
     visible().forEach(x => on ? selected.add(x.event_id) : selected.delete(x.event_id))
     preview=null
@@ -243,6 +284,7 @@ function renderRows(){
   const body = document.querySelector<HTMLTableSectionElement>('#rows')
   if(!body) return
   const list = visible()
+  const selectable = mode !== 'CONTROL'
   const shown = document.querySelector('#shown')
   if(shown) shown.textContent = `${list.length} из ${events.length}`
   const all = document.querySelector<HTMLInputElement>('#all')
@@ -254,7 +296,7 @@ function renderRows(){
 
   body.innerHTML = list.map(e => `
     <tr class="event-row ${selected.has(e.event_id) ? 'selected' : ''}">
-      <td><input data-pick="${e.event_id}" type="checkbox" aria-label="Выбрать событие" ${selected.has(e.event_id)?'checked':''}></td>
+      ${selectable ? `<td><input data-pick="${e.event_id}" type="checkbox" aria-label="Выбрать событие" ${selected.has(e.event_id)?'checked':''}></td>` : ''}
       <td><div class="kiz-cell"><code title="${esc(e.kiz)}">${short(e.kiz)}</code><button class="copy-kiz" data-copy="${esc(e.kiz)}" title="Копировать полный КИЗ" aria-label="Копировать полный КИЗ">${icons.copy}</button></div></td>
       <td>${esc(e.operation)}</td>
       <td>${date(e.occurred_at)}</td>
@@ -262,8 +304,8 @@ function renderRows(){
       <td>${stateText(e)}</td>
       <td><button class="icon-btn detail-btn ${detail===e.event_id?'open':''}" data-detail="${e.event_id}" title="Подробности" aria-label="Подробности">${icons.chevron}</button></td>
     </tr>
-    ${detail===e.event_id ? '<tr class="detail-row"><td colspan="7"><div id="detail"></div></td></tr>' : ''}`
-  ).join('')
+    ${detail===e.event_id ? `<tr class="detail-row"><td colspan="${selectable?7:6}"><div id="detail"></div></td></tr>` : ''}
+  `).join('')
 
   body.querySelectorAll<HTMLInputElement>('[data-pick]').forEach(x => x.onchange = async () => {
     x.checked ? selected.add(x.dataset.pick!) : selected.delete(x.dataset.pick!)
@@ -340,13 +382,23 @@ async function runCheck(){
   }
 }
 
+async function requestPreview(): Promise<Preview>{
+  return api<Preview>('/api/operation-preview', {
+    method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({
+      import_id: current.fingerprint,
+      mode,
+      selected_event_ids:[...selected],
+    }),
+  })
+}
+
 async function refreshSelectionSummary(){
   const request = ++selectionRequest
-  if(!selected.size){ selectionSummary=null; return }
+  if(mode === 'CONTROL' || !selected.size){ selectionSummary=null; return }
   try{
-    const result = await api<Preview>('/api/operation-preview', {
-      method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({event_ids:[...selected]})
-    })
+    const result = await requestPreview()
     if(request === selectionRequest) selectionSummary = result
   }catch(e){
     if(request === selectionRequest) selectionSummary = null
@@ -357,21 +409,21 @@ async function refreshSelectionSummary(){
 function renderOperation(){
   const op = document.querySelector<HTMLDivElement>('#operation')
   if(!op) return
-  if(!selected.size && !preview){ op.innerHTML=''; return }
+  if(mode === 'CONTROL' || (!selected.size && !preview)){ op.innerHTML=''; return }
 
   const summary = selectionSummary
   const values = summary ? {
-    selected: summary.selected,
-    ready: summary.included.length,
-    withdraw: summary.withdraw,
-    returns: summary.returns,
-    excluded: summary.excluded.length,
+    selected: summary.selected_count,
+    ready: summary.eligible_count,
+    withdraw: summary.withdraw_count,
+    returns: summary.return_count,
+    excluded: summary.excluded_count,
   } : {selected:selected.size, ready:'—', withdraw:'—', returns:'—', excluded:'—'}
 
   op.innerHTML = `
     <div class="operation-bar ${preview?'with-preview':''}">
       <div class="op-counts">
-        ${countItem(values.selected,'Выбрано')}${countItem(values.ready,'К выполнению')}${countItem(values.withdraw,'Вывод')}${countItem(values.returns,'Возврат')}${countItem(values.excluded,'Исключено')}
+        ${countItem(values.selected,'Выбрано')}${countItem(values.ready,'Допустимо')}${countItem(values.withdraw,'Вывод')}${countItem(values.returns,'Возврат')}${countItem(values.excluded,'Исключено')}
       </div>
       <button id="preview" class="primary-btn" ${selectionSummary?'':'disabled'}>Проверить состав</button>
     </div>
@@ -380,9 +432,7 @@ function renderOperation(){
   const btn = document.querySelector<HTMLButtonElement>('#preview')
   if(btn) btn.addEventListener('click', async () => {
     try{
-      preview = await api<Preview>('/api/operation-preview', {
-        method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({event_ids:[...selected]})
-      })
+      preview = await requestPreview()
       selectionSummary = preview
       renderOperation()
     }catch(e){ showToast(readError(e), 'error') }
@@ -395,12 +445,13 @@ function countItem(value:number|string,label:string){
 
 function previewHtml(p:Preview){
   const reasons = new Map<string,number>()
-  p.excluded.forEach(x => reasons.set(x.reason, (reasons.get(x.reason) || 0) + 1))
+  p.excluded.forEach(x => { const label=x.reason_text || x.reason || 'Исключено backend'; reasons.set(label, (reasons.get(label) || 0) + 1) })
+  const modeTitle = p.mode === 'AUTO' ? 'Автоматический состав' : p.mode === 'WITHDRAW_ONLY' ? 'Состав на вывод из оборота' : 'Состав на возврат в оборот'
   return `<div class="preview">
-    <div class="preview-head"><div><h2>Проверка состава</h2><p>${esc(current.filename)} · состав рассчитан backend по сохранённым решениям</p></div><span class="preview-mode">Только preview</span></div>
-    <div class="preview-numbers">${countItem(p.included.length,'Войдут в состав')}${countItem(p.withdraw,'Вывод')}${countItem(p.returns,'Возврат')}${countItem(p.excluded.length,'Исключено')}</div>
-    ${p.excluded.length ? `<div class="excluded"><h3>Исключённые события</h3>${[...reasons].map(([r,n]) => `<div><span>${esc(reasonLabel[r] || r)}</span><b>${n}</b></div>`).join('')}</div>` : ''}
-    <div class="preview-note"><span class="note-dot"></span><span>Реальная подпись и отправка пока недоступны. Preview ничего не отправляет.</span></div>
+    <div class="preview-head"><div><h2>${modeTitle}</h2><p>${esc(current.filename)} · состав рассчитан backend по сохранённым решениям</p></div><span class="preview-mode">${modeLabel[p.mode]}</span></div>
+    <div class="preview-numbers">${countItem(p.eligible_count,'Допустимо')}${countItem(p.withdraw_count,'Вывод')}${countItem(p.return_count,'Возврат')}${countItem(p.excluded_count,'Исключено')}</div>
+    ${p.excluded_count ? `<div class="excluded"><h3>Исключённые события</h3>${[...reasons].map(([r,n]) => `<div><span>${esc(r)}</span><b>${n}</b></div>`).join('')}</div>` : ''}
+    <div class="preview-note"><span class="note-dot"></span><span>Состав готов только для dry-run review. Production True API, подпись и отправка не подключены.</span></div>
   </div>`
 }
 
