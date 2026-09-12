@@ -8,7 +8,7 @@ Production path:
 
 `host nginx -> static frontend + /api reverse proxy -> marking-backend -> dedicated marking-postgres`
 
-The compose project contains only `marking-backend` and `marking-postgres`. PostgreSQL has no published host port. Backend is published only on host loopback for the host nginx reverse proxy. The Docker network is internal.
+The compose project contains only `marking-backend` and `marking-postgres`. PostgreSQL has no published host port and is attached only to the internal `marking_internal` network. Backend is attached to `marking_internal` for database access and to a separate `marking_proxy` bridge so Docker can publish backend port **only** on host loopback for the host nginx reverse proxy. Nothing is published on `0.0.0.0`.
 
 ## Artifacts
 
