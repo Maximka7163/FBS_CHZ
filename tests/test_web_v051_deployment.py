@@ -63,13 +63,19 @@ def test_frontend_production_api_is_same_origin():
     assert "https://127.0.0.1" not in source
 
 
-def test_prod_compose_does_not_publish_postgres_publicly():
+def test_prod_compose_keeps_postgres_internal_and_backend_loopback_only():
     text = (Path(__file__).parents[1] / "docker-compose.prod.yml").read_text(encoding="utf-8")
     postgres = text.split("  marking-postgres:", 1)[1].split("  marking-backend:", 1)[0]
+    backend = text.split("  marking-backend:", 1)[1].split("volumes:", 1)[0]
     assert "\n    ports:" not in postgres
     assert "expose:" in postgres
-    assert "127.0.0.1:${WBCZ_BACKEND_PORT" in text
-    assert "internal: true" in text
+    assert "- marking_internal" in postgres
+    assert "- marking_proxy" not in postgres
+    assert "127.0.0.1:${WBCZ_BACKEND_PORT" in backend
+    assert "- marking_internal" in backend
+    assert "- marking_proxy" in backend
+    assert "marking_internal:" in text and "internal: true" in text
+    assert "marking_proxy:" in text
 
 
 def test_backend_dockerfile_healthcheck_targets_api_health():
