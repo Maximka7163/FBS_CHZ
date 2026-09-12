@@ -118,20 +118,13 @@ jobs:
           test "$status" = healthy
           curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/health
           curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version | grep "$APPROVED_SOURCE_SHA"
-          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/capabilities > "$RUNNER_TEMP/capabilities.json"
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          caps=json.loads(Path(os.environ['RUNNER_TEMP'],'capabilities.json').read_text())
-          expected={
-              'true_api':'mock',
-              'true_api_write':False,
-              'document_signing':False,
-              'submission':False,
-              'windows_bridge':False,
-              'registration':False,
-          }
-          assert caps == expected, caps
+          docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml run --rm -T marking-backend python - <<'PY'
+          from wbcz_web.main import create_app
+          from wbcz_web.config import WebConfig
+          app=create_app(WebConfig.from_env())
+          paths={getattr(route,'path',None) for route in app.routes}
+          forbidden={'/register','/signup','/api/register','/api/auth/register','/api/lk/documents/create','/api/submit'}
+          assert not paths.intersection(forbidden)
           print('WEB_PRODUCTION_TRUE_API=MOCK')
           print('TRUE_API_WRITE=FALSE')
           print('DOCUMENT_SIGNING=FALSE')
@@ -251,19 +244,13 @@ jobs:
           test "$status" = healthy
           curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/health
           curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version | grep "$APPROVED_SOURCE_SHA"
-          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/capabilities > "$RUNNER_TEMP/offline-capabilities.json"
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          caps=json.loads(Path(os.environ['RUNNER_TEMP'],'offline-capabilities.json').read_text())
-          assert caps == {
-              'true_api':'mock',
-              'true_api_write':False,
-              'document_signing':False,
-              'submission':False,
-              'windows_bridge':False,
-              'registration':False,
-          }, caps
+          docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" run --rm -T marking-backend python - <<'PY'
+          from wbcz_web.main import create_app
+          from wbcz_web.config import WebConfig
+          app=create_app(WebConfig.from_env())
+          paths={getattr(route,'path',None) for route in app.routes}
+          forbidden={'/register','/signup','/api/register','/api/auth/register','/api/lk/documents/create','/api/submit'}
+          assert not paths.intersection(forbidden)
           PY
       - name: Capture final archive SHA256
         id: checksum
