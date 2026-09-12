@@ -65,3 +65,51 @@ def test_real_offline_check_and_preview(tmp_path):
     assert preview['withdraw'] == 64
     assert preview['returns'] == 140
     assert preview['production_submission_available'] is False
+
+
+def test_operation_preview_uses_persisted_backend_check(tmp_path, wb_row, make_xlsx):
+    """Preview must consume persisted Python decisions, never infer from UI state."""
+    source = make_xlsx([wb_row], "persisted-preview.xlsx")
+    db = tmp_path / "preview.sqlite"
+    app = UiApplication(db)
+    imported = app.import_bytes(source.name, source.read_bytes())
+    events = app.events_for_import(imported["fingerprint"])
+    event_id = events[0]["event_id"]
+
+    before = app.operation_preview([event_id])
+    assert before["included"] == []
+    assert len(before["excluded"]) == 1
+    assert before["excluded"][0]["decision"] is None
+    assert before["excluded"][0]["reason"] == "NOT_CHECKED"
+
+    app.check_import(imported["fingerprint"])
+    reopened = UiApplication(db)
+    checked_event = reopened.events_for_import(imported["fingerprint"])[0]
+    after = reopened.operation_preview([event_id])
+    item = (after["included"] + after["excluded"])[0]
+    assert item["decision"] == checked_event["decision"]
+    assert item["decision"] is not None
+
+
+def test_event_detail_reads_full_history_from_event_store(tmp_path, wb_row, make_xlsx):
+    """KIZ detail must expose EventStore history without choosing a fake latest event."""
+    first = make_xlsx([wb_row], "first-history.xlsx")
+    second = make_xlsx([
+        {
+            **wb_row,
+            "Тип операции": "Возврат",
+            "Дата": None,
+            "Номер чека": None,
+            "Номер фискального накопителя": None,
+        }
+    ], "second-history.xlsx")
+    app = UiApplication(tmp_path / "history.sqlite")
+    first_import = app.import_bytes(first.name, first.read_bytes())
+    first_event = app.events_for_import(first_import["fingerprint"])[0]
+    app.import_bytes(second.name, second.read_bytes())
+
+    detail = app.event_detail(first_event["event_id"])
+    assert detail["kiz"] == first_event["kiz"]
+    assert len(detail["history"]) == 2
+    assert {item["operation"] for item in detail["history"]} == {"Продажа", "Возврат"}
+    assert detail["history_order_ambiguous"] is True
