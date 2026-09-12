@@ -13,7 +13,7 @@ import tempfile
 APP_VERSION = "0.5.1"
 APPROVED_SOURCE_SHA = "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"
 APPROVED_SOURCE_BRANCH = "web/v0.5.1-deployment-package"
-ARCHIVE_PREFIX = f"sellari-marking-{APP_VERSION}-{APPROVED_SOURCE_SHA[:12]}"
+ARCHIVE_PREFIX = f"sellari-marking-{APP_VERSION}-{APPROVED_SOURCE_SHA[:12]}-r2"
 
 ROOT_FILES = (
     "Dockerfile.backend",
@@ -32,6 +32,11 @@ SOURCE_DIRS = (
     "src/wbcz",
     "src/wbcz_web",
     "migrations",
+)
+PACKAGING_FILES = (
+    "deploy/nginx/mark.sellari.ru.http-staging.conf.example",
+    "deploy/init-production-env.sh",
+    "docs/WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md",
 )
 
 FORBIDDEN_PARTS = {
@@ -135,7 +140,8 @@ def _write_release_metadata(
         "build_timestamp_utc": build_timestamp_utc,
         "frontend_built_from_sha": source_sha,
         "bundle_builder_git_sha": builder_sha,
-        "bundle_format": "sellari-marking-offline-v1",
+        "bundle_format": "sellari-marking-offline-v2",
+        "operator_safe_env_bootstrap": True,
         "timestamp_policy": "approved_source_commit_timestamp",
     }
     (bundle_root / "RELEASE.json").write_text(
@@ -246,9 +252,9 @@ def build_bundle(
         for relative in DOC_FILES:
             _copy_file(source_root, bundle_root, relative)
         _copy_file(source_root, bundle_root, "deploy/nginx/mark.sellari.ru.conf.example")
-        _copy_packaging_file(packaging_root, bundle_root, "deploy/nginx/mark.sellari.ru.http-staging.conf.example")
+        for relative in PACKAGING_FILES:
+            _copy_packaging_file(packaging_root, bundle_root, relative)
         _copy_frontend_dist(source_root, bundle_root)
-        _copy_packaging_file(packaging_root, bundle_root, "docs/WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md")
         _write_release_metadata(
             bundle_root,
             source_sha=source_sha,
