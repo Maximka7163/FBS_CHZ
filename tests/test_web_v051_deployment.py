@@ -84,8 +84,9 @@ def test_production_routes_health_version_auth_and_capabilities():
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
+    production_url = "postgresql+psycopg://wbcz:a-strong-production-db-password@marking-postgres:5432/wbcz"
     config = WebConfig(
-        DB_URL,
+        production_url,
         "1234567890",
         "production",
         3600,
