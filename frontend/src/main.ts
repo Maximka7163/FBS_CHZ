@@ -4,6 +4,18 @@ import type {ImportItem, EventItem} from './types'
 const app = document.querySelector<HTMLDivElement>('#app')!
 
 type OperationMode = 'AUTO' | 'CONTROL' | 'WITHDRAW_ONLY' | 'RETURN_ONLY'
+type CheckScope = 'ONE' | 'SELECTED' | 'ALL'
+type RuntimeStatus = {
+  mode: 'offline-dry-run' | 'live-read-only'
+  true_api: boolean
+  auth_signing: boolean
+  signing: boolean
+  document_signing: boolean
+  submission: boolean
+  product_group: string
+  activity_location_configured: boolean
+  activity_location_type: string | null
+}
 
 type PreviewItem = {event_id:string;kiz:string;operation:string;decision:string|null;reason?:string;reason_text?:string}
 type Preview = {
@@ -15,10 +27,16 @@ type Preview = {
   excluded_count: number
   included: PreviewItem[]
   excluded: PreviewItem[]
+  provider?: string
   production_submission_available: boolean
 }
 
-
+let runtime: RuntimeStatus = {
+  mode:'offline-dry-run', true_api:false, auth_signing:false,
+  signing:false, document_signing:false, submission:false,
+  product_group:'lp', activity_location_configured:false,
+  activity_location_type:null,
+}
 let current: any = null
 let events: EventItem[] = []
 let selected = new Set<string>()
@@ -30,6 +48,7 @@ let selectionSummary: Preview | null = null
 let detail: string | null = null
 let selectionRequest = 0
 let mode: OperationMode = 'AUTO'
+let checkScope: CheckScope = 'ONE'
 
 const decLabel: Record<string,string> = {
   READY_TO_WITHDRAW: 'Нужно вывести',
@@ -40,13 +59,18 @@ const decLabel: Record<string,string> = {
 }
 const reasonLabel: Record<string,string> = {
   OTHER_OWNER: 'Другой владелец',
+  OWNER_MISMATCH: 'Владелец КИЗ не совпадает с организацией',
   OWNER_UNKNOWN: 'Владелец не определён',
+  SALE_RECEIPT_MISSING: 'Продажа без данных чека — автоматический вывод отключён',
+  RETURN_RECEIPT_MISSING: 'Возврат без данных чека — автоматический возврат отключён',
+  WRONG_PRODUCT_GROUP: 'Другая товарная группа',
+  UNKNOWN_CHZ_STATUS: 'Неизвестное состояние Честного знака',
   NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL: 'Другая причина выбытия',
   UNKNOWN_STATUS: 'Неизвестное состояние',
   UNKNOWN_OR_CONFLICTING_STATUS_EX: 'Состояние требует ручной проверки',
   INCONSISTENT_WITHDRAW_REASON: 'Противоречивое состояние выбытия',
   LEGAL_ENTITY_RULES_UNDEFINED: 'Требуется ручная проверка правила продажи',
-  STATE_LOOKUP_OR_NORMALIZATION_FAILED: 'Нет результата локальной проверки',
+  STATE_LOOKUP_OR_NORMALIZATION_FAILED: 'Нет результата проверки Честного знака',
   SALE_ALREADY_WITHDRAWN_DISTANCE: 'Уже выведен из оборота',
   RETURN_ALREADY_IN_CIRCULATION: 'Уже в обороте',
   NOT_CHECKED: 'Событие ещё не проверено',
@@ -69,6 +93,7 @@ const modeHint: Record<OperationMode,string> = {
 const fmt = (s:string) => new Date(s).toLocaleString('ru-RU', {dateStyle:'short', timeStyle:'short'})
 const date = (s:string|null) => s ? new Date(s).toLocaleDateString('ru-RU') : '—'
 const sleep = (ms:number) => new Promise(resolve => setTimeout(resolve, ms))
+const live = () => runtime.mode === 'live-read-only'
 
 const icons = {
   mark: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.25c3.6 4.3 6.1 7.15 6.1 10.45A6.1 6.1 0 1 1 5.9 13.7C5.9 10.4 8.4 7.55 12 3.25Z" fill="currentColor"/><path d="M10 16.8c1.55.55 3.4-.15 4.1-1.75" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round"/></svg>`,
@@ -81,16 +106,19 @@ const icons = {
 }
 
 async function init(){
+  try{ runtime = await api<RuntimeStatus>('/api/status') }catch(_){ /* home will show API error if needed */ }
+  checkScope = live() ? 'ONE' : 'ALL'
   renderShell()
   await renderHome()
 }
 
 function renderShell(){
+  const runtimeLabel = live() ? 'Реальный контроль ЧЗ · отправка отключена' : 'Тестовый режим'
   app.innerHTML = `
     <header class="topbar">
       <div class="brand">markflow</div>
       <div class="topbar-right">
-        <span class="test-mode"><span class="mode-dot"></span>Тестовый режим</span>
+        <span class="test-mode ${live()?'live-readonly':''}"><span class="mode-dot"></span>${runtimeLabel}</span>
         <div class="profile" aria-label="Профиль">MM</div>
       </div>
     </header>
@@ -104,8 +132,8 @@ function renderShell(){
 
 function main(){return document.querySelector<HTMLElement>('#main')!}
 
-function setMainMode(mode:'home'|'workspace'){
-  main().className = `main ${mode === 'home' ? 'home-main' : 'workspace-main'}`
+function setMainMode(view:'home'|'workspace'){
+  main().className = `main ${view === 'home' ? 'home-main' : 'workspace-main'}`
 }
 
 function pageTitle(){
@@ -187,6 +215,7 @@ async function openImport(fp:string){
     filter = 'all'
     query = ''
     mode = 'AUTO'
+    checkScope = live() ? 'ONE' : 'ALL'
     renderWorkspace()
   }catch(e){ showToast(readError(e), 'error') }
 }
@@ -195,6 +224,17 @@ function renderWorkspace(){
   setMainMode('workspace')
   const checked = events.some(e => e.decision)
   const selectable = mode !== 'CONTROL'
+  const scopeControl = live() ? `
+    <div class="select-wrap live-scope"><select id="check-scope" aria-label="Объём live-проверки">
+      <option value="ONE">1 КИЗ</option>
+      <option value="SELECTED">Выбранные</option>
+      <option value="ALL">Весь файл</option>
+    </select>${icons.chevron}</div>` : ''
+  const checkState = checking
+    ? 'Получаем реальные состояния ЧЗ'
+    : live()
+      ? (checked ? 'Реальный контроль ЧЗ' : 'LIVE READ-ONLY')
+      : (checked ? 'Проверено локально' : 'Локальная проверка')
   main().innerHTML = `
     <section class="workspace">
       <div class="workspace-header">
@@ -226,8 +266,9 @@ function renderWorkspace(){
           <option value="MANUAL_REVIEW">Требует проверки</option>
           <option value="ERROR">Ошибка</option>
         </select>${icons.chevron}</div>
+        ${scopeControl}
         <button id="check" class="secondary-btn check-btn">${checking ? '<span class="spinner"></span>Проверяем…' : checked ? 'Повторить проверку' : 'Проверить КИЗ'}</button>
-        <span id="check-status" class="check-status">${checking ? 'Обновляем строки' : checked ? 'Проверено локально' : 'Локальная проверка'}</span>
+        <span id="check-status" class="check-status ${live()?'live-check-status':''}">${checkState}</span>
         <span class="shown" id="shown"></span>
       </div>
       <div class="table-shell">
@@ -256,6 +297,11 @@ function renderWorkspace(){
   const checkButton = document.querySelector<HTMLButtonElement>('#check')!
   checkButton.disabled = checking
   checkButton.addEventListener('click', runCheck)
+  const scope = document.querySelector<HTMLSelectElement>('#check-scope')
+  if(scope){
+    scope.value = checkScope
+    scope.onchange = e => {checkScope=(e.target as HTMLSelectElement).value as CheckScope}
+  }
   const search = document.querySelector<HTMLInputElement>('#search')!
   search.value = query
   search.oninput = e => {query=(e.target as HTMLInputElement).value; renderRows()}
@@ -348,7 +394,7 @@ async function renderDetail(d:any){
     <div class="detail-grid">
       <section class="detail-primary"><span class="detail-label">Полный КИЗ</span><div class="copy-line"><code>${esc(d.kiz)}</code><button id="copy" class="mini-action">${icons.copy}<span>Копировать</span></button></div></section>
       <section><span class="detail-label">Исходное событие WB</span><p>${esc(d.operation)} · ${date(d.occurred_at)}</p><p class="muted">Задание ${esc(d.task_number)} · стикер ${esc(d.sticker)}</p></section>
-      <section><span class="detail-label">Результат проверки</span><p>${d.decision ? decLabel[d.decision] || d.decision : 'Не проверено'}</p><p class="muted">${esc(reasonLabel[d.reason] || d.reason || d.error || '—')}</p></section>
+      <section><span class="detail-label">Результат проверки</span><p>${d.decision ? decLabel[d.decision] || d.decision : 'Не проверено'}</p><p class="muted">${esc(reasonLabel[d.reason] || d.reason_text || d.reason || d.error || '—')}</p></section>
     </div>
     <div class="history-block">
       <div class="history-title"><span class="detail-label">История этого КИЗ</span><span>${d.history.length} ${plural(d.history.length, 'событие', 'события', 'событий')}</span></div>
@@ -361,19 +407,39 @@ async function renderDetail(d:any){
   })
 }
 
+function liveCheckEventIds(): string[] | null {
+  if(!live()) return null
+  if(checkScope === 'ALL') return null
+  if(checkScope === 'SELECTED'){
+    if(!selected.size) throw new Error('Сначала выберите КИЗ для безопасной live-проверки')
+    return [...selected]
+  }
+  const first = [...selected][0] || visible()[0]?.event_id || events[0]?.event_id
+  if(!first) throw new Error('В файле нет КИЗ для проверки')
+  return [first]
+}
+
 async function runCheck(){
   if(checking) return
+  let eventIds: string[] | null = null
+  try{ eventIds = liveCheckEventIds() }catch(e){ showToast(readError(e),'error'); return }
   checking = true
   preview = null
   selectionSummary = null
   renderWorkspace()
   try{
-    await Promise.all([
-      api(`/api/imports/${current.fingerprint}/check`, {method:'POST'}),
+    const init: RequestInit = {method:'POST'}
+    if(live()){
+      init.headers = {'content-type':'application/json'}
+      init.body = JSON.stringify(eventIds === null ? {} : {event_ids:eventIds})
+    }
+    const result:any = await Promise.all([
+      api(`/api/imports/${current.fingerprint}/check`, init),
       sleep(500),
-    ])
+    ]).then(x => x[0])
     events = await api<EventItem[]>(`/api/imports/${current.fingerprint}/events`)
     if(selected.size) await refreshSelectionSummary()
+    if(live()) showToast(`Реальный контроль ЧЗ: проверено ${result.checked}`)
   }catch(e){
     showToast(readError(e), 'error')
   }finally{
@@ -447,11 +513,14 @@ function previewHtml(p:Preview){
   const reasons = new Map<string,number>()
   p.excluded.forEach(x => { const label=x.reason_text || x.reason || 'Исключено backend'; reasons.set(label, (reasons.get(label) || 0) + 1) })
   const modeTitle = p.mode === 'AUTO' ? 'Автоматический состав' : p.mode === 'WITHDRAW_ONLY' ? 'Состав на вывод из оборота' : 'Состав на возврат в оборот'
+  const note = live()
+    ? 'Реальный контроль ЧЗ · отправка отключена'
+    : 'Состав готов только для dry-run review. Production True API, подпись и отправка не подключены.'
   return `<div class="preview">
     <div class="preview-head"><div><h2>${modeTitle}</h2><p>${esc(current.filename)} · состав рассчитан backend по сохранённым решениям</p></div><span class="preview-mode">${modeLabel[p.mode]}</span></div>
     <div class="preview-numbers">${countItem(p.eligible_count,'Допустимо')}${countItem(p.withdraw_count,'Вывод')}${countItem(p.return_count,'Возврат')}${countItem(p.excluded_count,'Исключено')}</div>
     ${p.excluded_count ? `<div class="excluded"><h3>Исключённые события</h3>${[...reasons].map(([r,n]) => `<div><span>${esc(r)}</span><b>${n}</b></div>`).join('')}</div>` : ''}
-    <div class="preview-note"><span class="note-dot"></span><span>Состав готов только для dry-run review. Production True API, подпись и отправка не подключены.</span></div>
+    <div class="preview-note ${live()?'live-preview-note':''}"><span class="note-dot"></span><span>${note}</span></div>
   </div>`
 }
 
