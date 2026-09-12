@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 from fastapi.testclient import TestClient
 from wbcz_ui.api import create_app
 
-REF = Path('/mnt/data/REF_WB_archive_9.xlsx')
+REF = Path(os.environ.get('WBCZ_REF_XLSX', '/mnt/data/REF_WB_archive_9.xlsx'))
 
 
 def test_status_and_history_api(tmp_path):
