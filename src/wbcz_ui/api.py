@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .application import OperationMode, UiApplication
+from .live_true_api import LiveReadOnlyConfig, LiveTrueApiClient
 
 
 class PreviewRequest(BaseModel):
     import_id: str | None = None
     mode: OperationMode = OperationMode.AUTO
     selected_event_ids: list[str] | None = None
-    # Backward-compatible input for the existing UI/API regression tests.
+    # Backward-compatible input for existing API callers.
     event_ids: list[str] | None = None
 
     def selected(self) -> list[str]:
@@ -21,14 +24,32 @@ class PreviewRequest(BaseModel):
         return self.event_ids or []
 
 
-def create_app(db_path: str | Path = "wbcz-ui.sqlite") -> FastAPI:
-    app = FastAPI(title="WB FBS UI", version="0.3.0")
-    app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8000"], allow_methods=["*"], allow_headers=["*"])
-    service = UiApplication(db_path)
+class CheckRequest(BaseModel):
+    # None means the full import. A non-empty list is the safe live subset.
+    event_ids: list[str] | None = None
+
+
+def create_app(
+    db_path: str | Path = "wbcz-ui.sqlite",
+    live_config: LiveReadOnlyConfig | None = None,
+    live_client_factory: Callable[[LiveReadOnlyConfig], LiveTrueApiClient] | None = None,
+) -> FastAPI:
+    app = FastAPI(title="WB FBS UI", version="0.4.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:8000",
+        ],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    service = UiApplication(db_path, live_config, live_client_factory)
 
     @app.get("/api/status")
     def status():
-        return {"mode": "offline-dry-run", "true_api": False, "signing": False, "submission": False}
+        return service.runtime_status()
 
     @app.get("/api/imports")
     def imports(limit: int = 10):
@@ -52,8 +73,13 @@ def create_app(db_path: str | Path = "wbcz-ui.sqlite") -> FastAPI:
         return service.events_for_import(fingerprint)
 
     @app.post("/api/imports/{fingerprint}/check")
-    def check(fingerprint: str):
-        return service.check_import(fingerprint)
+    def check(fingerprint: str, request: CheckRequest | None = None):
+        try:
+            return service.check_import(
+                fingerprint, request.event_ids if request is not None else None
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/events/{event_id}")
     def event(event_id: str):
