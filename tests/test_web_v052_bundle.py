@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
-import shutil
+import re
+import stat
+import subprocess
 import tarfile
 
 import pytest
@@ -19,6 +22,8 @@ SOURCE_SHA = "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"
 SOURCE_BRANCH = "web/v0.5.1-deployment-package"
 FIXED_TIMESTAMP = "2026-09-12T19:06:03Z"
 BUILDER_SHA = "f" * 40
+INIT_SCRIPT = ROOT / "deploy" / "init-production-env.sh"
+RUNBOOK = ROOT / "docs" / "WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md"
 
 
 def _write(path: Path, text: str = "fixture\n") -> None:
@@ -66,10 +71,34 @@ def _extract(archive: Path, target: Path) -> Path:
     return target / bundle.ARCHIVE_PREFIX
 
 
+def _parse_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw or raw.startswith("#"):
+            continue
+        key, value = raw.split("=", 1)
+        values[key] = value
+    return values
+
+
+def _run_init(target: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["WBCZ_INIT_TEST_MODE"] = "1"
+    env["WBCZ_ENV_FILE_TARGET"] = str(target)
+    return subprocess.run(
+        ["sh", str(INIT_SCRIPT)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_bundle_is_reproducible_and_complete(tmp_path):
     first, _ = _build(tmp_path, "first")
     second, _ = _build(tmp_path, "second")
-    assert first.name == "sellari-marking-0.5.1-cc3054eefba5.tar.gz"
+    assert first.name == "sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz"
     assert _digest(first) == _digest(second)
     with tarfile.open(first, "r:gz") as tar:
         names = set(tar.getnames())
@@ -84,12 +113,13 @@ def test_bundle_is_reproducible_and_complete(tmp_path):
         f"{prefix}/frontend/index.html",
         f"{prefix}/deploy/nginx/mark.sellari.ru.conf.example",
         f"{prefix}/deploy/nginx/mark.sellari.ru.http-staging.conf.example",
+        f"{prefix}/deploy/init-production-env.sh",
         f"{prefix}/docs/WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md",
     }
     assert required.issubset(names)
 
 
-def test_release_json_has_exact_approved_source_sha(tmp_path):
+def test_release_json_has_exact_approved_source_sha_and_v2_metadata(tmp_path):
     archive, _ = _build(tmp_path, "release")
     root = _extract(archive, tmp_path / "extract")
     metadata = json.loads((root / "RELEASE.json").read_text(encoding="utf-8"))
@@ -98,6 +128,8 @@ def test_release_json_has_exact_approved_source_sha(tmp_path):
     assert metadata["source_branch"] == SOURCE_BRANCH
     assert metadata["frontend_built_from_sha"] == SOURCE_SHA
     assert metadata["build_timestamp_utc"] == FIXED_TIMESTAMP
+    assert metadata["bundle_format"] == "sellari-marking-offline-v2"
+    assert metadata["operator_safe_env_bootstrap"] is True
 
 
 def test_internal_sha256s_verify_all_files(tmp_path):
@@ -154,13 +186,135 @@ def test_production_frontend_is_prebuilt_same_origin_and_has_no_localhost(tmp_pa
 
 
 def test_offline_runbook_requires_no_github_access_or_node_on_vps():
-    text = (ROOT / "docs/WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md").read_text(encoding="utf-8")
+    text = RUNBOOK.read_text(encoding="utf-8")
     assert "git clone" not in text
     assert "git fetch" not in text
     assert "git checkout" not in text
     assert "No Git and no Node/npm are required on the VPS" in text
     assert "sha256sum -c SHA256SUMS" in text
     assert SOURCE_SHA in text
+
+
+def test_runbook_validates_compose_without_resolved_config_leak():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "config -q" in text
+    assert not re.search(r"config\s*>\s*/tmp", text)
+    assert not re.search(r"config\s+--format\s+(json|yaml)", text)
+    assert "/tmp/sellari-marking-compose" not in text
+    assert "Do not redirect rendered Compose configuration" in text
+
+
+def test_runbook_defines_qwen_secret_boundary_and_mock_inn():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "Qwen/server automation is **not trusted for production secrets**" in text
+    assert "THIS IS A MOCK/STAGING PARTICIPANT INN." in text
+    assert "WBCZ_OWN_INN=1234567890" in text
+    assert "WBCZ_DATABASE_URL" in text
+    assert "WBCZ_POSTGRES_PASSWORD" in text
+    assert "Owner bootstrap is not part of the deployment helper" in text
+
+
+def test_init_script_creates_0600_env_with_fixed_safe_values(tmp_path):
+    target = tmp_path / "runtime" / ".env.production"
+    result = _run_init(target)
+    assert result.returncode == 0, result.stderr
+    assert target.is_file()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    values = _parse_env(target)
+    assert values["WBCZ_ENV"] == "production"
+    assert values["WBCZ_OWN_INN"] == "1234567890"
+    assert values["WBCZ_SESSION_TTL_SECONDS"] == "43200"
+    assert values["WBCZ_COOKIE_SECURE"] == "true"
+    assert values["WBCZ_SESSION_COOKIE_NAME"] == "wbcz_session"
+    assert values["WBCZ_CSRF_COOKIE_NAME"] == "wbcz_csrf"
+    assert values["WBCZ_DEBUG"] == "false"
+    assert values["WBCZ_TRUSTED_HOSTS"] == "mark.sellari.ru"
+    assert values["WBCZ_APP_VERSION"] == "0.5.1"
+    assert values["WBCZ_BUILD_SHA"] == SOURCE_SHA
+    assert values["WBCZ_HEALTHCHECK_HOST"] == "mark.sellari.ru"
+    assert values["WBCZ_POSTGRES_DB"] == "wbcz"
+    assert values["WBCZ_POSTGRES_USER"] == "wbcz"
+    assert values["WBCZ_BACKEND_IMAGE"] == "sellari-marking-backend"
+    assert values["WBCZ_BACKEND_PORT"] == "8765"
+
+
+def test_generated_db_secret_is_256_bits_hex_and_shared_with_database_url(tmp_path):
+    target = tmp_path / ".env.production"
+    result = _run_init(target)
+    assert result.returncode == 0, result.stderr
+    values = _parse_env(target)
+    secret = values["WBCZ_POSTGRES_PASSWORD"]
+    assert re.fullmatch(r"[0-9a-f]{64}", secret)
+    assert len(bytes.fromhex(secret)) == 32
+    assert values["WBCZ_DATABASE_URL"] == (
+        f"postgresql+psycopg://wbcz:{secret}@marking-postgres:5432/wbcz"
+    )
+
+
+def test_init_script_output_never_contains_generated_secret_or_database_url(tmp_path):
+    target = tmp_path / ".env.production"
+    result = _run_init(target)
+    assert result.returncode == 0, result.stderr
+    values = _parse_env(target)
+    secret = values["WBCZ_POSTGRES_PASSWORD"]
+    output = result.stdout + result.stderr
+    assert secret not in output
+    assert values["WBCZ_DATABASE_URL"] not in output
+    assert "WBCZ_POSTGRES_PASSWORD=" not in output
+    assert "WBCZ_DATABASE_URL=" not in output
+    assert "DB_SECRET_GENERATED=YES" in result.stdout
+
+
+def test_init_script_refuses_to_overwrite_existing_env(tmp_path):
+    target = tmp_path / ".env.production"
+    first = _run_init(target)
+    assert first.returncode == 0, first.stderr
+    before = target.read_bytes()
+    second = _run_init(target)
+    assert second.returncode != 0
+    assert target.read_bytes() == before
+    secret = _parse_env(target)["WBCZ_POSTGRES_PASSWORD"]
+    assert secret not in second.stdout
+    assert secret not in second.stderr
+    assert "refusing to overwrite" in second.stderr.lower()
+
+
+def test_init_script_target_override_is_test_harness_only(tmp_path):
+    target = tmp_path / ".env.production"
+    env = os.environ.copy()
+    env.pop("WBCZ_INIT_TEST_MODE", None)
+    env["WBCZ_ENV_FILE_TARGET"] = str(target)
+    result = subprocess.run(
+        ["sh", str(INIT_SCRIPT)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert not target.exists()
+    assert "allowed only in WBCZ_INIT_TEST_MODE=1" in result.stderr
+
+
+def test_packaged_init_script_is_executable_and_env_file_is_not_packaged(tmp_path):
+    archive, _ = _build(tmp_path, "init-script")
+    with tarfile.open(archive, "r:gz") as tar:
+        members = {member.name: member for member in tar.getmembers()}
+    script_name = f"{bundle.ARCHIVE_PREFIX}/deploy/init-production-env.sh"
+    assert script_name in members
+    assert members[script_name].mode & 0o111
+    assert not any(name.endswith("/.env.production") for name in members)
+
+
+def test_operator_hardening_preserves_true_api_write_sign_submission_safety():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "true_api=mock" in text
+    assert "true_api_write=false" in text
+    assert "document_signing=false" in text
+    assert "submission=false" in text
+    assert "windows_bridge=false" in text
+    assert "registration=false" in text
 
 
 def test_bundle_builder_rejects_unapproved_source_sha(tmp_path):
