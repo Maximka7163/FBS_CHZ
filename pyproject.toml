@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wbcz-core"
-version = "0.2.0"
-description = "Offline-first WB FBS / marking control core"
+version = "0.4.0"
+description = "WB FBS marking control core with live read-only True API"
 requires-python = ">=3.12"
 dependencies = ["openpyxl>=3.1.5,<4"]
 
