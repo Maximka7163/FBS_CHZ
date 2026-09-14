@@ -13,10 +13,9 @@ import tempfile
 APP_VERSION = "0.5.1"
 APPROVED_SOURCE_SHA = "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"
 APPROVED_SOURCE_BRANCH = "web/v0.5.1-deployment-package"
-ARCHIVE_PREFIX = f"sellari-marking-{APP_VERSION}-{APPROVED_SOURCE_SHA[:12]}-r2"
+ARCHIVE_PREFIX = f"sellari-marking-{APP_VERSION}-{APPROVED_SOURCE_SHA[:12]}-r3"
 
 ROOT_FILES = (
-    "Dockerfile.backend",
     "docker-compose.prod.yml",
     "alembic.ini",
     ".env.production.example",
@@ -34,8 +33,10 @@ SOURCE_DIRS = (
     "migrations",
 )
 PACKAGING_FILES = (
+    "Dockerfile.backend",
     "deploy/nginx/mark.sellari.ru.http-staging.conf.example",
     "deploy/init-production-env.sh",
+    "deploy/normalize-release-permissions.sh",
     "docs/WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md",
 )
 
@@ -142,6 +143,8 @@ def _write_release_metadata(
         "bundle_builder_git_sha": builder_sha,
         "bundle_format": "sellari-marking-offline-v2",
         "operator_safe_env_bootstrap": True,
+        "runtime_permission_hardening": True,
+        "release_permission_normalization": True,
         "timestamp_policy": "approved_source_commit_timestamp",
     }
     (bundle_root / "RELEASE.json").write_text(
@@ -170,7 +173,7 @@ def _scan_bundle(bundle_root: Path) -> None:
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        for chunk in iter(lambda: stream.read(1024 * 1024, b""), b""):
             h.update(chunk)
     return h.hexdigest()
 
