@@ -63,6 +63,9 @@ jobs:
             exit 1
           fi
           echo "SOURCE_TIMESTAMP=$(git -C source show -s --format=%cI "$ACCEPTED_SOURCE_SHA")" >> "$GITHUB_ENV"
+      - name: Install backend test dependencies
+        working-directory: packaging
+        run: python -m pip install -e ".[ui,test,web]"
       - name: Build deterministic WB regression workbook
         shell: bash
         run: |
@@ -89,9 +92,7 @@ jobs:
           PY
       - name: Full PostgreSQL pytest on packaging branch
         working-directory: packaging
-        run: |
-          python -m pip install -e ".[ui,test,web]"
-          python -m pytest -q
+        run: python -m pytest -q
       - name: Frontend typecheck and build unchanged source
         working-directory: source/frontend
         run: |
