@@ -1,6 +1,6 @@
-# Web v0.5.2.1 — operator-safe offline deployment runbook
+# Web v0.5.2.2 — operator-safe offline deployment runbook
 
-This runbook deploys the approved v0.5.1 application source **without GitHub access from the VPS** and without exposing production database credentials to Qwen/server automation.
+This runbook deploys the approved v0.5.1 application source **without GitHub access from the VPS**, without exposing production database credentials to Qwen/server automation, and without depending on accidental host extraction permissions.
 
 Approved application source SHA:
 
@@ -11,7 +11,7 @@ cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
 Expected archive name:
 
 ```text
-sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz
+sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz
 ```
 
 The VPS must not receive a GitHub token, SSH deploy key or other repository credential.
@@ -20,33 +20,27 @@ Do not modify `/opt/sellari`, `/opt/deltametric` or `/var/www/sellari`.
 
 ## A. Trusted-PC preparation
 
-1. Download the private GitHub Actions artifact produced by the approved operator-safe bundle workflow on a trusted PC.
+1. Download the private GitHub Actions artifact produced by the approved runtime-permission-hardened bundle workflow on a trusted PC.
 2. Extract the Actions wrapper ZIP locally. It must contain:
 
 ```text
-sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz
-sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256
+sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz
+sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz.sha256
 ```
 
 3. Verify the archive before transfer:
 
 ```bash
-sha256sum -c sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256
+sha256sum -c sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz.sha256
 ```
 
 Expected result:
 
 ```text
-sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz: OK
+sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz: OK
 ```
 
-4. Transfer only those two files to the VPS by the operator-approved channel, for example:
-
-```bash
-scp sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz \
-    sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256 \
-    <operator>@<vps>:/tmp/
-```
+4. Transfer only those two files to the VPS by the operator-approved channel.
 
 Do not transfer `.git`, GitHub credentials, production secrets, private XLSX files, local databases, node_modules or Python virtual environments.
 
@@ -58,31 +52,46 @@ sudo install -d -m 0750 /opt/sellari-marking/incoming
 sudo install -d -m 0750 /opt/sellari-marking/runtime
 sudo install -d -m 0750 /opt/sellari-marking/releases
 sudo install -d -m 0750 /opt/sellari-marking/backups
-sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz /opt/sellari-marking/incoming/
-sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256 /opt/sellari-marking/incoming/
-sudo chown root:root /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz*
-sudo chmod 0644 /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz*
+sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz /opt/sellari-marking/incoming/
+sudo mv /tmp/sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz.sha256 /opt/sellari-marking/incoming/
+sudo chown root:root /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz*
+sudo chmod 0644 /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz*
 ```
 
 ## C. Verify archive integrity on the VPS
 
 ```bash
 cd /opt/sellari-marking/incoming
-sha256sum -c sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz.sha256
+sha256sum -c sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz.sha256
 ```
 
 Do not continue unless the result is exactly `OK`.
 
-## D. Extract into the isolated release directory
+## D. Extract and normalize the immutable release tree
 
 ```bash
 APP_SHA=cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
-sudo install -d -m 0755 "/opt/sellari-marking/releases/${APP_SHA}"
-sudo tar -xzf /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz \
-  -C "/opt/sellari-marking/releases/${APP_SHA}" \
+RELEASE_DIR="/opt/sellari-marking/releases/${APP_SHA}"
+sudo install -d -m 0755 "$RELEASE_DIR"
+sudo tar -xzf /opt/sellari-marking/incoming/sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz \
+  -C "$RELEASE_DIR" \
   --strip-components=1
-cd "/opt/sellari-marking/releases/${APP_SHA}"
+sudo sh "$RELEASE_DIR/deploy/normalize-release-permissions.sh" "$RELEASE_DIR"
+cd "$RELEASE_DIR"
 ```
+
+Expected safe normalization output:
+
+```text
+RELEASE_PERMISSIONS_NORMALIZED=YES
+PATH=/opt/sellari-marking/releases/cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+DIRECTORY_MODE=0755
+REGULAR_FILE_MODE=0644
+```
+
+The bundle already records deterministic archive modes, but this explicit deployment step is required because a host extraction/umask/previous-copy path may otherwise leave restrictive modes. The normalizer touches only the immutable release tree: directories become `0755`, ordinary release files `0644`, bundled shell helpers `0755`, ownership `root:root`. It does not touch `/opt/sellari-marking/runtime/.env.production` or any database secret.
+
+This also guarantees nginx can traverse `/opt/sellari-marking/current/frontend` and read the static production frontend. This is infrastructure permission normalization only; no frontend source or design is changed.
 
 Verify every trusted production file from the bundle manifest:
 
@@ -100,9 +109,9 @@ grep -F '"source_git_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.j
 grep -F '"frontend_built_from_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
 grep -F '"bundle_format": "sellari-marking-offline-v2"' RELEASE.json
 grep -F '"operator_safe_env_bootstrap": true' RELEASE.json
+grep -F '"runtime_permission_hardening": true' RELEASE.json
+grep -F '"release_permission_normalization": true' RELEASE.json
 ```
-
-All commands must print the matching line and exit successfully.
 
 The bundle contains no `.git` directory. Do not install GitHub credentials on the VPS.
 
@@ -121,17 +130,9 @@ Production default target:
 /opt/sellari-marking/runtime/.env.production
 ```
 
-The helper:
+The helper uses `set -eu` and `umask 077`, creates the environment file mode `0600`, generates 256 bits of PostgreSQL password entropy locally on the VPS, writes the same secret into `WBCZ_POSTGRES_PASSWORD` and `WBCZ_DATABASE_URL`, never prints it, refuses overwrite, and does not create an owner account.
 
-- runs with `set -eu` and `umask 077`;
-- creates the environment file with mode `0600`;
-- generates the PostgreSQL password locally on the VPS from 32 bytes of `/dev/urandom` and encodes it as 64 lowercase hex characters;
-- writes the same generated secret into `WBCZ_POSTGRES_PASSWORD` and the password component of `WBCZ_DATABASE_URL`;
-- never prints the generated secret;
-- refuses to overwrite an existing `.env.production`;
-- does not create an owner account.
-
-Expected safe output contains only:
+Expected safe output:
 
 ```text
 ENV_CREATED=YES
@@ -152,26 +153,9 @@ WBCZ_OWN_INN=1234567890
 
 **THIS IS A MOCK/STAGING PARTICIPANT INN.** It is not production legal-entity configuration. Before any future real True API / Windows Bridge activation, replacing it with the real participant INN must be a separate trusted operation outside Qwen/server automation.
 
-The helper also fixes:
+Fixed values also include `WBCZ_ENV=production`, `WBCZ_SESSION_TTL_SECONDS=43200`, `WBCZ_COOKIE_SECURE=true`, `WBCZ_SESSION_COOKIE_NAME=wbcz_session`, `WBCZ_CSRF_COOKIE_NAME=wbcz_csrf`, `WBCZ_DEBUG=false`, `WBCZ_TRUSTED_HOSTS=mark.sellari.ru`, `WBCZ_APP_VERSION=0.5.1`, `WBCZ_BUILD_SHA=cc3054eefba5d07c45dbb2e27d9fc2ba37c91555`, `WBCZ_HEALTHCHECK_HOST=mark.sellari.ru`, `WBCZ_POSTGRES_DB=wbcz`, `WBCZ_POSTGRES_USER=wbcz`, `WBCZ_BACKEND_IMAGE=sellari-marking-backend`, and `WBCZ_BACKEND_PORT=8765`.
 
-```text
-WBCZ_ENV=production
-WBCZ_SESSION_TTL_SECONDS=43200
-WBCZ_COOKIE_SECURE=true
-WBCZ_SESSION_COOKIE_NAME=wbcz_session
-WBCZ_CSRF_COOKIE_NAME=wbcz_csrf
-WBCZ_DEBUG=false
-WBCZ_TRUSTED_HOSTS=mark.sellari.ru
-WBCZ_APP_VERSION=0.5.1
-WBCZ_BUILD_SHA=cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
-WBCZ_HEALTHCHECK_HOST=mark.sellari.ru
-WBCZ_POSTGRES_DB=wbcz
-WBCZ_POSTGRES_USER=wbcz
-WBCZ_BACKEND_IMAGE=sellari-marking-backend
-WBCZ_BACKEND_PORT=8765
-```
-
-Validate Compose syntax/configuration **without rendering or saving interpolated configuration**:
+Validate Compose without rendering or saving interpolated configuration:
 
 ```bash
 docker compose \
@@ -195,9 +179,9 @@ After environment initialization, Qwen/server automation is **not trusted for pr
 - run `printenv` for the marking container;
 - print `WBCZ_DATABASE_URL` or `WBCZ_POSTGRES_PASSWORD`.
 
-Allowed diagnostics are limited to safe health/version/capabilities endpoints and container/process status that does not expose environment values.
+Allowed diagnostics are safe health/version/capabilities endpoints, container/process status that does not expose environment values, Alembic revision output, and schema/table-name checks that do not print credentials.
 
-## H. Build backend image from the bundle
+## H. Build backend image and verify runtime-user migration visibility
 
 No Git and no Node/npm are required on the VPS for the normal deployment path.
 
@@ -208,6 +192,27 @@ docker compose \
   -f docker-compose.prod.yml \
   build marking-backend
 ```
+
+`Dockerfile.backend` normalizes `/app/alembic.ini` and `/app/migrations` permissions inside the image **before** switching to `USER wbcz`. It therefore does not depend on modes inherited from the host Docker build context. The final runtime user remains `wbcz`; the container is not run as root.
+
+Before touching the database, verify the default image user can see the one approved Alembic head:
+
+```bash
+docker compose \
+  --env-file /opt/sellari-marking/runtime/.env.production \
+  -f docker-compose.prod.yml \
+  run --rm -T marking-backend sh -ec '
+    test "$(id -un)" = wbcz
+    test -r /app/alembic.ini
+    test -x /app/migrations
+    test -r /app/migrations/env.py
+    test -x /app/migrations/versions
+    test -r /app/migrations/versions/0001_web_v05_initial.py
+    test "$(alembic -c /app/alembic.ini heads)" = "0001_web_v05 (head)"
+  '
+```
+
+This command is read-only with respect to the production DB.
 
 The frontend is already present under `frontend/` as a production Vite dist artifact.
 
@@ -227,7 +232,7 @@ docker compose \
 
 PostgreSQL must not have a public host port.
 
-## J. Apply migration explicitly
+## J. Apply migration explicitly and prove schema state
 
 Run exactly once for this deployment step, before backend workers:
 
@@ -235,7 +240,48 @@ Run exactly once for this deployment step, before backend workers:
 docker compose \
   --env-file /opt/sellari-marking/runtime/.env.production \
   -f docker-compose.prod.yml \
-  run --rm marking-backend alembic upgrade head
+  run --rm marking-backend alembic -c /app/alembic.ini upgrade head
+```
+
+Do not accept exit code alone as proof of migration. Verify revision:
+
+```bash
+docker compose \
+  --env-file /opt/sellari-marking/runtime/.env.production \
+  -f docker-compose.prod.yml \
+  run --rm -T marking-backend alembic -c /app/alembic.ini current
+```
+
+Expected stdout revision line:
+
+```text
+0001_web_v05 (head)
+```
+
+Then verify expected table names without printing connection credentials:
+
+```bash
+docker compose \
+  --env-file /opt/sellari-marking/runtime/.env.production \
+  -f docker-compose.prod.yml \
+  run --rm -T marking-backend python - <<'PY'
+import os
+from sqlalchemy import create_engine, inspect
+expected = {
+    "users", "sessions", "imports", "events", "import_rows",
+    "control_runs", "checks", "previews", "preview_items", "audit_log",
+}
+engine = create_engine(os.environ["WBCZ_DATABASE_URL"])
+try:
+    tables = set(inspect(engine).get_table_names())
+finally:
+    engine.dispose()
+missing = sorted(expected - tables)
+if missing:
+    raise SystemExit("missing expected web tables: " + ",".join(missing))
+print("DATABASE_SCHEMA=0001_web_v05")
+print("EXPECTED_WEB_TABLES=YES")
+PY
 ```
 
 Do not run concurrent migration commands.
@@ -244,7 +290,7 @@ Do not run concurrent migration commands.
 
 Owner bootstrap is not part of the deployment helper and must never be automated by Qwen.
 
-Run this directly in the trusted operator terminal:
+Run this directly in the trusted operator terminal only after migration acceptance:
 
 ```bash
 docker compose \
@@ -270,17 +316,9 @@ docker compose \
 Verify backend directly through host loopback and the expected Host header:
 
 ```bash
-curl --fail --silent --show-error \
-  -H 'Host: mark.sellari.ru' \
-  http://127.0.0.1:8765/api/health
-
-curl --fail --silent --show-error \
-  -H 'Host: mark.sellari.ru' \
-  http://127.0.0.1:8765/api/version
-
-curl --fail --silent --show-error \
-  -H 'Host: mark.sellari.ru' \
-  http://127.0.0.1:8765/api/capabilities
+curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/health
+curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version
+curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/capabilities
 ```
 
 Expected health response:
@@ -291,7 +329,7 @@ Expected health response:
 
 The version response must contain the exact approved SHA. Capabilities must preserve the safety boundary below.
 
-## M. Activate the static frontend release
+## M. Activate static frontend release
 
 ```bash
 sudo ln -sfn \
@@ -301,59 +339,33 @@ sudo ln -sfn \
 
 Do not copy files into `/var/www/sellari`.
 
-## N. Stage a dedicated HTTP nginx server while DNS is absent
+Because section D normalized release directories to `0755` and regular static files to `0644`, nginx can traverse and read `current/frontend` regardless of restrictive modes inherited during initial extraction.
 
-The current host default server may display another site for unknown hosts. Therefore create a dedicated `server_name mark.sellari.ru` before DNS exists.
+## N. Stage dedicated HTTP nginx server while DNS is absent
 
 Copy only the provided staging template:
 
 ```bash
-sudo cp \
-  deploy/nginx/mark.sellari.ru.http-staging.conf.example \
-  /etc/nginx/conf.d/mark.sellari.ru.conf.pending
+sudo cp deploy/nginx/mark.sellari.ru.http-staging.conf.example /etc/nginx/conf.d/mark.sellari.ru.conf.pending
 sudo nginx -t
 ```
 
-Do not continue unless `nginx -t` succeeds.
-
-After the server operator has reviewed the pending file, enable it using the host's normal nginx procedure and reload nginx.
-
-Then verify routing locally without DNS:
-
-```bash
-curl --fail --silent --show-error \
-  -H 'Host: mark.sellari.ru' \
-  http://127.0.0.1/api/health
-
-curl --fail --silent --show-error \
-  -H 'Host: mark.sellari.ru' \
-  http://127.0.0.1/api/version
-
-curl --fail --silent --show-error \
-  -H 'Host: mark.sellari.ru' \
-  http://127.0.0.1/ | head
-```
-
-At this stage DNS may still be absent.
+Do not continue unless `nginx -t` succeeds. After operator review, enable it using the host's normal nginx procedure and reload nginx. DNS may still be absent.
 
 ## O. Production activation order
 
-Only after the DNS-independent staging checks above pass:
+Only after DNS-independent staging checks pass:
 
-1. Create the DNS `A` record for `mark.sellari.ru` pointing to the approved VPS address.
-2. Wait until the operator verifies DNS resolution from the required networks.
-3. Issue a **separate** TLS certificate for `mark.sellari.ru` using the host's approved certificate process.
-4. Replace/extend the staging HTTP configuration with `deploy/nginx/mark.sellari.ru.conf.example` plus the real host-managed TLS directives.
-5. Run `sudo nginx -t`.
-6. Reload nginx using the host's normal procedure.
+1. Create DNS `A` for `mark.sellari.ru`.
+2. Verify DNS resolution.
+3. Issue a separate TLS certificate.
+4. Use the provided production nginx template plus host-managed TLS directives.
+5. `sudo nginx -t`.
+6. Reload nginx normally.
 7. Verify HTTPS health/version.
-8. Perform final browser acceptance: login, no registration route, XLSX upload, control, preview and logout.
-
-DNS is therefore **not a prerequisite** for the internal staging deployment.
+8. Perform final browser acceptance.
 
 ## P. Safety boundary that must remain unchanged
-
-Production capabilities remain:
 
 ```text
 true_api=mock
