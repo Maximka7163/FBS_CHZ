@@ -7,6 +7,7 @@ import re
 from sqlalchemy.engine import make_url
 
 from wbcz.control_engine import validate_owner_inn
+from wbcz.document_assembler import OrganisationType, P0OrganisationConfig
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -19,6 +20,18 @@ def _env_bool(name: str, default: bool) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be true or false")
+
+
+def _env_optional_bool(name: str) -> bool | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true, false or unset")
 
 
 def _csv_hosts(raw: str) -> tuple[str, ...]:
@@ -45,6 +58,23 @@ class WebConfig:
     agent_poll_max_seconds: int = 120
     agent_poll_max_attempts: int = 60
     true_api_write_enabled: bool = False
+    organisation_type: OrganisationType | None = None
+    activity_fias_id: str | None = None
+    activity_kpp: str | None = None
+    remote_sale_return_paid: bool | None = None
+
+    def organisation_document_config(self) -> P0OrganisationConfig | None:
+        if self.organisation_type is None:
+            return None
+        if self.activity_fias_id is None:
+            raise ValueError("WBCZ_ACTIVITY_FIAS_ID is required when organisation type is configured")
+        return P0OrganisationConfig(
+            participant_inn=self.own_inn,
+            organisation_type=self.organisation_type,
+            fias_id=self.activity_fias_id,
+            kpp=self.activity_kpp,
+            remote_sale_return_paid=self.remote_sale_return_paid,
+        )
 
     def validate_for_startup(self) -> "WebConfig":
         if self.environment not in {"development", "test", "production"}:
@@ -70,6 +100,11 @@ class WebConfig:
             raise ValueError("WBCZ_AGENT_POLL_MAX_ATTEMPTS is out of range")
         if self.true_api_write_enabled:
             raise ValueError("Production True API write remains disabled pending runtime contract tests")
+        if self.organisation_type is None:
+            if self.activity_fias_id or self.activity_kpp or self.remote_sale_return_paid is not None:
+                raise ValueError("WBCZ_ORGANISATION_TYPE is required when P0 organisation fields are configured")
+        else:
+            self.organisation_document_config()
         if self.agent_enabled:
             token = self.agent_machine_token or ""
             minimum = 32 if self.environment == "production" else 16
@@ -113,6 +148,13 @@ class WebConfig:
                 raise ValueError("WBCZ_TRUSTED_HOSTS is required in production")
             trusted_raw = "testserver,localhost,127.0.0.1"
         token = os.getenv("WBCZ_AGENT_MACHINE_TOKEN", "")
+        organisation_raw = os.getenv("WBCZ_ORGANISATION_TYPE", "").strip().upper()
+        try:
+            organisation_type = OrganisationType(organisation_raw) if organisation_raw else None
+        except ValueError as exc:
+            raise ValueError("WBCZ_ORGANISATION_TYPE must be LEGAL_ENTITY or INDIVIDUAL_ENTREPRENEUR") from exc
+        fias_id = os.getenv("WBCZ_ACTIVITY_FIAS_ID", "").strip() or None
+        kpp = os.getenv("WBCZ_ACTIVITY_KPP", "").strip() or None
         config = cls(
             database_url=db,
             own_inn=own_inn,
@@ -132,5 +174,9 @@ class WebConfig:
             agent_poll_max_seconds=int(os.getenv("WBCZ_AGENT_POLL_MAX_SECONDS", "120")),
             agent_poll_max_attempts=int(os.getenv("WBCZ_AGENT_POLL_MAX_ATTEMPTS", "60")),
             true_api_write_enabled=_env_bool("WBCZ_TRUE_API_WRITE_ENABLED", False),
+            organisation_type=organisation_type,
+            activity_fias_id=fias_id,
+            activity_kpp=kpp,
+            remote_sale_return_paid=_env_optional_bool("WBCZ_REMOTE_SALE_RETURN_PAID"),
         )
         return config.validate_for_startup()
