@@ -40,16 +40,18 @@ OUTPUT=$(docker run --rm --entrypoint sh "$IMAGE_TAG" -ec '
     test -r /app/migrations/env.py
     test -x /app/migrations/versions
     test -r /app/migrations/versions/0001_web_v05_initial.py
+    test -r /app/migrations/versions/0002_p0_write_pipeline.py
     stat -c "%a" /app/alembic.ini | grep -qx "644"
     stat -c "%a" /app/migrations | grep -qx "755"
     stat -c "%a" /app/migrations/versions | grep -qx "755"
     stat -c "%a" /app/migrations/env.py | grep -qx "644"
     stat -c "%a" /app/migrations/versions/0001_web_v05_initial.py | grep -qx "644"
+    stat -c "%a" /app/migrations/versions/0002_p0_write_pipeline.py | grep -qx "644"
     alembic -c /app/alembic.ini heads
 ')
 
-[ "$OUTPUT" = "0001_web_v05 (head)" ]
+[ "$OUTPUT" = "0002_p0_write_pipeline (head)" ]
 printf '%s\n' \
     'DEFAULT_RUNTIME_USER=wbcz' \
-    'ALEMBIC_HEADS_DEFAULT_USER=0001_web_v05' \
+    'ALEMBIC_HEADS_DEFAULT_USER=0002_p0_write_pipeline' \
     'RESTRICTIVE_MODE_REGRESSION=PASS'

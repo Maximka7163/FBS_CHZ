@@ -1,0 +1,139 @@
+name: P0 write backend foundation validation
+
+on:
+  push:
+    branches: [p0/write-backend-foundation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: 8ddc9a6e8fe36ee250eee5756397ab19410bf105
+  EXPECTED_ALEMBIC_HEAD: 0002_p0_write_pipeline
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_test"
+          --health-interval=2s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prove frontend freeze
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only "$BASE_SHA"...HEAD -- frontend || true)"
+          test -z "$changed" || { echo "FRONTEND_FREEZE violation: $changed" >&2; exit 1; }
+          echo 'FRONTEND_CHANGED=NO'
+      - name: Install backend and test dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+      - name: Build deterministic WB regression workbook
+        shell: bash
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python - <<'PY'
+          from openpyxl import Workbook
+          from pathlib import Path
+          p=Path('/mnt/data/REF_WB_archive_9.xlsx')
+          h=['№ задания','Стикер','КИЗ','Номер чека','Стоимость','Валюта','Номер фискального накопителя','Дата','Тип операции','Признак продажи юрлицу']
+          w=Workbook();s=w.active;s.title='КИЗ';s.append(h);n=0
+          def add(op,dated):
+              global n
+              n+=1
+              s.append([f'T{n}',f'S{n}',f'CI-KIZ-{n:04d}',f'CHK-{n}' if dated else None,100,'RUB',f'FN-{n}' if dated else None,f'12:34:56 {((n-1)%28)+1:02d}.08.2026' if dated else None,op,'нет'])
+          for _ in range(13): add('Продажа',False)
+          for _ in range(63): add('Продажа',True)
+          for _ in range(137): add('Возврат',False)
+          for _ in range(3): add('Возврат',True)
+          for _ in range(2): add('Возврат',True)
+          for _ in range(20): add('Возврат',False)
+          assert n==238
+          w.save(p)
+          PY
+      - name: Upgrade disposable PostgreSQL and prove exact schema
+        shell: bash
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+        run: |
+          set -euo pipefail
+          alembic -c alembic.ini upgrade head
+          current="$(alembic -c alembic.ini current)"
+          test "$current" = "${EXPECTED_ALEMBIC_HEAD} (head)"
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+          expected={
+              'users','sessions','imports','events','import_rows','control_runs','checks',
+              'previews','preview_items','audit_log',
+              'write_operations','signing_requests','write_operation_audit',
+          }
+          engine=create_engine(os.environ['WBCZ_DATABASE_URL'])
+          try:
+              tables=set(inspect(engine).get_table_names())
+          finally:
+              engine.dispose()
+          missing=sorted(expected-tables)
+          assert not missing, f'missing expected tables: {missing}'
+          print('DATABASE_SCHEMA_CI_CHECK=PASS')
+          PY
+      - name: Run full pytest
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+          WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+        run: python -m pytest -q
+      - name: Preserve restrictive-mode runtime migration regression
+        run: sh tests/backend_runtime_permissions_regression.sh
+      - name: Ordinary backend image default user and Alembic head
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.backend -t wbcz-p0-write:test .
+          output="$(docker run --rm --entrypoint sh wbcz-p0-write:test -ec '
+            test "$(id -un)" = wbcz
+            test -r /app/alembic.ini
+            test -r /app/migrations/versions/0002_p0_write_pipeline.py
+            alembic -c /app/alembic.ini heads
+          ')"
+          test "$output" = "${EXPECTED_ALEMBIC_HEAD} (head)"
+          echo 'DEFAULT_RUNTIME_USER=wbcz'
+          echo 'ALEMBIC_HEADS_DEFAULT_USER=0002_p0_write_pipeline'
+      - name: Fail-closed write safety boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from wbcz.p0_write import ProductionWriteDisabled, TrueApiWriteAdapter
+          class NoNetwork:
+              def request(self, **kwargs):
+                  raise AssertionError('network must not be called when write is disabled')
+          adapter=TrueApiWriteAdapter(NoNetwork())
+          assert adapter.write_enabled is False
+          try:
+              adapter.poll('doc-id', bearer_token='not-real')
+          except ProductionWriteDisabled:
+              pass
+          else:
+              raise AssertionError('default write gate did not fail closed')
+          print('PRODUCTION_WRITE_DEFAULT_OFF=YES')
+          print('PRIVATE_KEY_SERVER_SIDE=NO')
+          print('ARBITRARY_SIGNING_POSSIBLE=NO')
+          PY
