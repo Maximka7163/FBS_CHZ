@@ -6,13 +6,15 @@ set -eu
 # live outside this tree under /opt/sellari-marking/runtime and are untouched.
 TARGET=${1:?usage: normalize-release-permissions.sh /opt/sellari-marking/releases/<sha>}
 
-case "$TARGET" in
-    /opt/sellari-marking/releases/*) ;;
-    *)
-        printf 'ERROR: refusing to normalize unexpected path: %s\n' "$TARGET" >&2
-        exit 64
-        ;;
-esac
+if [ "${WBCZ_RELEASE_NORMALIZE_TEST_MODE:-0}" != "1" ]; then
+    case "$TARGET" in
+        /opt/sellari-marking/releases/*) ;;
+        *)
+            printf 'ERROR: refusing to normalize unexpected path: %s\n' "$TARGET" >&2
+            exit 64
+            ;;
+    esac
+fi
 
 if [ ! -d "$TARGET" ]; then
     printf 'ERROR: release directory not found: %s\n' "$TARGET" >&2
@@ -24,7 +26,9 @@ fi
 find "$TARGET" -type d -exec chmod 0755 {} +
 find "$TARGET" -type f -exec chmod 0644 {} +
 find "$TARGET/deploy" -type f -name '*.sh' -exec chmod 0755 {} +
-chown -R root:root "$TARGET"
+if [ "${WBCZ_RELEASE_NORMALIZE_TEST_MODE:-0}" != "1" ]; then
+    chown -R root:root "$TARGET"
+fi
 
 printf '%s\n' \
     'RELEASE_PERMISSIONS_NORMALIZED=YES' \
