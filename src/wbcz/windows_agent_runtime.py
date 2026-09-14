@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import asdict
 import hashlib
 import json
@@ -14,6 +15,7 @@ from .windows_agent import (
     AgentResult,
     WindowsAgentExecutor,
 )
+from .write_pipeline import CreateCategory
 
 
 class AgentCreateOutcomeUnresolved(AgentReplayConflict):
@@ -59,6 +61,23 @@ class WindowsAgentReplayStore:
         data["cises"] = tuple(data.get("cises") or ())
         return AgentResult(**data)
 
+    def inspect(self, operation_id: str, document_sha256: str) -> AgentResult | None:
+        row = self._connection.execute(
+            "SELECT * FROM windows_agent_write_replay WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["document_sha256"] != document_sha256:
+            raise AgentReplayConflict("operation replay with different immutable document hash")
+        if row["state"] == "COMPLETED":
+            if not row["result_json"]:
+                raise AgentReplayConflict("completed replay entry misses result")
+            return self._decode_result(row["result_json"])
+        raise AgentCreateOutcomeUnresolved(
+            "previous create attempt outcome is unresolved; duplicate create blocked"
+        )
+
     def claim(self, operation_id: str, document_sha256: str) -> AgentResult | None:
         if not operation_id or not document_sha256:
             raise ValueError("operation_id and document_sha256 are required")
@@ -80,9 +99,7 @@ class WindowsAgentReplayStore:
                 self._connection.commit()
                 return None
             if row["document_sha256"] != document_sha256:
-                raise AgentReplayConflict(
-                    "operation replay with different immutable document hash"
-                )
+                raise AgentReplayConflict("operation replay with different immutable document hash")
             if row["state"] == "COMPLETED":
                 if not row["result_json"]:
                     raise AgentReplayConflict("completed replay entry misses result")
@@ -96,12 +113,7 @@ class WindowsAgentReplayStore:
             self._connection.rollback()
             raise
 
-    def complete(
-        self,
-        operation_id: str,
-        document_sha256: str,
-        result: AgentResult,
-    ) -> None:
+    def complete(self, operation_id: str, document_sha256: str, result: AgentResult) -> None:
         serialized = canonical_json(asdict(result))
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         self._connection.execute("BEGIN IMMEDIATE")
@@ -148,15 +160,73 @@ class DurableWindowsAgentExecutor(WindowsAgentExecutor):
     def _write(self, job: AgentJob) -> AgentResult:
         if not self.production_write:
             raise AgentProductionWriteDisabled("production_write=false")
-        assert job.document_sha256 is not None
+        assert job.document_sha256 and job.product_document_base64 and job.document_type
+
+        previous = self.replay_store.inspect(job.operation_id, job.document_sha256)
+        if previous is not None:
+            return previous
+
+        # Local signing happens before the ambiguity reservation. A pure local
+        # signing/certificate error therefore remains safely retryable because
+        # no HTTP create can have been sent yet.
+        raw = base64.b64decode(job.product_document_base64, validate=True)
+        signature, metadata = self.document_signer.sign_document_bytes(
+            operation_id=job.operation_id,
+            document_type=job.document_type,
+            pg=job.pg,
+            expected_inn=job.expected_inn,
+            document_sha256=job.document_sha256,
+            payload=raw,
+        )
+
+        # From this point onward a crash/transport exception is ambiguous with
+        # respect to create delivery. The durable RESERVED marker is written
+        # before the first possible create I/O and can never auto-retry.
         previous = self.replay_store.claim(job.operation_id, job.document_sha256)
         if previous is not None:
             return previous
-        # Reservation is durable before signing/create. Any crash or ambiguous
-        # exception leaves RESERVED, so a restarted agent fails closed instead
-        # of issuing a second True API create.
-        result = super()._write(job)
-        self.replay_store.complete(
-            job.operation_id, job.document_sha256, result
+
+        response = self.transport.create_document(
+            document_type=job.document_type,
+            product_document_base64=job.product_document_base64,
+            signature_base64=signature,
+            bearer_token=self.session_manager.bearer_token(),
         )
+        body_sha = hashlib.sha256(response.body).hexdigest()
+        if response.status in (200, 201):
+            document_id = self.create_id_parser.parse_document_id(response)
+            if document_id:
+                category = CreateCategory.SUCCESS_WITH_ID.value
+                outcome = "SUBMITTED"
+            else:
+                category = CreateCategory.SUCCESS_CONTRACT_UNCONFIRMED.value
+                outcome = "MANUAL_REVIEW"
+        else:
+            document_id = None
+            category = {
+                400: CreateCategory.BAD_REQUEST.value,
+                401: CreateCategory.UNAUTHORIZED.value,
+                403: CreateCategory.FORBIDDEN.value,
+                422: CreateCategory.UNPROCESSABLE.value,
+            }.get(response.status)
+            if category is None:
+                category = (
+                    CreateCategory.SERVER_ERROR.value
+                    if response.status >= 500
+                    else CreateCategory.HTTP_ERROR.value
+                )
+            outcome = "MANUAL_REVIEW" if response.status >= 500 else "FAILED"
+        result = AgentResult(
+            job.job_id,
+            job.operation_id,
+            outcome,
+            document_sha256=job.document_sha256,
+            signature_base64=signature,
+            http_status=response.status,
+            create_category=category,
+            document_id=document_id,
+            body_sha256=body_sha,
+            **metadata,
+        )
+        self.replay_store.complete(job.operation_id, job.document_sha256, result)
         return result

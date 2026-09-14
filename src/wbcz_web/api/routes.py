@@ -15,6 +15,7 @@ from wbcz_web.services import (
     event_view,
     import_view,
 )
+from wbcz_web.services.agent_orchestration import AgentControlService
 
 from .dependencies import AuthenticatedIdentity, get_db, require_csrf, require_user
 from .schemas import ControlRequest, LoginRequest, PreviewRequest
@@ -174,7 +175,10 @@ def control(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        return ControlService(db, request.app.state.config.own_inn).run(import_id, identity.user_id, payload.mode, payload.event_ids)
+        config = request.app.state.config
+        if config.agent_enabled:
+            return AgentControlService(db, config).run(import_id, identity.user_id, payload.mode, payload.event_ids)
+        return ControlService(db, config.own_inn).run(import_id, identity.user_id, payload.mode, payload.event_ids)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

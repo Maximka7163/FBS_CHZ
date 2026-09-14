@@ -112,7 +112,7 @@ class StdlibHttpsAgentSender:
 
     @staticmethod
     def _allowed(method: str, path: str) -> bool:
-        if method == "GET" and path == AGENT_FETCH_PATH:
+        if method in {"HEAD", "GET"} and path == AGENT_FETCH_PATH:
             return True
         return method == "POST" and _RESULT_PATH_RE.fullmatch(path) is not None
 
@@ -159,6 +159,17 @@ class OutboundAgentHttpClient(AgentBackendChannel):
         if json_body:
             headers["Content-Type"] = "application/json"
         return headers
+
+    def check_auth(self, machine_token: str) -> None:
+        response = self.sender.request(
+            "HEAD", AGENT_FETCH_PATH, headers=self._headers(machine_token)
+        )
+        if response.status != 204:
+            raise AgentAuthError(
+                "agent backend rejected machine auth"
+                if response.status in (401, 403)
+                else f"agent backend preflight HTTP {response.status}"
+            )
 
     def fetch_one(self, machine_token: str) -> AgentJob | None:
         response = self.sender.request(
@@ -223,12 +234,17 @@ class VpsAgentHttpBoundary:
         method = method.upper()
         try:
             token = self._bearer(headers)
+            if method == "HEAD" and path == AGENT_FETCH_PATH:
+                if body:
+                    raise AgentSecurityError("agent auth check body is not allowed")
+                self.broker.check_auth(token)
+                return AgentProtocolResponse(204, b"", {"Cache-Control": "no-store"})
             if method == "GET" and path == AGENT_FETCH_PATH:
                 if body:
                     raise AgentSecurityError("job fetch body is not allowed")
                 job = self.broker.fetch_one(token)
                 if job is None:
-                    return AgentProtocolResponse(204)
+                    return AgentProtocolResponse(204, b"", {"Cache-Control": "no-store"})
                 payload = _job_to_json(job)
                 return AgentProtocolResponse(
                     200,
@@ -244,6 +260,6 @@ class VpsAgentHttpBoundary:
                 return AgentProtocolResponse(202, b"", {"Cache-Control": "no-store"})
             raise AgentSecurityError("arbitrary agent endpoint denied")
         except AgentAuthError:
-            return AgentProtocolResponse(401)
+            return AgentProtocolResponse(401, b"", {"Cache-Control": "no-store"})
         except AgentSecurityError:
-            return AgentProtocolResponse(400)
+            return AgentProtocolResponse(400, b"", {"Cache-Control": "no-store"})

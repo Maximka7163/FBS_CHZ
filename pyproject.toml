@@ -19,6 +19,7 @@ wbcz = "wbcz.cli:main"
 wbcz-ui = "wbcz_ui.__main__:main"
 wbcz-web = "wbcz_web.__main__:main"
 wbcz-web-admin = "wbcz_web.admin:main"
+wbcz-agent = "wbcz.agent_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

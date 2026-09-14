@@ -38,6 +38,13 @@ class WebConfig:
     trusted_hosts: tuple[str, ...] = ("testserver", "localhost", "127.0.0.1")
     app_version: str = "0.5.1"
     build_sha: str = "dev"
+    agent_enabled: bool = False
+    agent_machine_token: str | None = None
+    agent_job_lease_seconds: int = 90
+    agent_poll_initial_seconds: int = 10
+    agent_poll_max_seconds: int = 120
+    agent_poll_max_attempts: int = 60
+    true_api_write_enabled: bool = False
 
     def validate_for_startup(self) -> "WebConfig":
         if self.environment not in {"development", "test", "production"}:
@@ -53,6 +60,24 @@ class WebConfig:
             raise ValueError("Session and CSRF cookie names must differ")
         if not self.trusted_hosts:
             raise ValueError("WBCZ_TRUSTED_HOSTS must not be empty")
+        if not 15 <= self.agent_job_lease_seconds <= 60 * 60:
+            raise ValueError("WBCZ_AGENT_JOB_LEASE_SECONDS is out of range")
+        if not 1 <= self.agent_poll_initial_seconds <= 60 * 60:
+            raise ValueError("WBCZ_AGENT_POLL_INITIAL_SECONDS is out of range")
+        if self.agent_poll_max_seconds < self.agent_poll_initial_seconds or self.agent_poll_max_seconds > 24 * 60 * 60:
+            raise ValueError("WBCZ_AGENT_POLL_MAX_SECONDS is out of range")
+        if not 1 <= self.agent_poll_max_attempts <= 1000:
+            raise ValueError("WBCZ_AGENT_POLL_MAX_ATTEMPTS is out of range")
+        if self.true_api_write_enabled:
+            raise ValueError("Production True API write remains disabled pending runtime contract tests")
+        if self.agent_enabled:
+            token = self.agent_machine_token or ""
+            minimum = 32 if self.environment == "production" else 16
+            if len(token) < minimum:
+                raise ValueError(f"WBCZ_AGENT_MACHINE_TOKEN must be at least {minimum} characters when agent is enabled")
+            normalized = token.strip().lower()
+            if normalized in {"changeme", "change_me", "password", "secret", "agent-token", "replace_me"} or "replace_with" in normalized:
+                raise ValueError("WBCZ_AGENT_MACHINE_TOKEN is an unsafe placeholder")
         if self.environment == "production":
             if not self.cookie_secure:
                 raise ValueError("WBCZ_COOKIE_SECURE must be true in production")
@@ -87,6 +112,7 @@ class WebConfig:
             if env == "production":
                 raise ValueError("WBCZ_TRUSTED_HOSTS is required in production")
             trusted_raw = "testserver,localhost,127.0.0.1"
+        token = os.getenv("WBCZ_AGENT_MACHINE_TOKEN", "")
         config = cls(
             database_url=db,
             own_inn=own_inn,
@@ -99,5 +125,12 @@ class WebConfig:
             trusted_hosts=_csv_hosts(trusted_raw),
             app_version=os.getenv("WBCZ_APP_VERSION", "0.5.1").strip() or "0.5.1",
             build_sha=os.getenv("WBCZ_BUILD_SHA", "dev").strip(),
+            agent_enabled=_env_bool("WBCZ_AGENT_ENABLED", False),
+            agent_machine_token=token if token else None,
+            agent_job_lease_seconds=int(os.getenv("WBCZ_AGENT_JOB_LEASE_SECONDS", "90")),
+            agent_poll_initial_seconds=int(os.getenv("WBCZ_AGENT_POLL_INITIAL_SECONDS", "10")),
+            agent_poll_max_seconds=int(os.getenv("WBCZ_AGENT_POLL_MAX_SECONDS", "120")),
+            agent_poll_max_attempts=int(os.getenv("WBCZ_AGENT_POLL_MAX_ATTEMPTS", "60")),
+            true_api_write_enabled=_env_bool("WBCZ_TRUE_API_WRITE_ENABLED", False),
         )
         return config.validate_for_startup()

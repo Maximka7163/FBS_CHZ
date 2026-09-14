@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .api import router
+from .api.agent_routes import agent_router
 from .config import WebConfig
 from .db import build_session_factory
 
@@ -23,6 +24,7 @@ def create_app(config: WebConfig | None = None, *, session_factory=None) -> Fast
     app.state.session_factory = session_factory or build_session_factory(config)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.trusted_hosts))
     app.include_router(router)
+    app.include_router(agent_router)
     return app
 
 

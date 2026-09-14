@@ -1,0 +1,527 @@
+from __future__ import annotations
+
+import base64
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+import hashlib
+from typing import Any, Mapping
+
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import Session
+
+from wbcz.models import Decision, canonical_json
+from wbcz.windows_agent import AgentJob, AgentJobState, AgentJobType, AgentReplayConflict, AgentResult
+from wbcz.write_pipeline import (
+    ALLOWED_DOCUMENT_TYPES,
+    ALLOWED_PRODUCT_GROUP,
+    CreateCategory,
+    CreateResult,
+    DuplicateSubmitBlocked,
+    ExactDocument,
+    InvalidWriteOperation,
+    OperationRecord,
+    PollClassification,
+    ReplayConflict,
+    SigningRequest,
+    SigningResponse,
+    WriteState,
+    classify_poll_status,
+)
+from wbcz_web.models import AgentJobRecord, WriteAuditRecord, WriteOperationRecord
+
+
+_WRITE_MAPPING = {
+    Decision.READY_TO_WITHDRAW: ("LK_RECEIPT", "DISTANCE"),
+    Decision.READY_TO_RETURN: ("LP_RETURN", "REMOTE_SALE_RETURN"),
+}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalized_b64(value: str, *, label: str) -> str:
+    if not value or "\r" in value or "\n" in value:
+        raise InvalidWriteOperation(f"{label} must be non-empty Base64 without CR/LF")
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except Exception as exc:
+        raise InvalidWriteOperation(f"{label} is invalid Base64") from exc
+    if not raw:
+        raise InvalidWriteOperation(f"{label} decodes to empty bytes")
+    return base64.b64encode(raw).decode("ascii")
+
+
+class SqlAlchemyWriteOperationStore:
+    """PostgreSQL-backed production equivalent of the isolated SQLite write store."""
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def _row(self, operation_id: str, *, lock: bool = False) -> WriteOperationRecord:
+        stmt = select(WriteOperationRecord).where(WriteOperationRecord.operation_id == operation_id)
+        if lock:
+            stmt = stmt.with_for_update()
+        row = self.db.scalar(stmt)
+        if row is None:
+            raise KeyError(f"operation not found: {operation_id}")
+        return row
+
+    @staticmethod
+    def _record(row: WriteOperationRecord) -> OperationRecord:
+        return OperationRecord(
+            operation_id=row.operation_id,
+            business_fingerprint=row.business_fingerprint,
+            event_id=row.event_id,
+            decision=Decision(row.decision),
+            document_type=row.document_type,
+            operation_reason=row.operation_reason,
+            pg=row.pg,
+            expected_inn=row.expected_inn,
+            document_sha256=row.document_sha256,
+            product_document_base64=row.product_document_base64,
+            prepared_at=row.prepared_at.isoformat(),
+            state=WriteState(row.state),
+            signature_base64=row.signature_base64,
+            document_id=row.document_id,
+        )
+
+    def _audit(
+        self,
+        operation_id: str,
+        action: str,
+        *,
+        from_state: WriteState | None = None,
+        to_state: WriteState | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.db.add(
+            WriteAuditRecord(
+                operation_id=operation_id,
+                action=action,
+                from_state=from_state.value if from_state else None,
+                to_state=to_state.value if to_state else None,
+                details_json=dict(details or {}),
+            )
+        )
+
+    def get(self, operation_id: str) -> OperationRecord:
+        return self._record(self._row(operation_id))
+
+    def _transition(
+        self,
+        operation_id: str,
+        *,
+        expected: set[WriteState],
+        target: WriteState,
+        action: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> OperationRecord:
+        row = self._row(operation_id, lock=True)
+        current = WriteState(row.state)
+        if current not in expected:
+            raise InvalidWriteOperation(f"{action} not allowed from state {current.value}")
+        row.state = target.value
+        row.updated_at = _now()
+        self._audit(operation_id, action, from_state=current, to_state=target, details=details)
+        self.db.flush()
+        return self._record(row)
+
+    def prepare(
+        self,
+        *,
+        event_id: str,
+        decision: Decision,
+        document_type: str,
+        operation_reason: str,
+        pg: str,
+        expected_inn: str,
+        document: ExactDocument,
+    ) -> OperationRecord:
+        if decision not in _WRITE_MAPPING:
+            raise InvalidWriteOperation("control decision is not approved for write")
+        expected_type, expected_reason = _WRITE_MAPPING[decision]
+        if document_type != expected_type or operation_reason != expected_reason:
+            raise InvalidWriteOperation("decision/document mapping mismatch")
+        if document_type not in ALLOWED_DOCUMENT_TYPES or pg != ALLOWED_PRODUCT_GROUP:
+            raise InvalidWriteOperation("operation is outside P0 write whitelist")
+        if not expected_inn:
+            raise InvalidWriteOperation("expected_inn is required")
+        try:
+            decoded = base64.b64decode(document.product_document_base64, validate=True)
+        except Exception as exc:
+            raise InvalidWriteOperation("product_document is invalid Base64") from exc
+        if decoded != document.bytes_for_signature:
+            raise InvalidWriteOperation("bytes_for_signature != Base64Decode(product_document)")
+        if hashlib.sha256(decoded).hexdigest() != document.sha256:
+            raise InvalidWriteOperation("document hash mismatch")
+        source = {
+            "event_id": event_id,
+            "decision": decision.value,
+            "document_type": document_type,
+            "operation_reason": operation_reason,
+            "pg": pg,
+        }
+        fingerprint = hashlib.sha256(("wb-fbs-write:v1:" + canonical_json(source)).encode("utf-8")).hexdigest()
+        existing = self.db.scalar(
+            select(WriteOperationRecord)
+            .where(WriteOperationRecord.business_fingerprint == fingerprint)
+            .with_for_update()
+        )
+        if existing is not None:
+            record = self._record(existing)
+            if not (
+                record.document_sha256 == document.sha256
+                and record.product_document_base64 == document.product_document_base64
+                and record.expected_inn == expected_inn
+            ):
+                raise ReplayConflict("same business operation has different immutable document data")
+            self._audit(record.operation_id, "PREPARE_REPLAY_IDEMPOTENT", details={"document_sha256": document.sha256})
+            self.db.flush()
+            return record
+        operation_id = "op_" + fingerprint[:32]
+        now = _now()
+        row = WriteOperationRecord(
+            operation_id=operation_id,
+            business_fingerprint=fingerprint,
+            event_id=event_id,
+            decision=decision.value,
+            document_type=document_type,
+            operation_reason=operation_reason,
+            pg=pg,
+            expected_inn=expected_inn,
+            document_sha256=document.sha256,
+            product_document_base64=document.product_document_base64,
+            prepared_at=now,
+            state=WriteState.AWAITING_SIGNATURE.value,
+            updated_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        self._audit(operation_id, "OPERATION_PREPARED", to_state=WriteState.PREPARED, details={"document_type": document_type, "pg": pg, "document_sha256": document.sha256})
+        self._audit(operation_id, "SIGNING_REQUEST_PENDING", from_state=WriteState.PREPARED, to_state=WriteState.AWAITING_SIGNATURE)
+        self.db.flush()
+        return self._record(row)
+
+    def signing_request(self, operation_id: str) -> SigningRequest:
+        op = self.get(operation_id)
+        if op.state is not WriteState.AWAITING_SIGNATURE:
+            raise InvalidWriteOperation(f"signing request unavailable from state {op.state.value}")
+        if op.document_type not in ALLOWED_DOCUMENT_TYPES or op.pg != ALLOWED_PRODUCT_GROUP:
+            raise InvalidWriteOperation("operation is outside signing whitelist")
+        return SigningRequest(op.operation_id, op.document_type, op.pg, op.expected_inn, op.document_sha256, op.product_document_base64)
+
+    def accept_signature(self, response: SigningResponse, *, own_inn: str) -> OperationRecord:
+        row = self._row(response.operation_id, lock=True)
+        op = self._record(row)
+        if op.document_sha256 != response.document_sha256:
+            raise InvalidWriteOperation("document_sha256 mismatch")
+        if op.document_type not in ALLOWED_DOCUMENT_TYPES or op.pg != ALLOWED_PRODUCT_GROUP:
+            raise InvalidWriteOperation("operation is outside write whitelist")
+        if op.expected_inn != own_inn:
+            raise InvalidWriteOperation("expected_inn mismatch")
+        if response.certificate_inn and response.certificate_inn != op.expected_inn:
+            raise InvalidWriteOperation("certificate INN mismatch")
+        signature = _normalized_b64(response.signature_base64, label="signature")
+        if op.state is not WriteState.AWAITING_SIGNATURE:
+            if row.signature_base64 == signature and op.state in {
+                WriteState.SIGNED, WriteState.SUBMITTING, WriteState.SUBMITTED,
+                WriteState.PROCESSING, WriteState.RECONCILIATION_REQUIRED,
+                WriteState.SUCCEEDED, WriteState.FAILED, WriteState.MANUAL_REVIEW,
+            }:
+                self._audit(op.operation_id, "SIGNATURE_REPLAY_IDEMPOTENT", details={"document_sha256": op.document_sha256})
+                self.db.flush()
+                return op
+            raise InvalidWriteOperation(f"signature not accepted from state {op.state.value}")
+        row.signature_base64 = signature
+        row.certificate_thumbprint = response.certificate_thumbprint
+        row.certificate_subject = response.certificate_subject
+        row.certificate_inn = response.certificate_inn
+        row.certificate_valid_from = response.certificate_valid_from
+        row.certificate_valid_to = response.certificate_valid_to
+        row.state = WriteState.SIGNED.value
+        row.updated_at = _now()
+        self._audit(op.operation_id, "SIGNATURE_ACCEPTED", from_state=WriteState.AWAITING_SIGNATURE, to_state=WriteState.SIGNED, details={"document_sha256": op.document_sha256, "certificate_thumbprint": response.certificate_thumbprint, "certificate_inn": response.certificate_inn})
+        self.db.flush()
+        return self._record(row)
+
+    def reserve_submit(self, operation_id: str) -> OperationRecord:
+        op = self.get(operation_id)
+        if op.state is not WriteState.SIGNED:
+            if op.state in {WriteState.SUBMITTING, WriteState.SUBMITTED, WriteState.PROCESSING, WriteState.RECONCILIATION_REQUIRED, WriteState.SUCCEEDED}:
+                raise DuplicateSubmitBlocked("second True API create is prohibited")
+            raise InvalidWriteOperation(f"submit not allowed from state {op.state.value}")
+        if not op.signature_base64:
+            raise InvalidWriteOperation("signature missing")
+        return self._transition(operation_id, expected={WriteState.SIGNED}, target=WriteState.SUBMITTING, action="SUBMIT_RESERVED")
+
+    def complete_submit(self, operation_id: str, result: CreateResult) -> OperationRecord:
+        row = self._row(operation_id, lock=True)
+        current = WriteState(row.state)
+        if current is not WriteState.SUBMITTING:
+            raise InvalidWriteOperation(f"submit result not allowed from state {current.value}")
+        if result.category is CreateCategory.SUCCESS_WITH_ID:
+            if not result.document_id:
+                raise InvalidWriteOperation("success parser returned no document id")
+            target = WriteState.SUBMITTED
+        elif result.category in {CreateCategory.SERVER_ERROR, CreateCategory.SUCCESS_CONTRACT_UNCONFIRMED}:
+            target = WriteState.MANUAL_REVIEW
+        else:
+            target = WriteState.FAILED
+        row.state = target.value
+        row.document_id = result.document_id if target is WriteState.SUBMITTED else None
+        row.submit_http_status = result.http_status
+        row.submit_category = result.category.value
+        row.submit_body_sha256 = result.body_sha256
+        row.updated_at = _now()
+        self._audit(operation_id, "SUBMIT_RESULT", from_state=current, to_state=target, details={"http_status": result.http_status, "category": result.category.value, "body_sha256": result.body_sha256, "content_type": result.content_type, "document_id_present": result.document_id is not None})
+        self.db.flush()
+        return self._record(row)
+
+    def mark_manual_review(self, operation_id: str, *, reason: str) -> OperationRecord:
+        return self._transition(
+            operation_id,
+            expected={WriteState.AWAITING_SIGNATURE, WriteState.SIGNED, WriteState.SUBMITTING, WriteState.SUBMITTED, WriteState.PROCESSING, WriteState.RECONCILIATION_REQUIRED},
+            target=WriteState.MANUAL_REVIEW,
+            action="MANUAL_REVIEW_REQUIRED",
+            details={"reason": reason[:500]},
+        )
+
+    def mark_error(self, operation_id: str, *, error_type: str) -> OperationRecord:
+        return self._transition(operation_id, expected={WriteState.AWAITING_SIGNATURE, WriteState.SIGNED}, target=WriteState.ERROR, action="PIPELINE_ERROR", details={"error_type": error_type[:200]})
+
+    def audit_note(self, operation_id: str, action: str, details: Mapping[str, Any]) -> None:
+        self._row(operation_id)
+        self._audit(operation_id, action, details=details)
+        self.db.flush()
+
+    def apply_poll_status(
+        self,
+        operation_id: str,
+        *,
+        status: str | None,
+        http_status: int | None = None,
+        body_sha256: str | None = None,
+    ) -> tuple[OperationRecord, PollClassification]:
+        classification = classify_poll_status(status)
+        op = self.get(operation_id)
+        if op.state not in {WriteState.SUBMITTED, WriteState.PROCESSING}:
+            raise InvalidWriteOperation(f"polling not allowed from state {op.state.value}")
+        details = {"remote_status": status, "http_status": http_status, "body_sha256": body_sha256, "classification": classification.value}
+        if classification is PollClassification.INTERMEDIATE:
+            if op.state is WriteState.SUBMITTED:
+                op = self._transition(operation_id, expected={WriteState.SUBMITTED}, target=WriteState.PROCESSING, action="POLL_INTERMEDIATE", details=details)
+            else:
+                self._audit(operation_id, "POLL_INTERMEDIATE", details=details)
+                self.db.flush()
+                op = self.get(operation_id)
+            return op, classification
+        target = (
+            WriteState.RECONCILIATION_REQUIRED
+            if classification is PollClassification.TERMINAL_SUCCESS
+            else WriteState.FAILED
+            if classification is PollClassification.TERMINAL_FAILURE
+            else WriteState.MANUAL_REVIEW
+        )
+        op = self._transition(operation_id, expected={WriteState.SUBMITTED, WriteState.PROCESSING}, target=target, action="POLL_TERMINAL", details=details)
+        return op, classification
+
+    def reconciliation_result(self, operation_id: str, *, confirmed: bool, details: Mapping[str, Any] | None = None) -> OperationRecord:
+        return self._transition(
+            operation_id,
+            expected={WriteState.RECONCILIATION_REQUIRED},
+            target=WriteState.SUCCEEDED if confirmed else WriteState.MANUAL_REVIEW,
+            action="RECONCILIATION_RESULT",
+            details={"confirmed": confirmed, **dict(details or {})},
+        )
+
+    def audit_entries(self, operation_id: str) -> list[dict[str, Any]]:
+        rows = list(self.db.scalars(select(WriteAuditRecord).where(WriteAuditRecord.operation_id == operation_id).order_by(WriteAuditRecord.id)))
+        return [
+            {
+                "id": row.id,
+                "operation_id": row.operation_id,
+                "action": row.action,
+                "from_state": row.from_state,
+                "to_state": row.to_state,
+                "details_json": row.details_json,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentJobMetadata:
+    job: AgentJob
+    purpose: str
+    event_id: str | None
+    control_run_id: str | None
+    poll_attempt: int
+    available_at: datetime
+    state: AgentJobState
+
+
+class SqlAlchemyAgentJobStore:
+    """PostgreSQL durable outbox with lease expiry and result replay protection."""
+
+    def __init__(self, db: Session, *, lease_seconds: int = 90) -> None:
+        if lease_seconds < 15:
+            raise ValueError("agent job lease must be at least 15 seconds")
+        self.db = db
+        self.lease_seconds = lease_seconds
+
+    @staticmethod
+    def _payload(job: AgentJob) -> dict[str, Any]:
+        value = asdict(job)
+        value["job_type"] = job.job_type.value
+        value["cises"] = list(job.cises)
+        return value
+
+    @classmethod
+    def _digest(cls, job: AgentJob) -> tuple[dict[str, Any], str]:
+        payload = cls._payload(job)
+        return payload, hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _job(row: AgentJobRecord) -> AgentJob:
+        data = dict(row.payload_json)
+        data["job_type"] = AgentJobType(data["job_type"])
+        data["cises"] = tuple(data.get("cises") or ())
+        return AgentJob(**data)
+
+    def metadata(self, job_id: str, *, lock: bool = False) -> AgentJobMetadata:
+        stmt = select(AgentJobRecord).where(AgentJobRecord.job_id == job_id)
+        if lock:
+            stmt = stmt.with_for_update()
+        row = self.db.scalar(stmt)
+        if row is None:
+            raise KeyError(job_id)
+        return AgentJobMetadata(
+            job=self._job(row),
+            purpose=row.purpose,
+            event_id=row.event_id,
+            control_run_id=row.control_run_id,
+            poll_attempt=row.poll_attempt,
+            available_at=row.available_at,
+            state=AgentJobState(row.state),
+        )
+
+    def enqueue(
+        self,
+        job: AgentJob,
+        *,
+        purpose: str | None = None,
+        event_id: str | None = None,
+        control_run_id: str | None = None,
+        poll_attempt: int = 0,
+        available_at: datetime | None = None,
+    ) -> AgentJob:
+        job.validate()
+        payload, digest = self._digest(job)
+        purpose = purpose or (
+            "WRITE" if job.job_type in {AgentJobType.LK_RECEIPT, AgentJobType.LP_RETURN}
+            else "POLL" if job.job_type is AgentJobType.POLL_DOCUMENT
+            else "CIS_CHECK"
+        )
+        existing = self.db.scalar(select(AgentJobRecord).where(AgentJobRecord.job_id == job.job_id).with_for_update())
+        if existing is not None:
+            if existing.payload_sha256 != digest:
+                raise AgentReplayConflict("same job_id has different payload")
+            if existing.purpose != purpose or existing.event_id != event_id or existing.control_run_id != control_run_id or existing.poll_attempt != poll_attempt:
+                raise AgentReplayConflict("same job_id has incompatible orchestration metadata")
+            return self._job(existing)
+        if job.job_type in {AgentJobType.LK_RECEIPT, AgentJobType.LP_RETURN}:
+            prior_write = self.db.scalar(
+                select(AgentJobRecord)
+                .where(
+                    AgentJobRecord.operation_id == job.operation_id,
+                    AgentJobRecord.job_type.in_([AgentJobType.LK_RECEIPT.value, AgentJobType.LP_RETURN.value]),
+                )
+                .with_for_update()
+            )
+            if prior_write is not None:
+                if prior_write.payload_sha256 != digest:
+                    raise AgentReplayConflict("same write operation has different payload")
+                return self._job(prior_write)
+        row = AgentJobRecord(
+            job_id=job.job_id,
+            job_type=job.job_type.value,
+            operation_id=job.operation_id,
+            purpose=purpose,
+            event_id=event_id,
+            control_run_id=control_run_id,
+            poll_attempt=poll_attempt,
+            payload_sha256=digest,
+            payload_json=payload,
+            state=AgentJobState.PENDING.value,
+            available_at=(available_at or _now()).astimezone(timezone.utc),
+            delivery_count=0,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return job
+
+    def fetch_one(self) -> AgentJob | None:
+        now = _now()
+        row = self.db.scalar(
+            select(AgentJobRecord)
+            .where(
+                AgentJobRecord.state != AgentJobState.COMPLETED.value,
+                AgentJobRecord.available_at <= now,
+                or_(
+                    AgentJobRecord.state == AgentJobState.PENDING.value,
+                    and_(
+                        AgentJobRecord.state == AgentJobState.LEASED.value,
+                        AgentJobRecord.lease_expires_at.is_not(None),
+                        AgentJobRecord.lease_expires_at <= now,
+                    ),
+                ),
+            )
+            .order_by(AgentJobRecord.available_at, AgentJobRecord.created_at, AgentJobRecord.job_id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if row is None:
+            return None
+        row.state = AgentJobState.LEASED.value
+        row.leased_at = now
+        row.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
+        row.delivery_count += 1
+        row.updated_at = now
+        self.db.flush()
+        return self._job(row)
+
+    def complete(self, result: AgentResult) -> None:
+        row = self.db.scalar(select(AgentJobRecord).where(AgentJobRecord.job_id == result.job_id).with_for_update())
+        if row is None:
+            raise KeyError("unknown agent job")
+        if row.operation_id != result.operation_id:
+            raise AgentReplayConflict("result operation_id mismatch")
+        payload = result.safe_dict()
+        digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+        if row.state == AgentJobState.COMPLETED.value:
+            if row.result_sha256 != digest:
+                raise AgentReplayConflict("incompatible duplicate agent result")
+            return
+        row.state = AgentJobState.COMPLETED.value
+        row.result_sha256 = digest
+        row.result_json = payload
+        row.lease_expires_at = None
+        row.updated_at = _now()
+        self.db.flush()
+
+    def state(self, job_id: str) -> AgentJobState:
+        row = self.db.get(AgentJobRecord, job_id)
+        if row is None:
+            raise KeyError(job_id)
+        return AgentJobState(row.state)
+
+    def next_poll_attempt(self, operation_id: str) -> int:
+        value = self.db.scalar(
+            select(func.coalesce(func.max(AgentJobRecord.poll_attempt), 0)).where(
+                AgentJobRecord.operation_id == operation_id,
+                AgentJobRecord.job_type == AgentJobType.POLL_DOCUMENT.value,
+            )
+        )
+        return int(value or 0) + 1
