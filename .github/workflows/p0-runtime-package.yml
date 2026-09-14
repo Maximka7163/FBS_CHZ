@@ -175,6 +175,12 @@ jobs:
           set -euo pipefail
           ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BACKEND_ROOT"
           WBCZ_INIT_TEST_MODE=1 WBCZ_ENV_FILE_TARGET="$RUNNER_TEMP/bundle.env" sh "$ROOT/deploy/init-production-env.sh"
+          # Compose gives the caller environment precedence over --env-file. Replace
+          # the job's localhost pytest DB variables with the generated runtime env
+          # so the container connects only to its isolated marking-postgres service.
+          set -a
+          . "$RUNNER_TEMP/bundle.env"
+          set +a
           dc() { docker compose --env-file "$RUNNER_TEMP/bundle.env" -f "$ROOT/docker-compose.prod.yml" "$@"; }
           dc config -q
           dc build marking-backend
