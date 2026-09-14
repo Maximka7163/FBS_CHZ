@@ -36,6 +36,24 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install -e ".[ui,test,web]"
+      - name: FastAPI route wiring smoke
+        run: |
+          python - <<'PY'
+          from wbcz_web.config import WebConfig
+          from wbcz_web.main import create_app
+          cfg = WebConfig(
+              database_url="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test",
+              own_inn="1234567890",
+              environment="test",
+              agent_enabled=True,
+              agent_machine_token="test-machine-token-for-agent-0123456789",
+          ).validate_for_startup()
+          app = create_app(cfg)
+          paths = {getattr(route, "path", None) for route in app.routes}
+          assert "/api/health" in paths, paths
+          assert "/api/agent/v1/jobs/next" in paths, paths
+          assert "/api/agent/v1/jobs/{job_id}/result" in paths, paths
+          PY
       - working-directory: frontend
         run: npm install --no-audit --no-fund --no-package-lock
       - working-directory: frontend
