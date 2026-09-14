@@ -7,3 +7,4 @@ an actually negotiated production TLS session.
 """
 
 from ._live_true_api_base import *  # noqa: F401,F403
+from ._live_true_api_base import _find_cryptopro_binary  # agent signing reuse
