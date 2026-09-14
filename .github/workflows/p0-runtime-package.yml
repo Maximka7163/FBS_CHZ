@@ -40,6 +40,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: packaging
+          fetch-depth: 0
       - name: Checkout exact accepted P0 source
         uses: actions/checkout@v4
         with:
@@ -62,6 +63,30 @@ jobs:
             exit 1
           fi
           echo "SOURCE_TIMESTAMP=$(git -C source show -s --format=%cI "$ACCEPTED_SOURCE_SHA")" >> "$GITHUB_ENV"
+      - name: Build deterministic WB regression workbook
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python - <<'PY'
+          from openpyxl import Workbook
+          from pathlib import Path
+          p=Path('/mnt/data/REF_WB_archive_9.xlsx')
+          h=['№ задания','Стикер','КИЗ','Номер чека','Стоимость','Валюта','Номер фискального накопителя','Дата','Тип операции','Признак продажи юрлицу']
+          w=Workbook();s=w.active;s.title='КИЗ';s.append(h);n=0
+          def add(op,dated):
+              global n
+              n+=1
+              s.append([f'T{n}',f'S{n}',f'CI-KIZ-{n:04d}',f'CHK-{n}' if dated else None,100,'RUB',f'FN-{n}' if dated else None,f'12:34:56 {((n-1)%28)+1:02d}.08.2026' if dated else None,op,'нет'])
+          for _ in range(13): add('Продажа',False)
+          for _ in range(63): add('Продажа',True)
+          for _ in range(137): add('Возврат',False)
+          for _ in range(3): add('Возврат',True)
+          for _ in range(2): add('Возврат',True)
+          for _ in range(20): add('Возврат',False)
+          assert n==238
+          w.save(p)
+          PY
       - name: Full PostgreSQL pytest on packaging branch
         working-directory: packaging
         run: |
