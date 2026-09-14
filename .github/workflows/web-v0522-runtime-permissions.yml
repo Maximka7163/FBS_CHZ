@@ -1,0 +1,386 @@
+name: Web v0.5.2.2 runtime permission hardened offline bundle
+
+on:
+  push:
+    branches: [web/v0.5.2.2-runtime-permissions]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APPROVED_SOURCE_SHA: cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+  APPROVED_SOURCE_BRANCH: web/v0.5.1-deployment-package
+  ARCHIVE_NAME: sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz
+  BUNDLE_ROOT_NAME: sellari-marking-0.5.1-cc3054eefba5-r3
+  EXPECTED_ALEMBIC_HEAD: 0001_web_v05
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_test"
+          --health-interval=2s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -e ".[ui,test,web]"
+      - working-directory: frontend
+        run: npm install --no-audit --no-fund --no-package-lock
+      - working-directory: frontend
+        run: npm run typecheck
+      - working-directory: frontend
+        run: npm run build
+      - name: Production frontend contains no localhost API URL
+        run: |
+          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' frontend/dist; then
+            echo 'localhost URL found in production frontend bundle' >&2
+            exit 1
+          fi
+      - name: Build deterministic WB regression workbook
+        shell: bash
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python - <<'PY'
+          from openpyxl import Workbook
+          from pathlib import Path
+          p=Path('/mnt/data/REF_WB_archive_9.xlsx')
+          h=['№ задания','Стикер','КИЗ','Номер чека','Стоимость','Валюта','Номер фискального накопителя','Дата','Тип операции','Признак продажи юрлицу']
+          w=Workbook();s=w.active;s.title='КИЗ';s.append(h);n=0
+          def add(op,dated):
+              global n
+              n+=1
+              s.append([f'T{n}',f'S{n}',f'CI-KIZ-{n:04d}',f'CHK-{n}' if dated else None,100,'RUB',f'FN-{n}' if dated else None,f'12:34:56 {((n-1)%28)+1:02d}.08.2026' if dated else None,op,'нет'])
+          for _ in range(13): add('Продажа',False)
+          for _ in range(63): add('Продажа',True)
+          for _ in range(137): add('Возврат',False)
+          for _ in range(3): add('Возврат',True)
+          for _ in range(2): add('Возврат',True)
+          for _ in range(20): add('Возврат',False)
+          assert n==238
+          w.save(p)
+          PY
+      - name: Upgrade disposable test DB and prove revision plus schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          alembic -c alembic.ini upgrade head
+          current="$(alembic -c alembic.ini current)"
+          test "$current" = "${EXPECTED_ALEMBIC_HEAD} (head)"
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+          expected={
+              'users','sessions','imports','events','import_rows',
+              'control_runs','checks','previews','preview_items','audit_log',
+          }
+          engine=create_engine(os.environ['WBCZ_DATABASE_URL'])
+          try:
+              tables=set(inspect(engine).get_table_names())
+          finally:
+              engine.dispose()
+          missing=sorted(expected-tables)
+          assert not missing, f'missing expected web tables: {missing}'
+          print('DATABASE_SCHEMA_CI_CHECK=PASS')
+          PY
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+      - name: Run full pytest
+        run: python -m pytest -q
+        env:
+          WBCZ_ENV: test
+          WBCZ_OWN_INN: "1234567890"
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+          WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+      - name: Restrictive build-context migration permission regression
+        run: sh tests/backend_runtime_permissions_regression.sh
+      - name: Create CI production env through safe bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          WBCZ_INIT_TEST_MODE=1 \
+          WBCZ_ENV_FILE_TARGET="$RUNNER_TEMP/wbcz-production.env" \
+            sh deploy/init-production-env.sh
+          test "$(stat -c '%a' "$RUNNER_TEMP/wbcz-production.env")" = "600"
+      - name: Docker compose config validation without rendering secrets
+        run: |
+          docker compose \
+            --env-file "$RUNNER_TEMP/wbcz-production.env" \
+            -f docker-compose.prod.yml \
+            config -q
+      - name: Build ordinary production backend image
+        run: docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml build marking-backend
+      - name: Verify ordinary image default user sees exact Alembic head
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(docker run --rm --entrypoint sh "sellari-marking-backend:${APPROVED_SOURCE_SHA}" -ec '
+            test "$(id -un)" = wbcz
+            test -r /app/alembic.ini
+            test -x /app/migrations
+            test -r /app/migrations/env.py
+            test -x /app/migrations/versions
+            test -r /app/migrations/versions/0001_web_v05_initial.py
+            alembic -c /app/alembic.ini heads
+          ')"
+          test "$output" = "${EXPECTED_ALEMBIC_HEAD} (head)"
+          echo 'DEFAULT_RUNTIME_USER=wbcz'
+          echo 'ALEMBIC_HEADS_DEFAULT_USER=0001_web_v05'
+      - name: Production container migration, schema, health and safety boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          dc() { docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml "$@"; }
+          dc up -d marking-postgres
+          dc run --rm marking-backend alembic -c /app/alembic.ini upgrade head
+          current="$(dc run --rm -T marking-backend alembic -c /app/alembic.ini current)"
+          test "$current" = "${EXPECTED_ALEMBIC_HEAD} (head)"
+          dc run --rm -T marking-backend python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+          expected={
+              'users','sessions','imports','events','import_rows',
+              'control_runs','checks','previews','preview_items','audit_log',
+          }
+          engine=create_engine(os.environ['WBCZ_DATABASE_URL'])
+          try:
+              tables=set(inspect(engine).get_table_names())
+          finally:
+              engine.dispose()
+          missing=sorted(expected-tables)
+          assert not missing, f'missing expected web tables: {missing}'
+          print('DATABASE_SCHEMA_CI_CHECK=PASS')
+          PY
+          dc up -d marking-backend
+          CID="$(dc ps -q marking-backend)"
+          status=starting
+          for i in $(seq 1 40); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$CID")"
+            [ "$status" = healthy ] && break
+            [ "$status" = unhealthy ] && { docker logs "$CID"; exit 1; }
+            sleep 2
+          done
+          test "$status" = healthy
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/health
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version | grep "$APPROVED_SOURCE_SHA"
+          dc run --rm -T marking-backend python - <<'PY'
+          from wbcz_web.main import create_app
+          from wbcz_web.config import WebConfig
+          app=create_app(WebConfig.from_env())
+          paths={getattr(route,'path',None) for route in app.routes}
+          forbidden={'/register','/signup','/api/register','/api/auth/register','/api/lk/documents/create','/api/submit'}
+          assert not paths.intersection(forbidden)
+          print('WEB_PRODUCTION_TRUE_API=MOCK')
+          print('TRUE_API_WRITE=FALSE')
+          print('DOCUMENT_SIGNING=FALSE')
+          print('SUBMISSION=FALSE')
+          print('WINDOWS_BRIDGE=FALSE')
+          PY
+      - if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/wbcz-production.env" ]; then
+            docker compose --env-file "$RUNNER_TEMP/wbcz-production.env" -f docker-compose.prod.yml down -v || true
+          fi
+
+  bundle:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hardened packaging tooling
+        uses: actions/checkout@v4
+        with:
+          path: packaging
+      - name: Checkout exact approved application source
+        uses: actions/checkout@v4
+        with:
+          ref: cc3054eefba5d07c45dbb2e27d9fc2ba37c91555
+          path: source
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Prove exact source checkout
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$APPROVED_SOURCE_SHA"
+          echo "SOURCE_TIMESTAMP=$(git -C source show -s --format=%cI "$APPROVED_SOURCE_SHA")" >> "$GITHUB_ENV"
+      - name: Build exact-source production frontend
+        working-directory: source/frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm run build
+          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' dist; then
+            echo 'localhost URL found in exact-source production frontend bundle' >&2
+            exit 1
+          fi
+      - name: Build reproducible r3 bundle twice
+        run: |
+          set -euo pipefail
+          python packaging/scripts/build_offline_bundle.py \
+            --source-root source \
+            --packaging-root packaging \
+            --output-dir bundle-a \
+            --source-sha "$APPROVED_SOURCE_SHA" \
+            --source-branch "$APPROVED_SOURCE_BRANCH" \
+            --build-timestamp-utc "$SOURCE_TIMESTAMP" \
+            --builder-sha "$GITHUB_SHA"
+          python packaging/scripts/build_offline_bundle.py \
+            --source-root source \
+            --packaging-root packaging \
+            --output-dir bundle-b \
+            --source-sha "$APPROVED_SOURCE_SHA" \
+            --source-branch "$APPROVED_SOURCE_BRANCH" \
+            --build-timestamp-utc "$SOURCE_TIMESTAMP" \
+            --builder-sha "$GITHUB_SHA"
+          cmp "bundle-a/$ARCHIVE_NAME" "bundle-b/$ARCHIVE_NAME"
+          cmp "bundle-a/$ARCHIVE_NAME.sha256" "bundle-b/$ARCHIVE_NAME.sha256"
+      - name: Verify archive, SHA256SUMS, exclusions and permission metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd bundle-a
+          sha256sum -c "$ARCHIVE_NAME.sha256"
+          mkdir extracted
+          tar -xzf "$ARCHIVE_NAME" -C extracted
+          ROOT="extracted/$BUNDLE_ROOT_NAME"
+          cd "$ROOT"
+          sha256sum -c SHA256SUMS
+          grep -F '"source_git_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
+          grep -F '"frontend_built_from_sha": "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"' RELEASE.json
+          grep -F '"bundle_format": "sellari-marking-offline-v2"' RELEASE.json
+          grep -F '"operator_safe_env_bootstrap": true' RELEASE.json
+          grep -F '"runtime_permission_hardening": true' RELEASE.json
+          grep -F '"release_permission_normalization": true' RELEASE.json
+          test -f frontend/index.html
+          test -x deploy/init-production-env.sh
+          test -x deploy/normalize-release-permissions.sh
+          test ! -e .git
+          test ! -e .env.production
+          test ! -e frontend/node_modules
+          test ! -e src/wbcz_ui
+          if find . -type f \( -name '*.xlsx' -o -name '*.sqlite' -o -name '*.db' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \) | grep -q .; then
+            echo 'forbidden private/secret-like file found in archive' >&2
+            exit 1
+          fi
+          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' frontend; then
+            echo 'localhost URL found in archived frontend' >&2
+            exit 1
+          fi
+      - name: Prove release normalizer repairs restrictive extracted modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BUNDLE_ROOT_NAME"
+          find "$ROOT" -type d -exec chmod 0700 {} +
+          find "$ROOT" -type f -exec chmod 0600 {} +
+          WBCZ_RELEASE_NORMALIZE_TEST_MODE=1 sh "$ROOT/deploy/normalize-release-permissions.sh" "$ROOT"
+          test "$(stat -c '%a' "$ROOT")" = "755"
+          test "$(stat -c '%a' "$ROOT/frontend")" = "755"
+          test "$(stat -c '%a' "$ROOT/frontend/index.html")" = "644"
+          test "$(stat -c '%a' "$ROOT/migrations")" = "755"
+          test "$(stat -c '%a' "$ROOT/migrations/versions")" = "755"
+          test "$(stat -c '%a' "$ROOT/migrations/env.py")" = "644"
+          test "$(stat -c '%a' "$ROOT/deploy/init-production-env.sh")" = "755"
+      - name: Validate extracted bundle build, default user, migration schema and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BUNDLE_ROOT_NAME"
+          WBCZ_INIT_TEST_MODE=1 \
+          WBCZ_ENV_FILE_TARGET="$RUNNER_TEMP/offline-production.env" \
+            sh "$ROOT/deploy/init-production-env.sh"
+          test "$(stat -c '%a' "$RUNNER_TEMP/offline-production.env")" = "600"
+          dc() { docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" "$@"; }
+          dc config -q
+          dc build marking-backend
+          output="$(dc run --rm --no-deps -T marking-backend sh -ec '
+            test "$(id -un)" = wbcz
+            test -r /app/alembic.ini
+            test -x /app/migrations
+            test -r /app/migrations/env.py
+            test -x /app/migrations/versions
+            test -r /app/migrations/versions/0001_web_v05_initial.py
+            alembic -c /app/alembic.ini heads
+          ')"
+          test "$output" = "${EXPECTED_ALEMBIC_HEAD} (head)"
+          dc up -d marking-postgres
+          dc run --rm marking-backend alembic -c /app/alembic.ini upgrade head
+          current="$(dc run --rm -T marking-backend alembic -c /app/alembic.ini current)"
+          test "$current" = "${EXPECTED_ALEMBIC_HEAD} (head)"
+          dc run --rm -T marking-backend python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+          expected={
+              'users','sessions','imports','events','import_rows',
+              'control_runs','checks','previews','preview_items','audit_log',
+          }
+          engine=create_engine(os.environ['WBCZ_DATABASE_URL'])
+          try:
+              tables=set(inspect(engine).get_table_names())
+          finally:
+              engine.dispose()
+          missing=sorted(expected-tables)
+          assert not missing, f'missing expected web tables: {missing}'
+          print('DATABASE_SCHEMA_CI_CHECK=PASS')
+          PY
+          dc up -d marking-backend
+          CID="$(dc ps -q marking-backend)"
+          status=starting
+          for i in $(seq 1 40); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$CID")"
+            [ "$status" = healthy ] && break
+            [ "$status" = unhealthy ] && { docker logs "$CID"; exit 1; }
+            sleep 2
+          done
+          test "$status" = healthy
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/health
+          curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version | grep "$APPROVED_SOURCE_SHA"
+          dc run --rm -T marking-backend python - <<'PY'
+          from wbcz_web.main import create_app
+          from wbcz_web.config import WebConfig
+          app=create_app(WebConfig.from_env())
+          paths={getattr(route,'path',None) for route in app.routes}
+          forbidden={'/register','/signup','/api/register','/api/auth/register','/api/lk/documents/create','/api/submit'}
+          assert not paths.intersection(forbidden)
+          PY
+      - name: Capture final archive SHA256
+        id: checksum
+        run: |
+          set -euo pipefail
+          SHA="$(cut -d' ' -f1 "bundle-a/$ARCHIVE_NAME.sha256")"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_SHA256=$SHA"
+      - name: Upload private runtime-permission-hardened offline bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sellari-marking-0.5.1-cc3054eefba5-r3
+          path: |
+            bundle-a/sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz
+            bundle-a/sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/offline-production.env" ]; then
+            ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BUNDLE_ROOT_NAME"
+            docker compose --env-file "$RUNNER_TEMP/offline-production.env" -f "$ROOT/docker-compose.prod.yml" down -v || true
+          fi
