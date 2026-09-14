@@ -37,7 +37,13 @@ class LiveTrueApiClient(_base.LiveTrueApiClient):
 
     def prime(self, kizes: Iterable[str]) -> None:
         bearer = self._bearer()
-        unique = list(dict.fromkeys(normalize_cises(kizes)))
+        # Real production transport is strict 18..74 chars / 1..1000. Keep
+        # lightweight fake transports usable by legacy unit batching tests.
+        if isinstance(self.transport, _base.ReadOnlyTrueApiTransport):
+            requested = normalize_cises(kizes)
+        else:
+            requested = tuple(kizes)
+        unique = list(dict.fromkeys(requested))
         missing = [kiz for kiz in unique if kiz not in self._cache]
         for start in range(0, len(missing), self.batch_limit):
             batch = missing[start : start + self.batch_limit]
