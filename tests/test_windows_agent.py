@@ -203,11 +203,13 @@ def test_arbitrary_true_api_endpoint_denied_before_tunnel(tmp_path):
 
 
 def test_cises_info_uses_gost_transport_foundation(tmp_path):
-    payload = {"results": [{"cisInfo": {"cis": "K1", "status": "INTRODUCED", "ownerInn": OWN, "productGroup": "lp"}}]}
+    cis = "0102900897077810215Pph%ybnsRtdA"
+    payload = {"results": [{"cisInfo": {"cis": cis, "status": "INTRODUCED", "ownerInn": OWN, "productGroup": "lp"}}]}
     transport, tunnel, calls = transport_with_response(tmp_path, payload=payload)
-    result = transport.cises_info(("K1",), bearer_token="UUID-TOKEN")
+    result = transport.cises_info((cis,), bearer_token="UUID-TOKEN")
     assert result == payload
     assert calls[0].target == "/api/v3/true-api/cises/info?pg=lp"
+    assert json.loads(calls[0].data) == [cis]
     assert tunnel.assertions == 1
     assert calls[0].headers["Authorization"] == "Bearer UUID-TOKEN"
 

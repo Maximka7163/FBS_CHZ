@@ -225,7 +225,7 @@ class FakeTransport:
 
     def request_json(self, method, path, **kwargs):
         self.calls.append((method, path, kwargs))
-        batch = kwargs["body"]["cis"]
+        batch = kwargs["body"]
         return [
             {
                 "cisInfo": {
@@ -254,10 +254,12 @@ def test_cises_info_safe_batching():
     client._session = auth.authenticate()
     client.prime(["K1", "K2", "K3", "K4", "K5"])
     assert auth.calls == 1
-    assert [
-        len(call[2]["body"]["cis"])
-        for call in transport.calls
-    ] == [2, 2, 1]
+    assert [len(call[2]["body"]) for call in transport.calls] == [2, 2, 1]
+    assert [call[2]["body"] for call in transport.calls] == [
+        ["K1", "K2"],
+        ["K3", "K4"],
+        ["K5"],
+    ]
     assert all(
         call[1] == "/cises/info"
         and call[2]["params"] == {"pg": "lp"}
