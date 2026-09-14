@@ -2,7 +2,7 @@ name: P0 end-to-end wiring validation
 
 on:
   push:
-    branches: [p0/endtoend-wiring-001]
+    branches: [p0/endtoend-wiring-001, p0/document-assembler-001]
   workflow_dispatch:
 
 permissions:
