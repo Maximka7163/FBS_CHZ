@@ -39,12 +39,20 @@ jobs:
       - name: FastAPI route wiring smoke
         run: |
           python - <<'PY'
+          from fastapi import FastAPI
           from wbcz_web.config import WebConfig
           from wbcz_web.api import router
           from wbcz_web.api.agent_routes import agent_router
-          from wbcz_web.main import create_app
-          print("USER_ROUTER", type(router), [getattr(r, "path", None) for r in router.routes])
-          print("AGENT_ROUTER", type(agent_router), [getattr(r, "path", None) for r in agent_router.routes])
+          import wbcz_web.main as main
+          print("USER_ROUTER", [getattr(r, "path", None) for r in router.routes])
+          print("AGENT_ROUTER", [getattr(r, "path", None) for r in agent_router.routes])
+          print("MAIN_USER_SAME", main.router is router, [getattr(r, "path", None) for r in main.router.routes])
+          print("MAIN_AGENT_SAME", main.agent_router is agent_router, [getattr(r, "path", None) for r in main.agent_router.routes])
+          print("GLOBAL_APP", [getattr(r, "path", None) for r in main.app.routes])
+          probe = FastAPI()
+          probe.include_router(router)
+          probe.include_router(agent_router)
+          print("PROBE_APP", [getattr(r, "path", None) for r in probe.routes])
           cfg = WebConfig(
               database_url="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test",
               own_inn="1234567890",
@@ -52,7 +60,7 @@ jobs:
               agent_enabled=True,
               agent_machine_token="test-machine-token-for-agent-0123456789",
           ).validate_for_startup()
-          app = create_app(cfg)
+          app = main.create_app(cfg)
           paths = {getattr(route, "path", None) for route in app.routes}
           print("APP_ROUTES", sorted(str(p) for p in paths))
           assert "/api/health" in paths, paths
