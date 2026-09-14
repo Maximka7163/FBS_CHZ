@@ -23,6 +23,8 @@ SOURCE_BRANCH = "web/v0.5.1-deployment-package"
 FIXED_TIMESTAMP = "2026-09-12T19:06:03Z"
 BUILDER_SHA = "f" * 40
 INIT_SCRIPT = ROOT / "deploy" / "init-production-env.sh"
+NORMALIZE_SCRIPT = ROOT / "deploy" / "normalize-release-permissions.sh"
+DOCKERFILE = ROOT / "Dockerfile.backend"
 RUNBOOK = ROOT / "docs" / "WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md"
 
 
@@ -98,7 +100,7 @@ def _run_init(target: Path) -> subprocess.CompletedProcess[str]:
 def test_bundle_is_reproducible_and_complete(tmp_path):
     first, _ = _build(tmp_path, "first")
     second, _ = _build(tmp_path, "second")
-    assert first.name == "sellari-marking-0.5.1-cc3054eefba5-r2.tar.gz"
+    assert first.name == "sellari-marking-0.5.1-cc3054eefba5-r3.tar.gz"
     assert _digest(first) == _digest(second)
     with tarfile.open(first, "r:gz") as tar:
         names = set(tar.getnames())
@@ -114,6 +116,7 @@ def test_bundle_is_reproducible_and_complete(tmp_path):
         f"{prefix}/deploy/nginx/mark.sellari.ru.conf.example",
         f"{prefix}/deploy/nginx/mark.sellari.ru.http-staging.conf.example",
         f"{prefix}/deploy/init-production-env.sh",
+        f"{prefix}/deploy/normalize-release-permissions.sh",
         f"{prefix}/docs/WEB_V052_OFFLINE_DEPLOY_RUNBOOK.md",
     }
     assert required.issubset(names)
@@ -130,6 +133,8 @@ def test_release_json_has_exact_approved_source_sha_and_v2_metadata(tmp_path):
     assert metadata["build_timestamp_utc"] == FIXED_TIMESTAMP
     assert metadata["bundle_format"] == "sellari-marking-offline-v2"
     assert metadata["operator_safe_env_bootstrap"] is True
+    assert metadata["runtime_permission_hardening"] is True
+    assert metadata["release_permission_normalization"] is True
 
 
 def test_internal_sha256s_verify_all_files(tmp_path):
@@ -302,8 +307,11 @@ def test_packaged_init_script_is_executable_and_env_file_is_not_packaged(tmp_pat
     with tarfile.open(archive, "r:gz") as tar:
         members = {member.name: member for member in tar.getmembers()}
     script_name = f"{bundle.ARCHIVE_PREFIX}/deploy/init-production-env.sh"
+    normalize_name = f"{bundle.ARCHIVE_PREFIX}/deploy/normalize-release-permissions.sh"
     assert script_name in members
-    assert members[script_name].mode & 0o111
+    assert normalize_name in members
+    assert members[script_name].mode == 0o755
+    assert members[normalize_name].mode == 0o755
     assert not any(name.endswith("/.env.production") for name in members)
 
 
@@ -329,3 +337,42 @@ def test_bundle_builder_rejects_unapproved_source_sha(tmp_path):
             build_timestamp_utc=FIXED_TIMESTAMP,
             builder_sha=BUILDER_SHA,
         )
+
+
+def test_hardened_dockerfile_normalizes_alembic_permissions_before_runtime_user():
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "find /app/migrations -type d -exec chmod 0755 {} +" in text
+    assert "find /app/migrations -type f -exec chmod 0644 {} +" in text
+    assert "chmod 0644 /app/alembic.ini" in text
+    assert "USER wbcz" in text
+    assert text.index("chmod 0644 /app/alembic.ini") < text.index("USER wbcz")
+    assert "chmod 0777" not in text
+    assert "USER root" not in text
+
+
+def test_bundle_uses_packaging_hardened_dockerfile_not_frozen_source_copy(tmp_path):
+    archive, _ = _build(tmp_path, "dockerfile")
+    root = _extract(archive, tmp_path / "extract")
+    assert (root / "Dockerfile.backend").read_bytes() == DOCKERFILE.read_bytes()
+
+
+def test_archive_normalizes_release_and_frontend_modes(tmp_path):
+    archive, _ = _build(tmp_path, "modes")
+    with tarfile.open(archive, "r:gz") as tar:
+        members = {member.name: member for member in tar.getmembers()}
+    prefix = bundle.ARCHIVE_PREFIX
+    assert members[f"{prefix}/frontend"].mode == 0o755
+    assert members[f"{prefix}/frontend/index.html"].mode == 0o644
+    assert members[f"{prefix}/migrations"].mode == 0o755
+    assert members[f"{prefix}/migrations/env.py"].mode == 0o644
+    assert members[f"{prefix}/migrations/versions"].mode == 0o755
+
+
+def test_release_normalizer_is_non_writable_and_runbook_requires_it():
+    script = NORMALIZE_SCRIPT.read_text(encoding="utf-8")
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    assert "find \"$TARGET\" -type d -exec chmod 0755 {} +" in script
+    assert "find \"$TARGET\" -type f -exec chmod 0644 {} +" in script
+    assert "chmod 0777" not in script
+    assert "normalize-release-permissions.sh" in runbook
+    assert "RELEASE_PERMISSIONS_NORMALIZED=YES" in runbook
