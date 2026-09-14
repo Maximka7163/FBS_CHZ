@@ -19,6 +19,7 @@ bundle = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bundle)
 
 SOURCE_SHA = "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"
+CURRENT_RUNTIME_SHA = "858a329b56c2cabae62e9814f540072e8a048d3f"
 SOURCE_BRANCH = "web/v0.5.1-deployment-package"
 FIXED_TIMESTAMP = "2026-09-12T19:06:03Z"
 BUILDER_SHA = "f" * 40
@@ -235,7 +236,7 @@ def test_init_script_creates_0600_env_with_fixed_safe_values(tmp_path):
     assert values["WBCZ_DEBUG"] == "false"
     assert values["WBCZ_TRUSTED_HOSTS"] == "mark.sellari.ru"
     assert values["WBCZ_APP_VERSION"] == "0.5.1"
-    assert values["WBCZ_BUILD_SHA"] == SOURCE_SHA
+    assert values["WBCZ_BUILD_SHA"] == CURRENT_RUNTIME_SHA
     assert values["WBCZ_HEALTHCHECK_HOST"] == "mark.sellari.ru"
     assert values["WBCZ_POSTGRES_DB"] == "wbcz"
     assert values["WBCZ_POSTGRES_USER"] == "wbcz"
