@@ -12,6 +12,7 @@ from wbcz.control_engine import decide
 from wbcz.models import Decision, Event, KiState, Outcome, canonical_json
 from wbcz.windows_agent import (
     AgentJob,
+    AgentJobState,
     AgentJobType,
     AgentResult,
     AgentReplayConflict,
@@ -21,7 +22,7 @@ from wbcz.windows_agent import (
 )
 from wbcz.write_pipeline import ExactDocument, InvalidWriteOperation, WriteState
 from wbcz_web.config import WebConfig
-from wbcz_web.models import CheckRecord, ControlRun
+from wbcz_web.models import AgentJobRecord, CheckRecord, ControlRun
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
 
@@ -167,6 +168,19 @@ class AgentOrchestrationBroker:
         metadata = self.job_store.metadata(result.job_id, lock=True)
         if metadata.job.operation_id != result.operation_id:
             raise AgentReplayConflict("result operation_id mismatch")
+
+        # A completed identical result is a pure replay. Return before core state
+        # application and before any application-level follow-up, so duplicate
+        # HTTP delivery cannot add another CheckRecord or schedule work twice.
+        if metadata.state is AgentJobState.COMPLETED:
+            row = self.db.get(AgentJobRecord, result.job_id)
+            digest = hashlib.sha256(
+                canonical_json(result.safe_dict()).encode("utf-8")
+            ).hexdigest()
+            if row is None or row.result_sha256 != digest:
+                raise AgentReplayConflict("incompatible duplicate agent result")
+            return
+
         # Core applies write/poll state transitions before the application-level
         # follow-up is scheduled. CIS checks are intentionally decision-free in
         # the Windows process, so core only marks those jobs completed.
