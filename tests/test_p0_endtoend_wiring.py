@@ -154,12 +154,35 @@ def test_config_agent_and_write_are_fail_closed(monkeypatch):
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
-def test_fastapi_agent_endpoints_use_machine_auth_not_browser_cookie(pg_factory, caplog):
+def test_fastapi_agent_endpoints_dispatch_machine_auth_and_duplicate_result_once(pg_factory, caplog):
     config = agent_config(DB_URL)
+    event = sale_event("CIS-HTTP-DISPATCH")
+    with pg_factory() as db:
+        user, imported = seed_import(db, event)
+        AgentControlService(db, config).run(imported.id, user.id, "AUTO")
+        queued = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
+        assert queued is not None
+        job_id = queued.job_id
+        operation_id = queued.operation_id
+        db.commit()
+
     app = create_app(config, session_factory=pg_factory)
-    paths = {getattr(route, "path", None) for route in app.routes}
-    assert "/api/agent/v1/jobs/next" in paths
-    assert "/api/agent/v1/jobs/{job_id}/result" in paths
+    result = AgentResult(
+        job_id,
+        operation_id,
+        "CIS_CHECKED",
+        cises=({
+            "cis": event.kiz,
+            "status": "IN_CIRCULATION",
+            "statusEx": None,
+            "withdrawReason": None,
+            "ownerInn": OWN,
+            "productGroup": "lp",
+        },),
+    )
+    payload = result.safe_dict()
+    payload["cises"] = list(result.cises)
+
     with TestClient(app) as client:
         missing = client.get("/api/agent/v1/jobs/next")
         assert missing.status_code == 401
@@ -178,6 +201,37 @@ def test_fastapi_agent_endpoints_use_machine_auth_not_browser_cookie(pg_factory,
             headers={"Authorization": "Bearer " + TOKEN},
         )
         assert preflight.status_code == 204
+
+        fetched = client.get(
+            "/api/agent/v1/jobs/next",
+            headers={"Authorization": "Bearer " + TOKEN},
+        )
+        assert fetched.status_code == 200
+        assert fetched.json()["job_id"] == job_id
+        assert fetched.json()["operation_id"] == operation_id
+
+        first = client.post(
+            f"/api/agent/v1/jobs/{job_id}/result",
+            headers={"Authorization": "Bearer " + TOKEN},
+            json=payload,
+        )
+        assert first.status_code == 202
+        duplicate = client.post(
+            f"/api/agent/v1/jobs/{job_id}/result",
+            headers={"Authorization": "Bearer " + TOKEN},
+            json=payload,
+        )
+        assert duplicate.status_code == 202
+
+        incompatible_payload = dict(payload)
+        incompatible_payload["outcome"] = "MANUAL_REVIEW"
+        incompatible = client.post(
+            f"/api/agent/v1/jobs/{job_id}/result",
+            headers={"Authorization": "Bearer " + TOKEN},
+            json=incompatible_payload,
+        )
+        assert incompatible.status_code == 400
+
         empty = client.get(
             "/api/agent/v1/jobs/next",
             headers={"Authorization": "Bearer " + TOKEN},
@@ -188,9 +242,19 @@ def test_fastapi_agent_endpoints_use_machine_auth_not_browser_cookie(pg_factory,
             headers={"Authorization": "Bearer " + TOKEN},
         )
         assert arbitrary.status_code == 404
-        response_text = missing.text + wrong.text + preflight.text + empty.text + arbitrary.text
+        response_text = (
+            missing.text + wrong.text + preflight.text + fetched.text + first.text
+            + duplicate.text + incompatible.text + empty.text + arbitrary.text
+        )
         assert TOKEN not in response_text
         assert TOKEN not in caplog.text
+
+    with pg_factory() as db:
+        completed = db.get(AgentJobRecord, job_id)
+        assert completed is not None and completed.state == "COMPLETED"
+        checks = list(db.scalars(select(CheckRecord).where(CheckRecord.event_id == event.event_id)))
+        assert len(checks) == 1
+        assert checks[0].decision == Decision.READY_TO_WITHDRAW.value
 
 
 def test_direct_vps_true_api_production_path_is_absent():
