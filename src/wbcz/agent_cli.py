@@ -10,10 +10,10 @@ import time
 from typing import Any
 
 from wbcz.agent_http import OutboundAgentHttpClient, StdlibHttpsAgentSender
+from wbcz.agent_true_api_transport import ProductionAgentTrueApiTransport
 from wbcz.control_engine import validate_owner_inn
 from wbcz.windows_agent import (
     AgentSessionManager,
-    ProductionAgentTrueApiTransport,
     WindowsCryptoProDocumentSigner,
     WindowsOutboundAgent,
 )
