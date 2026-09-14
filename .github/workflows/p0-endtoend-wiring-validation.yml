@@ -40,7 +40,11 @@ jobs:
         run: |
           python - <<'PY'
           from wbcz_web.config import WebConfig
+          from wbcz_web.api import router
+          from wbcz_web.api.agent_routes import agent_router
           from wbcz_web.main import create_app
+          print("USER_ROUTER", type(router), [getattr(r, "path", None) for r in router.routes])
+          print("AGENT_ROUTER", type(agent_router), [getattr(r, "path", None) for r in agent_router.routes])
           cfg = WebConfig(
               database_url="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test",
               own_inn="1234567890",
@@ -50,6 +54,7 @@ jobs:
           ).validate_for_startup()
           app = create_app(cfg)
           paths = {getattr(route, "path", None) for route in app.routes}
+          print("APP_ROUTES", sorted(str(p) for p in paths))
           assert "/api/health" in paths, paths
           assert "/api/agent/v1/jobs/next" in paths, paths
           assert "/api/agent/v1/jobs/{job_id}/result" in paths, paths
