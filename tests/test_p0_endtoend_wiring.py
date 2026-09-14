@@ -47,6 +47,13 @@ from wbcz_web.services.imports import event_to_record
 DB_URL = os.getenv("WBCZ_TEST_DATABASE_URL")
 OWN = "1234567890"
 TOKEN = "test-machine-token-for-agent-0123456789"
+TEST_CIS_PREFIX = "010290089707781021"
+
+
+def valid_test_cis(label: str) -> str:
+    value = TEST_CIS_PREFIX + label
+    assert 18 <= len(value) <= 74
+    return value
 
 
 def agent_config(database_url: str) -> WebConfig:
@@ -81,7 +88,7 @@ def pg_factory():
 
 def sale_event(kiz: str = "TEST-CIS-SALE") -> Event:
     return Event(
-        kiz=kiz,
+        kiz=valid_test_cis(kiz),
         task_number="100",
         sticker="200",
         operation=Operation.SALE,
@@ -284,7 +291,7 @@ def test_postgres_agent_job_persists_and_replay_is_idempotent(pg_factory):
         "cis:request-1",
         "lp",
         OWN,
-        cises=("CIS-1",),
+        cises=(valid_test_cis("PERSIST-A"),),
     )
     with pg_factory() as db:
         store = SqlAlchemyAgentJobStore(db, lease_seconds=30)
@@ -300,7 +307,7 @@ def test_postgres_agent_job_persists_and_replay_is_idempotent(pg_factory):
             job.operation_id,
             "lp",
             OWN,
-            cises=("CIS-CHANGED",),
+            cises=(valid_test_cis("PERSIST-B"),),
         )
         with pytest.raises(AgentReplayConflict):
             store.enqueue(incompatible, purpose=CONTROL_CIS, event_id="e1")
@@ -582,7 +589,7 @@ def test_preflight_is_mutation_free_even_with_optional_cis():
         backend=backend,
         machine_token=TOKEN,
     )
-    result = preflight.check(test_cis="TEST-CIS")
+    result = preflight.check(test_cis=valid_test_cis("PREFLIGHT"))
     assert result["ok"] is True
     assert result["production_write"] is False
     assert transport.cis_calls == 1
