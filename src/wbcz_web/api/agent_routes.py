@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from wbcz.agent_http import VpsAgentHttpBoundary
-from wbcz_web.services.agent_orchestration import AgentOrchestrationBroker
+from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 
 from .dependencies import get_db
 
