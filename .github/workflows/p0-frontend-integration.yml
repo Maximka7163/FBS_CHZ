@@ -1,0 +1,133 @@
+name: P0 frontend integration
+
+on:
+  push:
+    branches:
+      - ui/p0-production-workflow
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_frontend
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_frontend"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      WBCZ_ENV: test
+      WBCZ_OWN_INN: "1234567890"
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_frontend
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_frontend
+      WBCZ_TRUE_API_WRITE_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install backend dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: Full PostgreSQL pytest
+        run: python -m pytest -q
+
+      - name: Frontend typecheck, unit tests and build
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm test
+          npm run build
+          if grep -R -E 'markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/' dist; then
+            echo 'forbidden production/agent boundary leaked into browser bundle' >&2
+            exit 1
+          fi
+          if grep -R -F 'localStorage' src; then
+            echo 'localStorage business persistence is forbidden' >&2
+            exit 1
+          fi
+
+      - name: Install browser test dependency
+        run: python -m pip install "selenium>=4.25,<5"
+
+      - name: Browser environment diagnostics
+        run: |
+          google-chrome --version || chromium-browser --version || chromium --version
+          chromedriver --version || true
+
+      - name: Start isolated backend and Vite
+        env:
+          WBCZ_AGENT_ENABLED: "true"
+          WBCZ_AGENT_MACHINE_TOKEN: "ci-browser-machine-token-0123456789abcdef"
+          WBCZ_ORGANISATION_TYPE: LEGAL_ENTITY
+          WBCZ_ACTIVITY_FIAS_ID: 11111111-2222-3333-4444-555555555555
+          WBCZ_ACTIVITY_KPP: "123456789"
+          WBCZ_REMOTE_SALE_RETURN_PAID: "false"
+        run: |
+          python -m wbcz_web --host 127.0.0.1 --port 8765 > "$RUNNER_TEMP/backend.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/backend.pid"
+          (cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 > "$RUNNER_TEMP/vite.log" 2>&1) &
+          echo $! > "$RUNNER_TEMP/vite.pid"
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:8765/api/health >/dev/null && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8765/api/health
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:5173/ >/dev/null && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:5173/ >/dev/null
+
+      - name: Real browser P0 flow and visual capture
+        env:
+          WBCZ_AGENT_ENABLED: "true"
+          WBCZ_AGENT_MACHINE_TOKEN: "ci-browser-machine-token-0123456789abcdef"
+          WBCZ_ORGANISATION_TYPE: LEGAL_ENTITY
+          WBCZ_ACTIVITY_FIAS_ID: 11111111-2222-3333-4444-555555555555
+          WBCZ_ACTIVITY_KPP: "123456789"
+          WBCZ_REMOTE_SALE_RETURN_PAID: "false"
+          WBCZ_BROWSER_URL: http://127.0.0.1:5173
+          WBCZ_BROWSER_SCREENSHOT_DIR: browser-artifacts
+        run: python tests/browser_p0_frontend.py
+
+      - name: Upload visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-frontend-visual-evidence
+          path: browser-artifacts/*.png
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Browser logs on failure
+        if: failure()
+        run: |
+          echo '--- backend ---'
+          cat "$RUNNER_TEMP/backend.log" || true
+          echo '--- vite ---'
+          cat "$RUNNER_TEMP/vite.log" || true
+
+      - name: Stop local services
+        if: always()
+        run: |
+          test -f "$RUNNER_TEMP/backend.pid" && kill "$(cat "$RUNNER_TEMP/backend.pid")" 2>/dev/null || true
+          test -f "$RUNNER_TEMP/vite.pid" && kill "$(cat "$RUNNER_TEMP/vite.pid")" 2>/dev/null || true
