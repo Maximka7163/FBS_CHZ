@@ -137,10 +137,13 @@ def test_mode_cannot_override_persisted_backend_decision(tmp_path, wb_row, make_
 def test_frontend_uses_single_backend_authoritative_bulk_flow():
     root = Path(__file__).parents[1] / "frontend" / "src"
     main = (root / "main.ts").read_text(encoding="utf-8")
+    api = (root / "api.ts").read_text(encoding="utf-8")
     workflow = (root / "workflow.ts").read_text(encoding="utf-8")
-    assert "/bulk-preview" in main
-    assert "/bulk-actions" in main
-    assert "confirm: true" in main
+    assert "/bulk-preview" in api
+    assert "/bulk-actions" in api
+    assert "confirm: true" in api
+    assert "api.bulkPreview" in main
+    assert "api.executeBulk" in main
     assert "data-mode" not in main
     assert "data-pick" not in main
     assert "READY_TO_WITHDRAW" not in workflow
