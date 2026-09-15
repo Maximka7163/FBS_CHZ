@@ -134,15 +134,18 @@ def test_mode_cannot_override_persisted_backend_decision(tmp_path, wb_row, make_
     assert returned["included"][0]["decision"] == "READY_TO_RETURN"
 
 
-def test_frontend_mode_change_invalidates_selection_and_preview():
-    source = Path(__file__).parents[1] / "frontend" / "src" / "main.ts"
-    text = source.read_text(encoding="utf-8")
-    mode_handler = text[text.index("document.querySelectorAll<HTMLButtonElement>('[data-mode]')"):]
-    mode_handler = mode_handler[:mode_handler.index("const checkButton")]
-    assert "selected.clear()" in mode_handler
-    assert "preview = null" in mode_handler
-    assert "selectionSummary = null" in mode_handler
-    assert "selectionRequest++" in mode_handler
+def test_frontend_uses_single_backend_authoritative_bulk_flow():
+    root = Path(__file__).parents[1] / "frontend" / "src"
+    main = (root / "main.ts").read_text(encoding="utf-8")
+    workflow = (root / "workflow.ts").read_text(encoding="utf-8")
+    assert "/bulk-preview" in main
+    assert "/bulk-actions" in main
+    assert "confirm: true" in main
+    assert "data-mode" not in main
+    assert "data-pick" not in main
+    assert "READY_TO_WITHDRAW" not in workflow
+    assert "READY_TO_RETURN" not in workflow
+    assert "item.filter_group === filter" in workflow
 
 
 def test_event_details_still_return_full_eventstore_history(tmp_path, wb_row, make_xlsx):
