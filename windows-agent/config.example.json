@@ -1,0 +1,9 @@
+# placeholder-free example only; runtime config is created by Set-WbczAgentConfig.ps1
+{
+  "backend_url": "",
+  "participant_inn": "",
+  "ukep_thumbprint": "",
+  "cryptopro_stunnel": "",
+  "cryptopro_cryptcp": "",
+  "production_write": false
+}
