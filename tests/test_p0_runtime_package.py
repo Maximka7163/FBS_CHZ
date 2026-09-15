@@ -5,7 +5,8 @@ from pathlib import Path
 from wbcz_web.config import WebConfig
 
 ROOT = Path(__file__).parents[1]
-ACCEPTED = "858a329b56c2cabae62e9814f540072e8a048d3f"
+ACCEPTED = "bcb567a8f1e4e9261d68fa800ccc96e76518c596"
+ACCEPTED_BRANCH = "ui/p0-production-workflow"
 
 
 def text(path: str) -> str:
@@ -15,9 +16,11 @@ def text(path: str) -> str:
 def test_runtime_package_pins_exact_accepted_source():
     builder = text("scripts/build_p0_runtime_bundle.py")
     assert f'APPROVED_SOURCE_SHA = "{ACCEPTED}"' in builder
+    assert f'APPROVED_SOURCE_BRANCH = "{ACCEPTED_BRANCH}"' in builder
     assert 'EXPECTED_ALEMBIC_HEAD = "0002_p0_agent_wiring"' in builder
     assert '"src/wbcz/document_assembler.py"' in builder
     assert '"src/wbcz_web/api/agent_routes.py"' in builder
+    assert '"candidate_name": "P0_TEST_CANDIDATE"' in builder
 
 
 def test_production_write_is_off_at_package_boundary():
@@ -27,6 +30,7 @@ def test_production_write_is_off_at_package_boundary():
     assert "WBCZ_TRUE_API_WRITE_ENABLED=false" in env
     assert "WBCZ_TRUE_API_WRITE_ENABLED: ${WBCZ_TRUE_API_WRITE_ENABLED:-false}" in compose
     assert "WBCZ_TRUE_API_WRITE_ENABLED=false" in bootstrap
+    assert ACCEPTED in bootstrap
     cfg = WebConfig(
         database_url="postgresql+psycopg://u:p@db/x",
         own_inn="1234567890",
@@ -43,6 +47,18 @@ def test_agent_machine_secret_is_not_baked_into_package_files():
     assert "WBCZ_AGENT_MACHINE_TOKEN: ${WBCZ_AGENT_MACHINE_TOKEN:-}" in compose
     assert "TOKEN_PRINTED=NO" in helper
     assert "WBCZ_TRUE_API_WRITE_ENABLED=false" in helper
+
+
+def test_frontend_bundle_boundary_forbids_direct_agent_true_api_and_local_storage():
+    builder = text("scripts/build_p0_runtime_bundle.py")
+    for marker in (
+        "markirovka.crpt.ru",
+        "WBCZ_AGENT_MACHINE_TOKEN",
+        "/api/agent/",
+        "localStorage",
+        "-----BEGIN PRIVATE KEY-----",
+    ):
+        assert marker in builder
 
 
 def test_windows_preflight_launcher_forces_write_off_and_has_no_create_call():
@@ -84,3 +100,4 @@ def test_runtime_runbook_protects_unrelated_services_and_requires_https():
     assert "HTTPS" in runbook
     assert "0002_p0_agent_wiring" in runbook
     assert "WBCZ_TRUE_API_WRITE_ENABLED=false" in runbook
+    assert ACCEPTED in runbook

@@ -19,7 +19,7 @@ bundle = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bundle)
 
 SOURCE_SHA = "cc3054eefba5d07c45dbb2e27d9fc2ba37c91555"
-CURRENT_RUNTIME_SHA = "858a329b56c2cabae62e9814f540072e8a048d3f"
+CURRENT_RUNTIME_SHA = "bcb567a8f1e4e9261d68fa800ccc96e76518c596"
 SOURCE_BRANCH = "web/v0.5.1-deployment-package"
 FIXED_TIMESTAMP = "2026-09-12T19:06:03Z"
 BUILDER_SHA = "f" * 40

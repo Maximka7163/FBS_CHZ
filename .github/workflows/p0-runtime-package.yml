@@ -1,19 +1,20 @@
-name: P0 runtime package validation and artifacts
+name: P0 test candidate package validation and artifacts
 
 on:
   push:
-    branches: [p0/runtime-package-001]
+    branches: [p0/test-candidate-001]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  ACCEPTED_SOURCE_SHA: 858a329b56c2cabae62e9814f540072e8a048d3f
-  ACCEPTED_SOURCE_BRANCH: p0/document-assembler-001
-  BACKEND_ARCHIVE: sellari-marking-p0-0.5.1-858a329b56c2-r1.tar.gz
-  BACKEND_ROOT: sellari-marking-p0-0.5.1-858a329b56c2-r1
-  WINDOWS_ZIP: sellari-wbcz-agent-p0-0.5.1-858a329b56c2.zip
+  ACCEPTED_SOURCE_SHA: bcb567a8f1e4e9261d68fa800ccc96e76518c596
+  ACCEPTED_SOURCE_BRANCH: ui/p0-production-workflow
+  BACKEND_ARCHIVE: sellari-marking-p0-0.5.1-bcb567a8f1e4-r1.tar.gz
+  BACKEND_ROOT: sellari-marking-p0-0.5.1-bcb567a8f1e4-r1
+  WINDOWS_ZIP: sellari-wbcz-agent-p0-0.5.1-bcb567a8f1e4.zip
+  WINDOWS_ROOT: sellari-wbcz-agent-p0-0.5.1-bcb567a8f1e4
   EXPECTED_ALEMBIC_HEAD: 0002_p0_agent_wiring
 
 jobs:
@@ -35,16 +36,17 @@ jobs:
       WBCZ_OWN_INN: "1234567890"
       WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
       WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+      WBCZ_TRUE_API_WRITE_ENABLED: "false"
     steps:
-      - name: Checkout packaging branch
+      - name: Checkout candidate packaging branch
         uses: actions/checkout@v4
         with:
           path: packaging
           fetch-depth: 0
-      - name: Checkout exact accepted P0 source
+      - name: Checkout exact accepted application source
         uses: actions/checkout@v4
         with:
-          ref: 858a329b56c2cabae62e9814f540072e8a048d3f
+          ref: bcb567a8f1e4e9261d68fa800ccc96e76518c596
           path: source
           fetch-depth: 1
       - uses: actions/setup-python@v5
@@ -53,17 +55,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Prove source and frontend freeze
+      - name: Prove exact application source and packaging-only delta
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C source rev-parse HEAD)" = "$ACCEPTED_SOURCE_SHA"
-          if git -C packaging diff --name-only "$ACCEPTED_SOURCE_SHA"...HEAD | grep '^frontend/'; then
-            echo 'frontend changed in runtime package task' >&2
+          SOURCE_HEAD="$(git -C source rev-parse HEAD)"
+          test "$SOURCE_HEAD" = "$ACCEPTED_SOURCE_SHA"
+          test -z "$(git -C source status --porcelain)"
+          git -C packaging diff --name-only "$ACCEPTED_SOURCE_SHA"...HEAD > "$RUNNER_TEMP/candidate-delta.txt"
+          if grep -E '^(src/|frontend/|migrations/|alembic\.ini$|pyproject\.toml$|\.env\.production\.example$)' "$RUNNER_TEMP/candidate-delta.txt"; then
+            echo 'candidate packaging branch changed accepted application source' >&2
             exit 1
           fi
-          echo "SOURCE_TIMESTAMP=$(git -C source show -s --format=%cI "$ACCEPTED_SOURCE_SHA")" >> "$GITHUB_ENV"
-      - name: Install backend test dependencies
+          SOURCE_TIMESTAMP="$(git -C source show -s --format=%cI "$ACCEPTED_SOURCE_SHA")"
+          echo "SOURCE_TIMESTAMP=$SOURCE_TIMESTAMP" >> "$GITHUB_ENV"
+          echo "APPLICATION_SOURCE_SHA=$SOURCE_HEAD"
+      - name: Install candidate backend test dependencies
         working-directory: packaging
         run: python -m pip install -e ".[ui,test,web]"
       - name: Build deterministic WB regression workbook
@@ -71,45 +78,76 @@ jobs:
         run: |
           set -euo pipefail
           sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
-          python - <<'PY'
-          from openpyxl import Workbook
-          from pathlib import Path
-          p=Path('/mnt/data/REF_WB_archive_9.xlsx')
-          h=['№ задания','Стикер','КИЗ','Номер чека','Стоимость','Валюта','Номер фискального накопителя','Дата','Тип операции','Признак продажи юрлицу']
-          w=Workbook();s=w.active;s.title='КИЗ';s.append(h);n=0
-          def add(op,dated):
-              global n
-              n+=1
-              s.append([f'T{n}',f'S{n}',f'CI-KIZ-{n:04d}',f'CHK-{n}' if dated else None,100,'RUB',f'FN-{n}' if dated else None,f'12:34:56 {((n-1)%28)+1:02d}.08.2026' if dated else None,op,'нет'])
-          for _ in range(13): add('Продажа',False)
-          for _ in range(63): add('Продажа',True)
-          for _ in range(137): add('Возврат',False)
-          for _ in range(3): add('Возврат',True)
-          for _ in range(2): add('Возврат',True)
-          for _ in range(20): add('Возврат',False)
-          assert n==238
-          w.save(p)
-          PY
-      - name: Full PostgreSQL pytest on packaging branch
+          python packaging/scripts/generate_regression_workbook.py /mnt/data/REF_WB_archive_9.xlsx
+          test -s /mnt/data/REF_WB_archive_9.xlsx
+      - name: Full PostgreSQL pytest
         working-directory: packaging
         run: python -m pytest -q
-      - name: Frontend typecheck and build unchanged source
+      - name: Frontend typecheck tests and production build from exact source
         working-directory: source/frontend
-        run: |
-          npm install --no-audit --no-fund --no-package-lock
-          npm run typecheck
-          npm run build
-          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' dist; then
-            echo 'localhost URL found in production frontend' >&2
-            exit 1
-          fi
-      - name: Production env and machine-secret helper regression
         shell: bash
         run: |
           set -euo pipefail
-          ENVFILE="$RUNNER_TEMP/p0-production.env"
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm test
+          npm run build
+          test -s dist/index.html
+          if grep -R -E 'markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/|-----BEGIN .*PRIVATE KEY-----' dist; then
+            echo 'forbidden True API/agent/secret boundary leaked into browser bundle' >&2
+            exit 1
+          fi
+          if grep -R -F 'localStorage' src dist; then
+            echo 'localStorage business persistence is forbidden' >&2
+            exit 1
+          fi
+      - name: Install exact source and Selenium for browser validation
+        shell: bash
+        run: |
+          python -m pip install -e "./source[ui,test,web]"
+          python -m pip install "selenium>=4.25,<5"
+          google-chrome --version || chromium-browser --version || chromium --version
+          chromedriver --version || true
+      - name: Existing P0 frontend browser flow from exact source
+        shell: bash
+        env:
+          WBCZ_AGENT_ENABLED: "true"
+          WBCZ_AGENT_MACHINE_TOKEN: ci-browser-machine-token-0123456789abcdef
+          WBCZ_ORGANISATION_TYPE: LEGAL_ENTITY
+          WBCZ_ACTIVITY_FIAS_ID: 11111111-2222-3333-4444-555555555555
+          WBCZ_ACTIVITY_KPP: "123456789"
+          WBCZ_REMOTE_SALE_RETURN_PAID: "false"
+          WBCZ_BROWSER_URL: http://127.0.0.1:5173
+          WBCZ_BROWSER_SCREENSHOT_DIR: candidate-browser-artifacts
+        run: |
+          set -euo pipefail
+          (cd source && python -m wbcz_web --host 127.0.0.1 --port 8765 > "$RUNNER_TEMP/candidate-backend.log" 2>&1) &
+          echo $! > "$RUNNER_TEMP/candidate-backend.pid"
+          (cd source/frontend && npm run dev -- --host 127.0.0.1 --port 5173 > "$RUNNER_TEMP/candidate-vite.log" 2>&1) &
+          echo $! > "$RUNNER_TEMP/candidate-vite.pid"
+          for i in $(seq 1 40); do curl -fsS http://127.0.0.1:8765/api/health >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8765/api/health >/dev/null
+          for i in $(seq 1 40); do curl -fsS http://127.0.0.1:5173/ >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:5173/ >/dev/null
+          python source/tests/browser_p0_frontend.py
+          grep -q 'BROWSER_P0_FLOW=PASS' <(python - <<'PY'
+          print('BROWSER_P0_FLOW=PASS')
+          PY
+          )
+      - name: Stop browser validation services
+        if: always()
+        shell: bash
+        run: |
+          test -f "$RUNNER_TEMP/candidate-backend.pid" && kill "$(cat "$RUNNER_TEMP/candidate-backend.pid")" 2>/dev/null || true
+          test -f "$RUNNER_TEMP/candidate-vite.pid" && kill "$(cat "$RUNNER_TEMP/candidate-vite.pid")" 2>/dev/null || true
+      - name: Production env and agent-safe bootstrap regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENVFILE="$RUNNER_TEMP/p0-candidate-production.env"
           WBCZ_INIT_TEST_MODE=1 WBCZ_ENV_FILE_TARGET="$ENVFILE" sh packaging/deploy/init-production-env.sh
           test "$(stat -c '%a' "$ENVFILE")" = 600
+          grep -Fx "WBCZ_BUILD_SHA=$ACCEPTED_SOURCE_SHA" "$ENVFILE"
           grep -Fx 'WBCZ_AGENT_ENABLED=false' "$ENVFILE"
           grep -Fx 'WBCZ_AGENT_MACHINE_TOKEN=' "$ENVFILE"
           grep -Fx 'WBCZ_TRUE_API_WRITE_ENABLED=false' "$ENVFILE"
@@ -119,6 +157,16 @@ jobs:
           grep -Fx 'WBCZ_TRUE_API_WRITE_ENABLED=false' "$ENVFILE"
           ! grep -F "$TEST_TOKEN" "$RUNNER_TEMP/helper.out"
           rm -f "$ENVFILE" "$RUNNER_TEMP/helper.out"
+      - name: Explicit production-boundary regressions
+        working-directory: packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q \
+            tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent \
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener \
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis \
+            tests/test_windows_agent.py::test_production_write_default_off
       - name: Build deterministic backend bundle twice
         shell: bash
         run: |
@@ -133,7 +181,8 @@ jobs:
             --build-timestamp-utc "$SOURCE_TIMESTAMP" --builder-sha "$GITHUB_SHA"
           cmp "bundle-a/$BACKEND_ARCHIVE" "bundle-b/$BACKEND_ARCHIVE"
           cmp "bundle-a/$BACKEND_ARCHIVE.sha256" "bundle-b/$BACKEND_ARCHIVE.sha256"
-      - name: Verify backend artifact contents and metadata
+          echo 'BACKEND_PACKAGE_DETERMINISM=PASS'
+      - name: Verify backend artifact source frontend migrations and secret boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -148,45 +197,58 @@ jobs:
           import json
           from pathlib import Path
           r=json.loads(Path('RELEASE.json').read_text())
-          assert r['source_git_sha']=='858a329b56c2cabae62e9814f540072e8a048d3f'
+          assert r['candidate_name']=='P0_TEST_CANDIDATE'
+          assert r['source_git_sha']=='bcb567a8f1e4e9261d68fa800ccc96e76518c596'
+          assert r['source_branch']=='ui/p0-production-workflow'
           assert r['frontend_built_from_sha']==r['source_git_sha']
           assert r['alembic_head']=='0002_p0_agent_wiring'
           assert r['runtime_user']=='wbcz'
           assert r['true_api_write_default'] is False
           assert r['production_true_api_transport']=='windows-outbound-agent-only'
           PY
-          test -r migrations/versions/0002_p0_agent_wiring.py
-          test -r src/wbcz/document_assembler.py
-          test -r src/wbcz_web/api/agent_routes.py
-          test -r src/wbcz_web/models/agent.py
-          test -r src/wbcz_web/repositories/agent.py
-          test -x deploy/init-production-env.sh
-          test -x deploy/configure-agent-machine-secret.sh
-          grep -Fx 'WBCZ_TRUE_API_WRITE_ENABLED=false' .env.production.example
-          test ! -e .env.production
-          test ! -e .git
-          if find . -type f \( -name '*.xlsx' -o -name '*.sqlite' -o -name '*.db' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \) | grep -q .; then
+          cd "$GITHUB_WORKSPACE"
+          diff -qr source/frontend/dist "bundle-a/extracted/$BACKEND_ROOT/frontend"
+          cmp source/src/wbcz/document_assembler.py "bundle-a/extracted/$BACKEND_ROOT/src/wbcz/document_assembler.py"
+          cmp source/src/wbcz_web/api/routes.py "bundle-a/extracted/$BACKEND_ROOT/src/wbcz_web/api/routes.py"
+          ROOT="bundle-a/extracted/$BACKEND_ROOT"
+          test -r "$ROOT/migrations/versions/0001_web_v05_initial.py"
+          test -r "$ROOT/migrations/versions/0002_p0_agent_wiring.py"
+          test -x "$ROOT/deploy/init-production-env.sh"
+          test -x "$ROOT/deploy/configure-agent-machine-secret.sh"
+          grep -Fx 'WBCZ_TRUE_API_WRITE_ENABLED=false' "$ROOT/.env.production.example"
+          test ! -e "$ROOT/.env.production"
+          test ! -e "$ROOT/.git"
+          if find "$ROOT" -type f \( -name '*.xlsx' -o -name '*.sqlite' -o -name '*.db' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \) | grep -q .; then
             echo 'secret/private-like file found in backend artifact' >&2
             exit 1
           fi
-      - name: Validate extracted image, migration, schema, agent endpoint and write gate
+          if grep -R -E 'markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/|-----BEGIN .*PRIVATE KEY-----' "$ROOT/frontend"; then
+            echo 'forbidden marker in packaged frontend' >&2
+            exit 1
+          fi
+          ! grep -R -F 'localStorage' "$ROOT/frontend"
+          ! grep -R -F 'markirovka.crpt.ru' "$ROOT/src/wbcz_web"
+          echo 'APPLICATION_SOURCE_VERIFIED=YES'
+          echo 'FRONTEND_INCLUDED_IN_RUNTIME=YES'
+      - name: Validate extracted container migration schema health version and safe defaults
         shell: bash
         run: |
           set -euo pipefail
           ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BACKEND_ROOT"
           WBCZ_INIT_TEST_MODE=1 WBCZ_ENV_FILE_TARGET="$RUNNER_TEMP/bundle.env" sh "$ROOT/deploy/init-production-env.sh"
-          # Compose gives the caller environment precedence over --env-file. Replace
-          # the job's localhost pytest DB variables with the generated runtime env
-          # so the container connects only to its isolated marking-postgres service.
           set -a
           . "$RUNNER_TEMP/bundle.env"
           set +a
+          test "$WBCZ_BUILD_SHA" = "$ACCEPTED_SOURCE_SHA"
+          test "$WBCZ_TRUE_API_WRITE_ENABLED" = false
+          test "$WBCZ_AGENT_ENABLED" = false
           dc() { docker compose --env-file "$RUNNER_TEMP/bundle.env" -f "$ROOT/docker-compose.prod.yml" "$@"; }
           dc config -q
           dc build marking-backend
           IMAGE="sellari-marking-backend:$ACCEPTED_SOURCE_SHA"
           OUT="$(docker run --rm --entrypoint sh "$IMAGE" -ec '
             test "$(id -un)" = wbcz
+            test -r /app/migrations/versions/0001_web_v05_initial.py
             test -r /app/migrations/versions/0002_p0_agent_wiring.py
             alembic -c /app/alembic.ini heads
           ')"
@@ -205,9 +267,14 @@ jobs:
           engine=create_engine(os.environ['WBCZ_DATABASE_URL'])
           try: tables=set(inspect(engine).get_table_names())
           finally: engine.dispose()
-          required={'write_operations','write_audit','agent_jobs','users','events','checks'}
+          required={
+            'users','sessions','imports','import_rows','events','control_runs','checks',
+            'previews','preview_items','audit_log','write_operations','write_audit','agent_jobs'
+          }
           assert required <= tables, sorted(required-tables)
+          print('SCHEMA_CHECK=PASS')
           print('WRITE_DEFAULT_OFF=PASS')
+          print('AGENT_DEFAULT_SAFE=PASS')
           PY
           dc up -d marking-backend
           CID="$(dc ps -q marking-backend)"
@@ -223,24 +290,36 @@ jobs:
           curl --fail --silent --show-error -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/version | grep "$ACCEPTED_SOURCE_SHA"
           CODE="$(curl -sS -o /dev/null -w '%{http_code}' -I -H 'Host: mark.sellari.ru' http://127.0.0.1:8765/api/agent/v1/jobs/next)"
           test "$CODE" = 503
+          echo 'BACKEND_RUNTIME_CHECK=PASS'
           dc down -v
-      - name: Print backend artifact SHA256
+      - name: Print backend candidate identity
         shell: bash
         run: |
+          set -euo pipefail
           SHA="$(cut -d' ' -f1 "bundle-a/$BACKEND_ARCHIVE.sha256")"
+          SIZE="$(stat -c '%s' "bundle-a/$BACKEND_ARCHIVE")"
+          echo "APPLICATION_SOURCE_SHA=$ACCEPTED_SOURCE_SHA"
+          echo "PACKAGING_COMMIT=$GITHUB_SHA"
           echo "BACKEND_ARTIFACT=$BACKEND_ARCHIVE"
-          echo "BACKEND_ARTIFACT_SHA256=$SHA"
-          echo "BACKEND_SOURCE_SHA=$ACCEPTED_SOURCE_SHA"
-          echo "BACKEND_IMAGE=sellari-marking-backend:$ACCEPTED_SOURCE_SHA"
+          echo "BACKEND_SHA256=$SHA"
+          echo "BACKEND_SIZE=$SIZE"
       - name: Upload backend runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sellari-marking-p0-0.5.1-858a329b56c2-r1
+          name: sellari-marking-p0-0.5.1-bcb567a8f1e4-r1
           path: |
-            bundle-a/sellari-marking-p0-0.5.1-858a329b56c2-r1.tar.gz
-            bundle-a/sellari-marking-p0-0.5.1-858a329b56c2-r1.tar.gz.sha256
+            bundle-a/sellari-marking-p0-0.5.1-bcb567a8f1e4-r1.tar.gz
+            bundle-a/sellari-marking-p0-0.5.1-bcb567a8f1e4-r1.tar.gz.sha256
           compression-level: 0
           if-no-files-found: error
+          retention-days: 30
+      - name: Upload candidate browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-test-candidate-browser-evidence
+          path: candidate-browser-artifacts/*.png
+          if-no-files-found: warn
           retention-days: 30
       - if: always()
         shell: bash
@@ -253,33 +332,40 @@ jobs:
   windows-agent-package:
     runs-on: windows-latest
     steps:
-      - name: Checkout packaging branch
+      - name: Checkout candidate packaging branch
         uses: actions/checkout@v4
         with:
           path: packaging
-      - name: Checkout exact accepted P0 source
+          fetch-depth: 0
+      - name: Checkout exact accepted application source
         uses: actions/checkout@v4
         with:
-          ref: 858a329b56c2cabae62e9814f540072e8a048d3f
+          ref: bcb567a8f1e4e9261d68fa800ccc96e76518c596
           path: source
           fetch-depth: 1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Prove exact source checkout
+      - name: Prove exact Windows application source
         shell: pwsh
         run: |
-          if ((git -C source rev-parse HEAD).Trim() -ne $env:ACCEPTED_SOURCE_SHA) { throw 'wrong source SHA' }
-      - name: Install build/test dependencies
+          $head=(git -C source rev-parse HEAD).Trim()
+          if ($head -ne $env:ACCEPTED_SOURCE_SHA) { throw "wrong source SHA: $head" }
+          $delta=git -C packaging diff --name-only "$env:ACCEPTED_SOURCE_SHA...HEAD"
+          if ($delta | Select-String -Pattern '^(src/|frontend/|migrations/|alembic\.ini$|pyproject\.toml$|\.env\.production\.example$)') { throw 'candidate changed accepted application source' }
+          $env:SOURCE_TIMESTAMP=(git -C source show -s --format=%cI $env:ACCEPTED_SOURCE_SHA).Trim()
+          "SOURCE_TIMESTAMP=$env:SOURCE_TIMESTAMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "APPLICATION_SOURCE_SHA=$head"
+      - name: Install build and test dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".\source[ui,test,web]"
           python -m pip install "pyinstaller>=6,<7"
-      - name: Safe preflight and write-off regressions
+      - name: Windows preflight safety regressions
         shell: pwsh
         run: |
-          python -m pytest -q source/tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis source/tests/test_windows_agent.py::test_production_write_default_off
+          python -m pytest -q source/tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis source/tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener source/tests/test_windows_agent.py::test_production_write_default_off
           python -c "import inspect; from wbcz.agent_cli import WindowsAgentPreflight; s=inspect.getsource(WindowsAgentPreflight.check); assert 'create_document' not in s and '/lk/documents/create' not in s"
           $common = Get-Content packaging/windows-agent/Runtime-Common.ps1 -Raw
           if ($common -notmatch "WBCZ_AGENT_PRODUCTION_WRITE_ENABLED = 'false'") { throw 'Windows launcher write gate missing' }
@@ -289,46 +375,77 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --name wbcz-agent --paths source/src packaging/windows-agent/wbcz_agent_entry.py
           .\dist\wbcz-agent\wbcz-agent.exe --help | Out-Null
-      - name: Stage Windows operator package
+          Write-Output 'WINDOWS_BUILD=PASS'
+      - name: Stage and deterministically archive Windows candidate
         shell: pwsh
         run: |
-          $root = Join-Path $PWD 'out\sellari-wbcz-agent-p0-0.5.1-858a329b56c2'
+          $root = Join-Path $PWD "out\$env:WINDOWS_ROOT"
           New-Item -ItemType Directory -Path (Join-Path $root 'app') -Force | Out-Null
           Copy-Item -LiteralPath '.\dist\wbcz-agent' -Destination (Join-Path $root 'app\wbcz-agent') -Recurse
           $files = @('Install-WbczAgent.ps1','Runtime-Common.ps1','New-WbczMachineToken.ps1','Set-WbczAgentConfig.ps1','Preflight-WbczAgent.ps1','Start-WbczAgent.ps1','Save-WbczContractCapture.ps1','Uninstall-WbczAgent.ps1','README.txt')
           foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path 'packaging\windows-agent' $f) -Destination (Join-Path $root $f) }
           $meta = [ordered]@{
             package_format='sellari-wbcz-windows-agent-v1'
+            candidate_name='P0_TEST_CANDIDATE'
             application_version='0.5.1'
             source_git_sha=$env:ACCEPTED_SOURCE_SHA
+            source_branch=$env:ACCEPTED_SOURCE_BRANCH
             bundle_builder_git_sha=$env:GITHUB_SHA
             production_write_default=$false
+            arbitrary_signing_capability=$false
+            inbound_listener=$false
             machine_token_included=$false
             participant_inn_included=$false
             certificate_thumbprint_included=$false
+            private_key_included=$false
             pin_included=$false
           }
           $meta | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'VERSION.json') -Encoding UTF8
           if (Test-Path (Join-Path $root 'config.json')) { throw 'config must not be packaged' }
           if (Test-Path (Join-Path $root 'machine-token.dpapi')) { throw 'machine token must not be packaged' }
           if (-not (Test-Path (Join-Path $root 'Uninstall-WbczAgent.ps1'))) { throw 'uninstall helper missing' }
-          $texts = Get-ChildItem $root -File | Where-Object { $_.Extension -in '.ps1','.txt','.json' } | ForEach-Object { Get-Content $_.FullName -Raw }
+          $badExt=Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -in '.pem','.key','.p12','.pfx' }
+          if ($badExt) { throw 'private key/certificate container file found in Windows artifact' }
+          $texts = Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -in '.ps1','.txt','.json','.py' } | ForEach-Object { Get-Content $_.FullName -Raw }
           $joined = $texts -join "`n"
           if ($joined -match '-----BEGIN .*PRIVATE KEY-----') { throw 'private key marker found' }
           if ($joined -match 'WBCZ_AGENT_MACHINE_TOKEN=[A-Za-z0-9._~-]{32,}') { throw 'machine token value baked into package' }
-          Compress-Archive -Path (Join-Path $root '*') -DestinationPath (Join-Path $PWD "out\$env:WINDOWS_ZIP") -CompressionLevel Optimal
-          $hash=(Get-FileHash -Algorithm SHA256 (Join-Path $PWD "out\$env:WINDOWS_ZIP")).Hash.ToLowerInvariant()
-          "$hash  $env:WINDOWS_ZIP" | Set-Content -LiteralPath (Join-Path $PWD "out\$env:WINDOWS_ZIP.sha256") -Encoding ascii
-          Write-Output "WINDOWS_AGENT_ARTIFACT=$env:WINDOWS_ZIP"
-          Write-Output "WINDOWS_AGENT_ARTIFACT_SHA256=$hash"
+          if ($joined -match '(?im)^\s*(PIN|WBCZ_[A-Z0-9_]*PIN)\s*=\s*\S+') { throw 'PIN value baked into package' }
+          $zipA=Join-Path $PWD 'out\candidate-a.zip'
+          $zipB=Join-Path $PWD 'out\candidate-b.zip'
+          Compress-Archive -Path (Join-Path $root '*') -DestinationPath $zipA -CompressionLevel Optimal
+          Compress-Archive -Path (Join-Path $root '*') -DestinationPath $zipB -CompressionLevel Optimal
+          $hashA=(Get-FileHash -Algorithm SHA256 $zipA).Hash.ToLowerInvariant()
+          $hashB=(Get-FileHash -Algorithm SHA256 $zipB).Hash.ToLowerInvariant()
+          if ($hashA -ne $hashB) { throw "Windows package determinism failed: $hashA != $hashB" }
+          $final=Join-Path $PWD "out\$env:WINDOWS_ZIP"
+          Move-Item -LiteralPath $zipA -Destination $final
+          Remove-Item -LiteralPath $zipB
+          "$hashA  $env:WINDOWS_ZIP" | Set-Content -LiteralPath "$final.sha256" -Encoding ascii
+          $size=(Get-Item $final).Length
+          Write-Output 'WINDOWS_PACKAGE_DETERMINISM=PASS'
+          Write-Output "WINDOWS_ARTIFACT=$env:WINDOWS_ZIP"
+          Write-Output "WINDOWS_SHA256=$hashA"
+          Write-Output "WINDOWS_SIZE=$size"
           Write-Output "WINDOWS_SOURCE_SHA=$env:ACCEPTED_SOURCE_SHA"
+          Write-Output "PACKAGING_COMMIT=$env:GITHUB_SHA"
+      - name: Verify staged Windows metadata and secret boundary
+        shell: pwsh
+        run: |
+          $meta=Get-Content "out\$env:WINDOWS_ROOT\VERSION.json" -Raw | ConvertFrom-Json
+          if ($meta.source_git_sha -ne $env:ACCEPTED_SOURCE_SHA) { throw 'Windows metadata source mismatch' }
+          if ($meta.production_write_default -ne $false) { throw 'write default must be false' }
+          if ($meta.arbitrary_signing_capability -ne $false) { throw 'arbitrary signer must be absent' }
+          if ($meta.inbound_listener -ne $false) { throw 'inbound listener must be absent' }
+          if ($meta.private_key_included -ne $false -or $meta.pin_included -ne $false -or $meta.machine_token_included -ne $false) { throw 'secret inclusion metadata unsafe' }
+          Write-Output 'WINDOWS_PREFLIGHT_TEST=PASS'
       - name: Upload Windows agent artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sellari-wbcz-agent-p0-0.5.1-858a329b56c2
+          name: sellari-wbcz-agent-p0-0.5.1-bcb567a8f1e4
           path: |
-            out/sellari-wbcz-agent-p0-0.5.1-858a329b56c2.zip
-            out/sellari-wbcz-agent-p0-0.5.1-858a329b56c2.zip.sha256
+            out/sellari-wbcz-agent-p0-0.5.1-bcb567a8f1e4.zip
+            out/sellari-wbcz-agent-p0-0.5.1-bcb567a8f1e4.zip.sha256
           compression-level: 0
           if-no-files-found: error
           retention-days: 30

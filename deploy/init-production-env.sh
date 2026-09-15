@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 APP_VERSION="0.5.1"
-APP_SHA="858a329b56c2cabae62e9814f540072e8a048d3f"
+APP_SHA="bcb567a8f1e4e9261d68fa800ccc96e76518c596"
 TRUSTED_HOST="mark.sellari.ru"
 DEFAULT_TARGET="/opt/sellari-marking/runtime/.env.production"
 

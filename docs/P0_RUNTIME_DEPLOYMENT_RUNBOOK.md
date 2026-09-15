@@ -1,8 +1,8 @@
-# P0 runtime deployment runbook
+# P0 test-candidate runtime deployment runbook
 
-Scope: future, separately approved deployment of accepted application source `858a329b56c2cabae62e9814f540072e8a048d3f` and migration head `0002_p0_agent_wiring`.
+Scope: future, separately approved deployment of frozen `P0_TEST_CANDIDATE` application source `bcb567a8f1e4e9261d68fa800ccc96e76518c596` and migration head `0002_p0_agent_wiring`.
 
-This runbook is documentation only. `P0-RUNTIME-PACKAGE-001` does not deploy, migrate production, alter DNS/nginx, access a real certificate or call True API.
+This runbook is documentation only. `P0-TEST-CANDIDATE-PACKAGE-001` does not deploy, migrate production, alter DNS/nginx, access a real certificate or call True API.
 
 ## Hard safety boundaries
 
@@ -10,13 +10,13 @@ This runbook is documentation only. `P0-RUNTIME-PACKAGE-001` does not deploy, mi
 - Windows agent document write remains disabled: `WBCZ_AGENT_PRODUCTION_WRITE_ENABLED=false`.
 - Production True API network transport is Windows outbound agent -> CryptoPro -> GOST TLS -> True API. Do not create a VPS True API client.
 - Do not touch unrelated VPS services or databases: **Sellari**, **DeltaMetric**, **tg-bot-wb**, or their DBs.
-- Do not change DNS/nginx/TLS during this deployment. A publicly reachable HTTPS hostname with a valid certificate is a prerequisite for the Windows agent. Never point the agent at insecure HTTP.
+- Do not change DNS/nginx/TLS during packaging or validation. A publicly reachable HTTPS hostname with a valid certificate is a prerequisite for the Windows agent. Never point the agent at insecure HTTP.
 
 ## Artifacts
 
-Expected backend archive: `sellari-marking-p0-0.5.1-858a329b56c2-r1.tar.gz` plus `.sha256`.
-Expected source SHA inside `RELEASE.json`: `858a329b56c2cabae62e9814f540072e8a048d3f`.
-Expected image metadata: `sellari-marking-backend:858a329b56c2cabae62e9814f540072e8a048d3f`, runtime user `wbcz`.
+Expected backend archive: `sellari-marking-p0-0.5.1-bcb567a8f1e4-r1.tar.gz` plus `.sha256`.
+Expected source SHA inside `RELEASE.json`: `bcb567a8f1e4e9261d68fa800ccc96e76518c596`.
+Expected image metadata: `sellari-marking-backend:bcb567a8f1e4e9261d68fa800ccc96e76518c596`, runtime user `wbcz`.
 Expected Alembic head: `0002_p0_agent_wiring`.
 
 ## 1. Pre-deploy checks
@@ -64,7 +64,7 @@ Before applying migration:
 4. Confirm expected new persistence objects include `write_operations`, `write_audit`, and `agent_jobs` and the append-only audit protection defined by the accepted migration.
 5. STOP on an unexpected current revision, multiple heads, or schema drift.
 
-## 5. Apply migration 0002 — only in the separately approved deployment task
+## 5. Apply migration 0002 — only in a separately approved deployment task
 
 Run Alembic upgrade through the new non-root backend image against the marking database only. Then verify:
 
@@ -73,7 +73,7 @@ Run Alembic upgrade through the new non-root backend image against the marking d
 - legacy web tables remain present;
 - no unrelated DB was addressed.
 
-`P0-RUNTIME-PACKAGE-001` does **not** execute this step.
+`P0-TEST-CANDIDATE-PACKAGE-001` does **not** execute this step on production.
 
 ## 6. Configure agent machine auth
 
@@ -98,7 +98,7 @@ Only after migration verification and secret configuration:
 1. Recreate **marking-backend** using the new verified image/release and existing marking PostgreSQL service.
 2. Do not recreate unrelated compose projects/containers.
 3. Wait for container health = healthy.
-4. Verify `/api/health` and `/api/version`; version must report the accepted source SHA.
+4. Verify `/api/health` and `/api/version`; version must report `bcb567a8f1e4e9261d68fa800ccc96e76518c596`.
 5. Verify runtime env from inside the backend reports `WBCZ_TRUE_API_WRITE_ENABLED=false` and `WBCZ_AGENT_ENABLED=true` without printing the token.
 
 ## 8. Agent HEAD auth smoke
@@ -119,7 +119,7 @@ Optional read-only CIS check is explicit only:
 
 `./Preflight-WbczAgent.ps1 -Cis '<KIZ>'`
 
-Preflight may perform certificate/CryptoPro/GOST/backend auth plus True API `/auth/key`, `/auth/simpleSignIn`, and optional `/cises/info`. It must never assemble/sign a business document or call `/lk/documents/create`.
+Preflight may perform certificate/CryptoPro/GOST/backend auth plus True API `/auth/key`, `/auth/simpleSignIn`, and optional `/cises/info` only in the separately approved real runtime test. It must never assemble/sign a business document or call `/lk/documents/create` during preflight.
 
 Do not start the normal polling launcher until a separate task authorizes it.
 

@@ -11,8 +11,8 @@ import tarfile
 import tempfile
 
 APP_VERSION = "0.5.1"
-APPROVED_SOURCE_SHA = "858a329b56c2cabae62e9814f540072e8a048d3f"
-APPROVED_SOURCE_BRANCH = "p0/document-assembler-001"
+APPROVED_SOURCE_SHA = "bcb567a8f1e4e9261d68fa800ccc96e76518c596"
+APPROVED_SOURCE_BRANCH = "ui/p0-production-workflow"
 EXPECTED_ALEMBIC_HEAD = "0002_p0_agent_wiring"
 ARCHIVE_PREFIX = f"sellari-marking-p0-{APP_VERSION}-{APPROVED_SOURCE_SHA[:12]}-r1"
 
@@ -52,6 +52,14 @@ SECRET_MARKERS = (
     b"-----BEGIN RSA PRIVATE KEY-----",
     b"github_pat_",
     b"ghp_",
+)
+FRONTEND_FORBIDDEN_MARKERS = (
+    "markirovka.crpt.ru",
+    "WBCZ_AGENT_MACHINE_TOKEN",
+    "/api/agent/",
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    "localStorage",
 )
 
 
@@ -96,6 +104,9 @@ def _copy_frontend(source_root: Path, bundle: Path) -> None:
         raise ValueError("production frontend contains localhost address")
     if "/api/" not in text:
         raise ValueError("production frontend lacks same-origin /api/ calls")
+    for marker in FRONTEND_FORBIDDEN_MARKERS:
+        if marker in text:
+            raise ValueError(f"production frontend contains forbidden marker: {marker}")
 
 
 def _sha256(path: Path) -> str:
@@ -115,6 +126,7 @@ def _write_metadata(bundle: Path, *, source_branch: str, timestamp: str, builder
         "bundle_builder_git_sha": builder_sha,
         "build_timestamp_utc": timestamp,
         "bundle_format": "sellari-marking-p0-runtime-v1",
+        "candidate_name": "P0_TEST_CANDIDATE",
         "backend_image": f"sellari-marking-backend:{APPROVED_SOURCE_SHA}",
         "alembic_head": EXPECTED_ALEMBIC_HEAD,
         "runtime_user": "wbcz",
