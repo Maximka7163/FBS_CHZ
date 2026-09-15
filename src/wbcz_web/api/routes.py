@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from wbcz.write_pipeline import InvalidWriteOperation
 from wbcz_web.auth import new_csrf_token
 from wbcz_web.repositories import ImportRepository
 from wbcz_web.services import (
@@ -16,9 +17,16 @@ from wbcz_web.services import (
     import_view,
 )
 from wbcz_web.services.agent_orchestration import AgentControlService
+from wbcz_web.services.workspace import (
+    BulkActionUnavailable,
+    bulk_preview,
+    execute_bulk_actions,
+    workspace_history,
+    workspace_overview,
+)
 
 from .dependencies import AuthenticatedIdentity, get_db, require_csrf, require_user
-from .schemas import ControlRequest, LoginRequest, PreviewRequest
+from .schemas import BulkActionRequest, ControlRequest, LoginRequest, PreviewRequest
 
 router = APIRouter(prefix="/api")
 
@@ -100,14 +108,24 @@ def me(identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
 
 
 @router.get("/capabilities")
-def capabilities(_: AuthenticatedIdentity = Depends(require_user)) -> dict:
+def capabilities(request: Request, _: AuthenticatedIdentity = Depends(require_user)) -> dict:
+    config = request.app.state.config
     return {
-        "true_api": "mock",
-        "true_api_write": False,
+        "true_api": "windows-agent" if config.agent_enabled else "offline-dry-run",
+        "true_api_write": config.true_api_write_enabled,
         "document_signing": False,
         "submission": False,
-        "windows_bridge": False,
+        "windows_bridge": config.agent_enabled,
         "registration": False,
+    }
+
+
+@router.get("/workspace")
+def workspace(_: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    history = workspace_history(db, limit=10)
+    return {
+        "active_import_id": history[0]["id"] if history else None,
+        "history": history,
     }
 
 
@@ -151,6 +169,50 @@ def file_events(import_id: str, identity: AuthenticatedIdentity = Depends(requir
     if repo.get(import_id) is None:
         raise HTTPException(status_code=404, detail="Импорт не найден")
     return [event_view(db, row, repo.latest_check(row.event_id)) for row in repo.ordered_event_records(import_id)]
+
+
+@router.get("/files/{import_id}/workspace")
+def file_workspace(
+    import_id: str,
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return workspace_overview(db, request.app.state.config, import_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/files/{import_id}/bulk-preview")
+def file_bulk_preview(
+    import_id: str,
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return bulk_preview(db, import_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/files/{import_id}/bulk-actions")
+def file_bulk_actions(
+    import_id: str,
+    payload: BulkActionRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return execute_bulk_actions(db, request.app.state.config, import_id, identity.user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BulkActionUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidWriteOperation as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/events/{event_id}")
