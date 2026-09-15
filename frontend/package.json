@@ -1,1 +1,1 @@
-{"name":"wbcz-web-ui","private":true,"version":"0.5.1","type":"module","scripts":{"dev":"vite","build":"tsc --noEmit && vite build","typecheck":"tsc --noEmit"},"devDependencies":{"@types/node":"^22.10.0","typescript":"^5.6.3","vite":"^6.0.0"}}
+{"name":"wbcz-web-ui","private":true,"version":"0.5.1","type":"module","scripts":{"dev":"vite","build":"tsc --noEmit && vite build","typecheck":"tsc --noEmit","test":"node --experimental-strip-types --test tests/workflow.test.mjs"},"devDependencies":{"@types/node":"^22.10.0","typescript":"^5.6.3","vite":"^6.0.0"}}
