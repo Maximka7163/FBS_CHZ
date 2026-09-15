@@ -1,0 +1,374 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+from io import BytesIO
+import json
+import os
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from openpyxl import Workbook
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import sessionmaker
+
+from wbcz.document_assembler import OrganisationType
+from wbcz.models import Decision, Event, Operation
+from wbcz.windows_agent import AgentResult
+from wbcz_web.auth import hash_password
+from wbcz_web.config import WebConfig
+from wbcz_web.main import create_app
+from wbcz_web.models import (
+    AgentJobRecord,
+    Base,
+    CheckRecord,
+    ControlRun,
+    ImportRecord,
+    ImportRow,
+    User,
+    WriteOperationRecord,
+)
+from wbcz_web.repositories import ImportRepository
+from wbcz_web.services.agent_orchestration import AgentControlService, CONTROL_CIS, WRITE
+from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
+from wbcz_web.services.imports import event_to_record
+from wbcz_web.services.workspace import bulk_preview, execute_bulk_actions, workspace_overview
+
+
+DB_URL = os.getenv("WBCZ_TEST_DATABASE_URL")
+OWN = "1234567890"
+TOKEN = "frontend-integration-machine-token-0123456789"
+FIAS = "11111111-2222-3333-4444-555555555555"
+KPP = "123456789"
+CIS_PREFIX = "010290089707781021"
+ROOT = Path(__file__).parents[1]
+
+
+def valid_cis(label: str) -> str:
+    value = CIS_PREFIX + label
+    assert 18 <= len(value) <= 74
+    return value
+
+
+def event(label: str, operation: Operation = Operation.SALE) -> Event:
+    return Event(
+        kiz=valid_cis(label),
+        task_number=f"task-{label}",
+        sticker=f"sticker-{label}",
+        operation=operation,
+        occurred_at=datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc),
+        receipt_number=f"receipt-{label}",
+        fiscal_drive_number="7380440903834317",
+        amount=Decimal("1901.75"),
+        currency="RUB",
+        legal_entity_sale=False,
+    )
+
+
+def config(database_url: str, *, agent: bool = True, org: bool = True) -> WebConfig:
+    kwargs = dict(
+        database_url=database_url,
+        own_inn=OWN,
+        environment="test",
+        agent_enabled=agent,
+        agent_machine_token=TOKEN if agent else None,
+        agent_job_lease_seconds=30,
+        agent_poll_initial_seconds=1,
+        agent_poll_max_seconds=4,
+        agent_poll_max_attempts=3,
+        true_api_write_enabled=False,
+    )
+    if org:
+        kwargs.update(
+            organisation_type=OrganisationType.LEGAL_ENTITY,
+            activity_fias_id=FIAS,
+            activity_kpp=KPP,
+            remote_sale_return_paid=False,
+        )
+    return WebConfig(**kwargs).validate_for_startup()
+
+
+@pytest.fixture
+def pg_factory():
+    if not DB_URL:
+        pytest.skip("WBCZ_TEST_DATABASE_URL requires PostgreSQL")
+    engine = create_engine(DB_URL, future=True)
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def seed_import(db, events: list[Event], *, password: str | None = None):
+    user = User(
+        username="operator",
+        password_hash=hash_password(password) if password else "not-used",
+        is_active=True,
+        is_admin=True,
+    )
+    db.add(user)
+    db.flush()
+    imported = ImportRecord(
+        fingerprint=("f" * 63) + "1",
+        filename="wb-fbs.xlsx",
+        imported_by=user.id,
+        new_events=len(events),
+        duplicate_events=0,
+        rejected_rows=0,
+        row_count=len(events),
+        unique_kiz=len({item.kiz for item in events}),
+        sales=sum(item.operation is Operation.SALE for item in events),
+        returns=sum(item.operation is Operation.RETURN for item in events),
+        dated=len(events),
+        undated=0,
+    )
+    db.add(imported)
+    db.flush()
+    for index, item in enumerate(events, start=2):
+        db.add(event_to_record(item))
+        db.flush()
+        db.add(ImportRow(import_id=imported.id, row_number=index, event_id=item.event_id))
+    db.flush()
+    return user, imported
+
+
+def add_check(db, imported: ImportRecord, user: User, item: Event, decision: Decision, reason: str, *, error: str | None = None):
+    run = ControlRun(import_id=imported.id, user_id=user.id, mode="AUTO", provider="test")
+    db.add(run)
+    db.flush()
+    snapshot = None
+    if decision is Decision.READY_TO_WITHDRAW:
+        snapshot = {"status": "IN_CIRCULATION", "statusEx": None, "withdrawReason": None, "ownerInn": OWN, "productGroup": "lp"}
+    elif decision is Decision.READY_TO_RETURN:
+        snapshot = {"status": "WITHDRAWN", "statusEx": None, "withdrawReason": "DISTANCE", "ownerInn": OWN, "productGroup": "lp"}
+    db.add(
+        CheckRecord(
+            run_id=run.id,
+            event_id=item.event_id,
+            source="test",
+            snapshot=snapshot,
+            decision=decision.value,
+            reason=reason,
+            error=error,
+        )
+    )
+    db.flush()
+
+
+def workbook_bytes() -> bytes:
+    wb = Workbook()
+    sheet = wb.active
+    sheet.title = "КИЗ"
+    sheet.append([
+        "№ задания",
+        "Стикер",
+        "КИЗ",
+        "Номер чека",
+        "Стоимость",
+        "Валюта",
+        "Номер фискального накопителя",
+        "Дата",
+        "Тип операции",
+        "Признак продажи юрлицу",
+    ])
+    sheet.append([
+        "100",
+        "200",
+        valid_cis("UPLOAD"),
+        "300",
+        1901.75,
+        "RUB",
+        "7380440903834317",
+        "12:34:56 19.08.2026",
+        "Продажа",
+        "нет",
+    ])
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def login(client: TestClient, password: str) -> None:
+    csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+    response = client.post(
+        "/api/auth/login",
+        headers={"X-CSRF-Token": csrf},
+        json={"username": "operator", "password": password},
+    )
+    assert response.status_code == 200
+
+
+def test_frontend_browser_boundary_has_no_business_persistence_or_direct_true_api():
+    sources = "\n".join(
+        (ROOT / "frontend" / "src" / name).read_text(encoding="utf-8")
+        for name in ("main.ts", "api.ts", "workflow.ts")
+    )
+    assert "localStorage" not in sources
+    assert "sessionStorage" not in sources
+    assert "markirovka.crpt.ru" not in sources
+    assert "/api/agent/" not in sources
+    assert "WBCZ_AGENT_MACHINE_TOKEN" not in sources
+    assert "CryptoPro" not in sources
+    assert '"/api/' in sources
+    assert "READY_TO_WITHDRAW" not in (ROOT / "frontend" / "src" / "workflow.ts").read_text(encoding="utf-8")
+    assert "READY_TO_RETURN" not in (ROOT / "frontend" / "src" / "workflow.ts").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_workspace_groups_states_and_bulk_is_backend_authoritative(pg_factory):
+    rows = [
+        event("WITHDRAW"),
+        event("RETURN", Operation.RETURN),
+        event("MANUAL"),
+        event("ERROR"),
+        event("DONE"),
+        event("NOACTION"),
+    ]
+    with pg_factory() as db:
+        user, imported = seed_import(db, rows)
+        decisions = [
+            (Decision.READY_TO_WITHDRAW, "SALE_IN_CIRCULATION"),
+            (Decision.READY_TO_RETURN, "RETURN_WITHDRAWN_DISTANCE"),
+            (Decision.MANUAL_REVIEW, "OWNER_MISMATCH"),
+            (Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED"),
+            (Decision.ALREADY_DONE, "SALE_ALREADY_WITHDRAWN_DISTANCE"),
+            (Decision.NO_ACTION, "TEST_NO_ACTION"),
+        ]
+        for item, (decision, reason) in zip(rows, decisions):
+            add_check(db, imported, user, item, decision, reason, error="TrueApiError" if decision is Decision.ERROR else None)
+        view = workspace_overview(db, config(DB_URL), imported.id)
+        assert view["filters"] == {"ALL": 6, "READY": 2, "PROCESSING": 0, "ATTENTION": 1, "DONE": 2, "ERROR": 1}
+        assert view["bulk"]["eligible_count"] == 2
+        assert view["bulk"]["withdraw_count"] == 1
+        assert view["bulk"]["return_count"] == 1
+        by_decision = {item["decision"]: item for item in view["items"]}
+        assert by_decision[Decision.READY_TO_WITHDRAW.value]["action_label"] == "Вывести из оборота"
+        assert by_decision[Decision.READY_TO_RETURN.value]["action_label"] == "Возврат в оборот"
+        assert by_decision[Decision.MANUAL_REVIEW.value]["ready_for_bulk"] is False
+        assert by_decision[Decision.ERROR.value]["ready_for_bulk"] is False
+        assert by_decision[Decision.ALREADY_DONE.value]["ready_for_bulk"] is False
+        assert by_decision[Decision.NO_ACTION.value]["ready_for_bulk"] is False
+        preview = bulk_preview(db, imported.id)
+        assert preview["eligible_count"] == 2
+        assert preview["excluded_count"] == 4
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_bulk_execution_stages_only_ready_backend_decisions(pg_factory):
+    rows = [
+        event("WITHDRAW"),
+        event("RETURN", Operation.RETURN),
+        event("MANUAL"),
+        event("ERROR"),
+        event("DONE"),
+        event("NOACTION"),
+    ]
+    with pg_factory() as db:
+        user, imported = seed_import(db, rows)
+        for item, decision, reason in (
+            (rows[0], Decision.READY_TO_WITHDRAW, "SALE_IN_CIRCULATION"),
+            (rows[1], Decision.READY_TO_RETURN, "RETURN_WITHDRAWN_DISTANCE"),
+            (rows[2], Decision.MANUAL_REVIEW, "OWNER_MISMATCH"),
+            (rows[3], Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED"),
+            (rows[4], Decision.ALREADY_DONE, "SALE_ALREADY_WITHDRAWN_DISTANCE"),
+            (rows[5], Decision.NO_ACTION, "TEST_NO_ACTION"),
+        ):
+            add_check(db, imported, user, item, decision, reason)
+        result = execute_bulk_actions(db, config(DB_URL), imported.id, user.id)
+        assert result["started_count"] == 2
+        assert result["withdraw_count"] == 1
+        assert result["return_count"] == 1
+        assert result["production_write_enabled"] is False
+        writes = list(db.scalars(select(WriteOperationRecord)))
+        assert {row.event_id for row in writes} == {rows[0].event_id, rows[1].event_id}
+        assert {row.decision for row in writes} == {Decision.READY_TO_WITHDRAW.value, Decision.READY_TO_RETURN.value}
+        write_jobs = list(db.scalars(select(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)))
+        assert len(write_jobs) == 2
+        assert all(row.state == "PENDING" for row in write_jobs)
+        assert all(row.event_id not in {rows[2].event_id, rows[3].event_id, rows[4].event_id, rows[5].event_id} for row in write_jobs)
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_agent_control_result_remains_ready_until_explicit_bulk_confirmation(pg_factory):
+    item = event("CONTROL")
+    cfg = config(DB_URL)
+    with pg_factory() as db:
+        user, imported = seed_import(db, [item])
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        assert response["pending"] == 1
+        job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
+        assert job is not None
+        broker = AgentOrchestrationBroker(db, cfg)
+        broker.submit_result(
+            TOKEN,
+            AgentResult(
+                job.job_id,
+                job.operation_id,
+                "CIS_CHECKED",
+                cises=({
+                    "cis": item.kiz,
+                    "status": "IN_CIRCULATION",
+                    "statusEx": None,
+                    "withdrawReason": None,
+                    "ownerInn": OWN,
+                    "productGroup": "lp",
+                },),
+            ),
+        )
+        check = ImportRepository(db).latest_check(item.event_id)
+        assert check is not None and check.decision == Decision.READY_TO_WITHDRAW.value
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+        result = execute_bulk_actions(db, cfg, imported.id, user.id)
+        assert result["started_count"] == 1
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 1
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 1
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_http_upload_restore_history_and_machine_secret_non_exposure(pg_factory):
+    password = "very-secure-frontend-password"
+    cfg = config(DB_URL, agent=True, org=True)
+    with pg_factory() as db:
+        user = User(username="operator", password_hash=hash_password(password), is_active=True, is_admin=True)
+        db.add(user)
+        db.commit()
+    app = create_app(cfg, session_factory=pg_factory)
+    with TestClient(app) as client:
+        login(client, password)
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        uploaded = client.post(
+            "/api/files",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("wb-upload.xlsx", workbook_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        assert uploaded.status_code == 200
+        import_id = uploaded.json()["id"]
+        home = client.get("/api/workspace")
+        assert home.status_code == 200
+        assert home.json()["active_import_id"] == import_id
+        assert home.json()["history"][0]["id"] == import_id
+        view = client.get(f"/api/files/{import_id}/workspace")
+        assert view.status_code == 200
+        body = view.json()
+        assert body["file"]["filename"] == "wb-upload.xlsx"
+        assert body["runtime"]["production_write_enabled"] is False
+        combined = json.dumps({"home": home.json(), "view": body}, ensure_ascii=False)
+        assert TOKEN not in combined
+        assert "agent_machine_token" not in combined
+        assert "bearer" not in combined.lower()
+        bad_confirm = client.post(
+            f"/api/files/{import_id}/bulk-actions",
+            headers={"X-CSRF-Token": csrf},
+            json={"confirm": False},
+        )
+        assert bad_confirm.status_code == 422
+
+
+def test_production_write_default_remains_off():
+    assert WebConfig(database_url="sqlite:///ignored", own_inn=OWN).true_api_write_enabled is False
