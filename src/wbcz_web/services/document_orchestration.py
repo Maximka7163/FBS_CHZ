@@ -3,11 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from wbcz.control_engine import decide
-from wbcz.document_assembler import (
-    DocumentAssemblyManualReview,
-    OfficialP0DocumentAssembler,
-    PrimaryDocumentProvider,
-)
+from wbcz.document_assembler import OfficialP0DocumentAssembler, PrimaryDocumentProvider
 from wbcz.models import Decision, KiState, Outcome
 from wbcz_web.config import WebConfig
 from wbcz_web.models import CheckRecord
@@ -19,7 +15,7 @@ from wbcz_web.services.imports import record_to_event
 
 
 class AgentOrchestrationBroker(_BaseAgentOrchestrationBroker):
-    """P0 broker with exact VPS-side assembly and fail-closed manual review."""
+    """P0 broker with exact VPS-side assembly and fail-closed operator approval gate."""
 
     def __init__(
         self,
@@ -65,14 +61,7 @@ class AgentOrchestrationBroker(_BaseAgentOrchestrationBroker):
         self.db.add(check)
         self.db.flush()
 
-        if outcome.decision not in {Decision.READY_TO_WITHDRAW, Decision.READY_TO_RETURN}:
-            return
-        try:
-            document = self.document_assembler.build_exact(event, outcome.decision)
-        except DocumentAssemblyManualReview as exc:
-            check.decision = Decision.MANUAL_REVIEW.value
-            check.reason = exc.reason
-            check.error = "DOCUMENT_ASSEMBLY_BLOCKED"
-            self.db.flush()
-            return
-        self.prepare_approved_write(event_id, document, decision=outcome.decision)
+        # Control is intentionally decision-only. Exact document assembly and
+        # WRITE job creation require the separate authenticated bulk endpoint,
+        # which re-reads the latest backend decisions after operator confirmation.
+        return
