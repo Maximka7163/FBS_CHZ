@@ -1,224 +1,519 @@
 import "./app.css";
 import * as api from "./api";
-import type { EventItem, FileItem, Mode } from "./types";
+import type {
+  BulkPreview,
+  EventDetail,
+  FileItem,
+  FilterKey,
+  UserInfo,
+  WorkspaceItem,
+  WorkspaceView,
+} from "./types";
+import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
-let current: FileItem | null = null;
-let rows: EventItem[] = [];
-let mode: Mode = "CONTROL";
-let selected = new Set<string>();
-let decisionFilter = "ALL";
-let search = "";
-let preview: unknown = null;
-let selectionSummary: unknown = null;
-let selectionRequest = 0;
 
-const esc = (value: unknown) =>
-  String(value ?? "").replace(/[&<>"']/g, (char) =>
+let user: UserInfo | null = null;
+let homeHistory: FileItem[] = [];
+let current: WorkspaceView | null = null;
+let filter: FilterKey = "ALL";
+let query = "";
+let openDetail: string | null = null;
+let detailCache = new Map<string, EventDetail>();
+let uploading = false;
+let checking = false;
+let bulkBusy = false;
+let pollTimer: number | null = null;
+let viewToken = 0;
+
+const icons = {
+  mark: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.3c3.5 4.2 6 7 6 10.3a6 6 0 1 1-12 0c0-3.3 2.5-6.1 6-10.3Z" fill="currentColor"/><path d="M9.7 16.6c1.7.7 3.7-.1 4.5-1.7" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round"/></svg>`,
+  upload: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5m0 0-4 4m4-4 4 4M5 15v3.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  search: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.7" cy="10.7" r="5.7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.1 15.1 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  file: `<svg viewBox="0 0 24 28" aria-hidden="true"><path d="M5.5 1.5h8.8l5.2 5.2V25a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 25V3a1.5 1.5 0 0 1 1.5-1.5Z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M14 1.8V7h5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 12.3h8M8 15.5h8M8 18.7h5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  chevron: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8.5 10 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  copy: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M15 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`,
+  close: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+};
+
+function esc(value: unknown): string {
+  return String(value ?? "").replace(/[&<>"']/g, (char) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!,
   );
+}
 
-function shell(body: string, user = "") {
-  app.innerHTML = `<div class="top"><b>Маркировка</b><div>${
-    user
-      ? `<span class="muted">${esc(user)}</span><button id="logout" class="ghost">Выйти</button>`
-      : ""
-  }</div></div><div class="layout"><aside><div class="rail active">М</div></aside><main>${body}</main></div>`;
-  document.querySelector("#logout")?.addEventListener("click", async () => {
+function stopPolling(): void {
+  if (pollTimer !== null) window.clearTimeout(pollTimer);
+  pollTimer = null;
+}
+
+function importFromUrl(): string | null {
+  return new URL(window.location.href).searchParams.get("import");
+}
+
+function setImportUrl(importId: string | null): void {
+  const url = new URL(window.location.href);
+  if (importId) url.searchParams.set("import", importId);
+  else url.searchParams.delete("import");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function fmtHistoryDate(value: string | null): string {
+  if (!value) return "—";
+  return new Date(value).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtDate(value: string | null): string {
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString("ru-RU");
+}
+
+function shell(content: string): void {
+  const initials = (user?.username || "").slice(0, 2).toUpperCase();
+  app.innerHTML = `
+    <header class="topbar">
+      <div class="brand">markflow</div>
+      <div class="topbar-right">
+        <span class="safety-indicator"><i></i>Отправка в ЧЗ отключена</span>
+        <span class="profile" title="${esc(user?.username || "")}">${esc(initials)}</span>
+        <button id="logout" class="quiet-button">Выйти</button>
+      </div>
+    </header>
+    <aside class="rail" aria-label="Навигация"><div class="rail-mark">${icons.mark}</div></aside>
+    <main class="main">${content}</main>
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>`;
+  document.querySelector<HTMLButtonElement>("#logout")?.addEventListener("click", async () => {
+    stopPolling();
     await api.logout();
     await api.seedCsrf();
+    user = null;
     renderLogin();
   });
 }
 
-function renderLogin(error = "") {
-  app.innerHTML = `<div class="login-wrap"><form class="login-card" id="login"><div class="brand">Маркировка</div><h1>Вход</h1><p>Закрытая рабочая область</p>${
-    error ? `<div class="errorbox">${esc(error)}</div>` : ""
-  }<label>Логин<input id="u" autocomplete="username" required></label><label>Пароль<input id="p" type="password" autocomplete="current-password" required></label><button class="primary">Войти</button></form></div>`;
-  document.querySelector<HTMLFormElement>("#login")!.onsubmit = async (event) => {
+function renderLogin(error = ""): void {
+  stopPolling();
+  app.innerHTML = `<main class="login-page"><form id="login" class="login-card">
+    <div class="login-brand">markflow</div>
+    <h1>Маркировка</h1>
+    <p>Рабочая область WB FBS</p>
+    ${error ? `<div class="login-error">${esc(error)}</div>` : ""}
+    <label>Логин<input id="username" autocomplete="username" required></label>
+    <label>Пароль<input id="password" type="password" autocomplete="current-password" required></label>
+    <button class="primary-button wide" type="submit">Войти</button>
+  </form></main>`;
+  document.querySelector<HTMLFormElement>("#login")!.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
-      await api.login(
-        document.querySelector<HTMLInputElement>("#u")!.value,
-        document.querySelector<HTMLInputElement>("#p")!.value,
+      user = await api.login(
+        document.querySelector<HTMLInputElement>("#username")!.value,
+        document.querySelector<HTMLInputElement>("#password")!.value,
       );
-      await renderHome();
-    } catch (error) {
-      renderLogin((error as Error).message);
+      await restoreInitialView();
+    } catch (e) {
+      renderLogin(readError(e));
     }
-  };
-}
-
-async function renderHome() {
-  const user = await api.me();
-  const list = (await api.files()) as FileItem[];
-  shell(
-    `<div class="headline"><div><h1>Вывод и возврат КИЗ · WB FBS</h1><span class="safety">Тестовый контроль ЧЗ · Отправка документов отключена</span></div></div><label class="drop"><input id="file" type="file" accept=".xlsx"><strong>Загрузить XLSX Wildberries</strong><span>Перетащите файл или нажмите для выбора</span></label><section class="recent"><h2>Последние файлы</h2>${
-      list.length
-        ? list
-            .map(
-              (file) =>
-                `<button class="file-row" data-id="${file.id}"><span><b>${esc(file.filename)}</b><small>${esc(file.imported_at || "")}</small></span><span>${file.new_events} новых · ${file.duplicate_events} duplicate · ${file.unique_kiz} КИЗ</span><span>${file.repeated ? "Повторный" : "Обработан"}</span></button>`,
-            )
-            .join("")
-        : `<div class="empty">Файлов пока нет</div>`
-    }</section>`,
-    user.username,
-  );
-  document.querySelectorAll<HTMLElement>(".file-row").forEach((element) => {
-    element.onclick = () => openFile(element.dataset.id!);
   });
-  document.querySelector<HTMLInputElement>("#file")!.onchange = async (event) => {
-    const file = (event.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-    try {
-      const result = await api.upload(file);
-      await openFile(result.id);
-    } catch (error) {
-      alert((error as Error).message);
-    }
-  };
 }
 
-function filtered() {
-  return rows.filter(
-    (row) =>
-      (decisionFilter === "ALL" || row.decision === decisionFilter) &&
-      (!search || row.kiz.toLowerCase().includes(search.toLowerCase())),
-  );
+function pageHeading(): string {
+  return `<div class="page-heading"><h1>Вывод и возврат КИЗ · WB FBS</h1></div>`;
 }
 
-const modeLabels: Record<Mode, string> = {
-  AUTO: "Автоматически",
-  CONTROL: "Контроль",
-  WITHDRAW_ONLY: "Вывод из оборота",
-  RETURN_ONLY: "Возврат в оборот",
+function uploadBlock(): string {
+  return `<section id="dropzone" class="dropzone ${uploading ? "busy" : ""}" tabindex="0" aria-label="Загрузить XLSX Wildberries">
+    <input id="file" type="file" accept=".xlsx" hidden ${uploading ? "disabled" : ""}>
+    <div class="drop-icon">${uploading ? '<span class="spinner"></span>' : icons.upload}</div>
+    <strong>${uploading ? "Загружаем файл…" : "Перетащите XLSX сюда"}</strong>
+    <span>${uploading ? "Проверяем структуру на backend" : "или нажмите, чтобы выбрать файл"}</span>
+  </section>
+  <details class="wb-hint"><summary>Как получить файл WB</summary><p>В кабинете Wildberries выгрузите XLSX-архив FBS с КИЗ и данными операций. Загружайте исходный файл без ручного редактирования.</p></details>`;
+}
+
+function historySection(items: FileItem[], currentId: string | null): string {
+  return `<section class="history-section" id="history">
+    <div class="section-title"><h2>История файлов</h2></div>
+    ${items.length ? `<div class="history-list">${items.map((item) => `
+      <button class="history-row ${item.id === currentId ? "active" : ""}" data-open-import="${esc(item.id)}">
+        <span class="history-file-icon">${icons.file}</span>
+        <span class="history-name"><b>${esc(item.filename)}</b><small>${fmtHistoryDate(item.imported_at)}</small></span>
+        <span class="history-status status-${esc(item.workflow_status || "uploaded")}"><i></i>${esc(item.workflow_status_label || "Загружен")}</span>
+        <span class="history-kiz">${item.unique_kiz} КИЗ</span>
+      </button>`).join("")}</div>` : `<div class="history-empty">Загруженных файлов пока нет</div>`}
+  </section>`;
+}
+
+function bindHistory(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-open-import]").forEach((button) => {
+    button.addEventListener("click", () => void openImport(button.dataset.openImport!));
+  });
+}
+
+function bindUpload(): void {
+  const drop = document.querySelector<HTMLElement>("#dropzone");
+  const input = document.querySelector<HTMLInputElement>("#file");
+  if (!drop || !input) return;
+  const pick = () => { if (!uploading) input.click(); };
+  drop.addEventListener("click", pick);
+  drop.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(); }
+  });
+  input.addEventListener("change", () => {
+    const file = input.files?.[0];
+    if (file) void loadFile(file);
+  });
+  drop.addEventListener("dragover", (event) => { event.preventDefault(); if (!uploading) drop.classList.add("drag"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault();
+    drop.classList.remove("drag");
+    const file = event.dataTransfer?.files?.[0];
+    if (file && !uploading) void loadFile(file);
+  });
+}
+
+function renderHome(): void {
+  current = null;
+  filter = "ALL";
+  query = "";
+  openDetail = null;
+  setImportUrl(null);
+  shell(`${pageHeading()}${uploadBlock()}${historySection(homeHistory, null)}`);
+  bindUpload();
+  bindHistory();
+}
+
+async function refreshHomeHistory(): Promise<void> {
+  const home = await api.workspaceHome();
+  homeHistory = home.history;
+}
+
+async function loadFile(file: File): Promise<void> {
+  if (!file.name.toLocaleLowerCase("ru-RU").endsWith(".xlsx")) {
+    showToast("Поддерживается только формат XLSX", "error");
+    return;
+  }
+  uploading = true;
+  renderHome();
+  try {
+    const imported = await api.upload(file);
+    await refreshHomeHistory();
+    await openImport(imported.id, true);
+  } catch (e) {
+    showToast(readError(e), "error");
+    uploading = false;
+    renderHome();
+  } finally {
+    uploading = false;
+  }
+}
+
+const filterLabels: Record<FilterKey, string> = {
+  ALL: "Все",
+  READY: "Готово",
+  PROCESSING: "В работе",
+  ATTENTION: "Требует внимания",
+  DONE: "Выполнено",
+  ERROR: "Ошибка",
 };
 
-function renderWorkspace(user: string) {
+function filterBar(view: WorkspaceView): string {
+  return `<div class="filter-line">
+    <div class="filter-tabs" role="tablist" aria-label="Фильтр состояний">
+      ${(Object.keys(filterLabels) as FilterKey[]).map((key) => `<button class="filter-tab ${filter === key ? "active" : ""}" data-filter="${key}">${filterLabels[key]}<span>${view.filters[key] || 0}</span></button>`).join("")}
+    </div>
+    <label class="search-field">${icons.search}<input id="search" autocomplete="off" placeholder="Поиск по КИЗ" value="${esc(query)}"></label>
+  </div>`;
+}
+
+function decisionBadge(item: WorkspaceItem): string {
+  const tone = stateTone(item);
+  return `<span class="badge ${tone}">${esc(item.decision_label)}</span>`;
+}
+
+function stateCell(item: WorkspaceItem): string {
+  const tone = stateTone(item);
+  return `<span class="result-state ${tone}"><i></i>${esc(item.state_label)}</span>`;
+}
+
+function tableRows(view: WorkspaceView): string {
+  const list = filterWorkspaceItems(view.items, filter, query);
+  if (!list.length) return `<tr><td colspan="6"><div class="table-empty">По этому фильтру строк нет</div></td></tr>`;
+  return list.map((item) => `
+    <tr class="work-row tone-${stateTone(item)}">
+      <td><div class="kiz-line"><code title="${esc(item.kiz)}">${esc(shortKiz(item.kiz))}</code><button class="copy-button" data-copy-kiz="${esc(item.kiz)}" title="Копировать КИЗ">${icons.copy}</button></div></td>
+      <td>${esc(item.operation_label)}</td>
+      <td>${esc(item.chz_status)}</td>
+      <td>${decisionBadge(item)}</td>
+      <td>${item.action_label !== "—" ? `<span class="action-text">${esc(item.action_label)}</span>` : '<span class="dash">—</span>'}</td>
+      <td><div class="result-cell">${stateCell(item)}<button class="detail-toggle ${openDetail === item.event_id ? "open" : ""}" data-detail="${esc(item.event_id)}" title="Подробности">${icons.chevron}</button></div></td>
+    </tr>
+    ${openDetail === item.event_id ? `<tr class="detail-row"><td colspan="6"><div id="detail-${esc(item.event_id)}" class="detail-panel">${detailMarkup(item, detailCache.get(item.event_id))}</div></td></tr>` : ""}`
+  ).join("");
+}
+
+function detailMarkup(item: WorkspaceItem, detail?: EventDetail): string {
+  const problem = item.filter_group === "ATTENTION" || item.filter_group === "ERROR";
+  return `<div class="detail-layout">
+    ${problem ? `<section class="problem-card ${item.filter_group === "ERROR" ? "error" : "attention"}">
+      <strong>${esc(item.attention_title || item.decision_label)}</strong>
+      <p>${esc(item.attention_detail || "Backend остановил автоматическую обработку.")}</p>
+      ${item.user_action ? `<div class="user-action"><span>Что делать</span>${esc(item.user_action)}</div>` : ""}
+    </section>` : ""}
+    <section class="detail-data">
+      <div><span>КИЗ</span><code>${esc(item.kiz)}</code></div>
+      <div><span>Задание WB</span><b>${esc(item.details.task_number || "—")}</b></div>
+      <div><span>Стикер</span><b>${esc(item.details.sticker || "—")}</b></div>
+      <div><span>Дата операции</span><b>${fmtDate(item.details.occurred_at)}</b></div>
+      <div><span>Чек</span><b>${esc(item.details.receipt_number || "—")}</b></div>
+      <div><span>Сумма</span><b>${esc(item.details.amount)} ${esc(item.details.currency)}</b></div>
+    </section>
+    ${detail ? `<section class="kiz-history"><div class="detail-section-head"><strong>История КИЗ</strong><span>${detail.history.length}</span></div>${detail.history.map((entry) => `<div class="history-event"><span>${esc(entry.operation === "SALE" ? "Продажа" : entry.operation === "RETURN" ? "Возврат" : entry.operation)}</span><span>${fmtDate(entry.occurred_at)}</span><span>Задание ${esc(entry.task_number)}</span></div>`).join("")}${detail.history_order_ambiguous ? '<p class="inline-warning">Порядок событий неоднозначен — автоматическое действие запрещено.</p>' : ""}</section>` : '<div class="detail-loading">Загружаем историю…</div>'}
+    ${(item.reason || item.error) ? `<details class="technical-detail"><summary>Технические детали</summary><code>${esc(item.reason || "")}${item.error ? ` · ${esc(item.error)}` : ""}</code></details>` : ""}
+  </div>`;
+}
+
+function statusBanner(view: WorkspaceView): string {
+  const processing = view.filters.PROCESSING || 0;
+  const ready = view.bulk.eligible_count;
+  if (checking) return `<div class="workflow-status progress"><span class="spinner"></span><strong>Проверяем КИЗ</strong><span>Результаты появятся в таблице</span></div>`;
+  if (processing) return `<div class="workflow-status progress"><span class="pulse"></span><strong>Обработка продолжается</strong><span>Состояние восстанавливается из backend; страницу можно обновить</span></div>`;
+  if (ready) return `<div class="workflow-status ready"><span class="dot"></span><strong>Готово к обработке</strong><span>Backend разрешил ${ready} ${plural(ready, "действие", "действия", "действий")}</span></div>`;
+  return "";
+}
+
+function bulkBar(view: WorkspaceView): string {
+  const total = view.bulk.eligible_count;
+  return `<div class="bulk-bar">
+    <div class="bulk-copy">${total ? `<strong>${total} ${plural(total, "готовое действие", "готовых действия", "готовых действий")}</strong><span>Состав определён backend</span>` : `<strong>Готовых действий нет</strong><span>Сначала проверьте КИЗ или устраните проблемы</span>`}</div>
+    <button id="bulk-action" class="primary-button" ${total === 0 || bulkBusy ? "disabled" : ""}>${bulkBusy ? '<span class="spinner light"></span>Запускаем…' : "Выполнить готовые действия"}</button>
+  </div>`;
+}
+
+function workspaceMarkup(view: WorkspaceView): string {
+  return `${pageHeading()}
+  <section class="workspace-card">
+    <div class="active-file-row">
+      <div class="active-file"><span class="file-icon">${icons.file}</span><div><strong>${esc(view.file.filename)}</strong><span>${view.file.unique_kiz} КИЗ</span></div></div>
+      <div class="file-actions"><button id="check" class="secondary-button" ${checking ? "disabled" : ""}>${checking ? '<span class="spinner"></span>Проверяем…' : "Проверить КИЗ"}</button><button id="replace" class="quiet-button">Другой файл</button></div>
+    </div>
+    ${statusBanner(view)}
+    ${filterBar(view)}
+    <div class="table-shell"><table class="work-table"><thead><tr><th>КИЗ</th><th>Операция WB</th><th>Состояние ЧЗ</th><th>Решение</th><th>Действие</th><th>Результат</th></tr></thead><tbody id="work-rows">${tableRows(view)}</tbody></table></div>
+    ${bulkBar(view)}
+  </section>
+  ${historySection(homeHistory, view.file.id)}`;
+}
+
+function renderWorkspace(): void {
   if (!current) return;
-  const visible = filtered();
-  const modeButtons = (Object.keys(modeLabels) as Mode[])
-    .map(
-      (item) =>
-        `<button type="button" class="mode-button ${mode === item ? "active" : ""}" data-mode="${item}">${modeLabels[item]}</button>`,
-    )
-    .join("");
-  shell(
-    `<div class="file-head"><div><button id="back" class="back">←</button><b>${esc(current.filename)}</b><span>${current.unique_kiz} КИЗ · ${current.row_count} строк</span></div><span class="safety">Тестовый контроль ЧЗ · Отправка документов отключена</span></div><div class="mode-group">${modeButtons}</div><div class="toolbar"><input id="search" placeholder="Поиск КИЗ" value="${esc(search)}"><select id="filter"><option value="ALL">Все решения</option>${[
-      "READY_TO_WITHDRAW",
-      "READY_TO_RETURN",
-      "ALREADY_DONE",
-      "MANUAL_REVIEW",
-      "ERROR",
-    ]
-      .map(
-        (item) => `<option ${decisionFilter === item ? "selected" : ""}>${item}</option>`,
-      )
-      .join("")}</select><button id="check" class="primary">Проверить КИЗ</button><small>${visible.length} видимых</small></div><div class="table-wrap"><table><thead><tr><th><input id="all" type="checkbox"></th><th>КИЗ</th><th>Операция WB</th><th>Дата</th><th>Чек</th><th>Решение</th><th>Причина</th></tr></thead><tbody>${visible
-      .map(
-        (row) =>
-          `<tr><td><input class="sel" type="checkbox" data-id="${row.event_id}" ${selected.has(row.event_id) ? "checked" : ""}></td><td class="mono">${esc(row.kiz)}</td><td>${esc(row.operation)}</td><td>${esc(row.occurred_at || "—")}</td><td>${esc(row.receipt_number || "—")}</td><td>${row.decision ? `<span class="pill ${row.decision}">${esc(row.decision)}</span>` : "—"}</td><td>${esc(row.reason_text || row.reason || "—")}</td></tr>`,
-      )
-      .join("")}</tbody></table></div>${
-      selected.size
-        ? `<div class="opbar"><b>Выбрано ${selected.size}</b><span>${mode === "CONTROL" ? "Только контроль состояния" : "Preview без отправки"}</span>${mode !== "CONTROL" ? `<button id="preview" class="primary">Проверить состав</button>` : ""}</div>`
-        : ""
-    }`,
-    user,
-  );
+  shell(workspaceMarkup(current));
+  bindWorkspaceEvents();
+  bindHistory();
+}
 
-  document.querySelector("#back")!.addEventListener("click", () => {
-    current = null;
-    rows = [];
-    selected.clear();
-    preview = null;
-    selectionSummary = null;
-    selectionRequest++;
-    renderHome();
-  });
-  document.querySelector<HTMLInputElement>("#search")!.oninput = (event) => {
-    search = (event.target as HTMLInputElement).value;
-    renderWorkspace(user);
-  };
-  document.querySelector<HTMLSelectElement>("#filter")!.onchange = (event) => {
-    decisionFilter = (event.target as HTMLSelectElement).value;
-    renderWorkspace(user);
-  };
-  document.querySelectorAll<HTMLInputElement>(".sel").forEach((box) => {
-    box.onchange = () => {
-      box.checked ? selected.add(box.dataset.id!) : selected.delete(box.dataset.id!);
-      preview = null;
-      selectionSummary = null;
-      selectionRequest++;
-      renderWorkspace(user);
-    };
-  });
-  document.querySelector<HTMLInputElement>("#all")!.onchange = (event) => {
-    const checked = (event.target as HTMLInputElement).checked;
-    for (const row of visible) checked ? selected.add(row.event_id) : selected.delete(row.event_id);
-    preview = null;
-    selectionSummary = null;
-    selectionRequest++;
-    renderWorkspace(user);
-  };
-
-  document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((button) => {
-    button.addEventListener("click", () => {
-      const nextMode = button.dataset.mode as Mode;
-      if (nextMode === mode) return;
-      mode = nextMode;
-      selected.clear();
-      preview = null;
-      selectionSummary = null;
-      selectionRequest++;
-      renderWorkspace(user);
+function bindRowEvents(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-copy-kiz]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(button.dataset.copyKiz || "");
+      showToast("КИЗ скопирован");
     });
   });
-  const checkButton = document.querySelector<HTMLButtonElement>("#check")!;
-  checkButton.addEventListener("click", async () => {
-    selectionSummary = await api.control(
-      current!.id,
-      mode,
-      selected.size ? [...selected] : null,
-    );
-    rows = await api.events(current!.id);
-    preview = null;
-    renderWorkspace(user);
-  });
-  document.querySelector<HTMLButtonElement>("#preview")?.addEventListener("click", async () => {
-    preview = await api.preview(current!.id, mode, [...selected]);
-    const result = preview as {
-      eligible_count: number;
-      withdraw_count: number;
-      return_count: number;
-      excluded_count: number;
-    };
-    alert(
-      `Допустимо: ${result.eligible_count}\nВывод: ${result.withdraw_count}\nВозврат: ${result.return_count}\nИсключено: ${result.excluded_count}`,
-    );
+  document.querySelectorAll<HTMLButtonElement>("[data-detail]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.detail!;
+      openDetail = openDetail === id ? null : id;
+      renderWorkspace();
+      if (openDetail && !detailCache.has(id)) {
+        try {
+          detailCache.set(id, await api.eventDetail(id));
+          if (openDetail === id) renderWorkspace();
+        } catch (e) {
+          showToast(readError(e), "error");
+        }
+      }
+    });
   });
 }
 
-async function openFile(id: string) {
-  const user = await api.me();
-  current = await api.fileInfo(id);
-  rows = await api.events(id);
-  selected.clear();
-  preview = null;
-  selectionSummary = null;
-  selectionRequest++;
-  search = "";
-  decisionFilter = "ALL";
-  mode = "CONTROL";
-  renderWorkspace(user.username);
+function bindWorkspaceEvents(): void {
+  document.querySelector<HTMLButtonElement>("#replace")?.addEventListener("click", () => {
+    stopPolling();
+    renderHome();
+  });
+  document.querySelector<HTMLButtonElement>("#check")?.addEventListener("click", () => void runCheck());
+  document.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => {
+    query = (event.target as HTMLInputElement).value;
+    renderTableOnly();
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      filter = button.dataset.filter as FilterKey;
+      renderWorkspace();
+    });
+  });
+  bindRowEvents();
+  document.querySelector<HTMLButtonElement>("#bulk-action")?.addEventListener("click", () => void confirmBulk());
 }
+
+function renderTableOnly(): void {
+  if (!current) return;
+  const body = document.querySelector<HTMLTableSectionElement>("#work-rows");
+  if (!body) { renderWorkspace(); return; }
+  body.innerHTML = tableRows(current);
+  bindRowEvents();
+}
+
+async function openImport(importId: string, replaceUrl = true): Promise<void> {
+  stopPolling();
+  const token = ++viewToken;
+  if (replaceUrl) setImportUrl(importId);
+  filter = "ALL";
+  query = "";
+  openDetail = null;
+  detailCache.clear();
+  try {
+    const [view, home] = await Promise.all([api.workspace(importId), api.workspaceHome()]);
+    if (token !== viewToken) return;
+    current = view;
+    homeHistory = home.history;
+    renderWorkspace();
+    schedulePollIfNeeded(token);
+  } catch (e) {
+    showToast(readError(e), "error");
+    await refreshHomeHistory();
+    renderHome();
+  }
+}
+
+async function refreshCurrent(token = viewToken): Promise<void> {
+  if (!current) return;
+  const importId = current.file.id;
+  const [view, home] = await Promise.all([api.workspace(importId), api.workspaceHome()]);
+  if (token !== viewToken || current?.file.id !== importId) return;
+  current = view;
+  homeHistory = home.history;
+  renderWorkspace();
+  schedulePollIfNeeded(token);
+}
+
+function schedulePollIfNeeded(token: number): void {
+  stopPolling();
+  if (!current || !shouldPollWorkspace(current.items)) return;
+  pollTimer = window.setTimeout(async () => {
+    try { await refreshCurrent(token); }
+    catch (e) { showToast(readError(e), "error"); }
+  }, 1800);
+}
+
+async function runCheck(): Promise<void> {
+  if (!current || checking) return;
+  checking = true;
+  renderWorkspace();
+  try {
+    await api.control(current.file.id);
+    await refreshCurrent();
+  } catch (e) {
+    showToast(readError(e), "error");
+  } finally {
+    checking = false;
+    if (current) renderWorkspace();
+  }
+}
+
+async function confirmBulk(): Promise<void> {
+  if (!current || bulkBusy) return;
+  try {
+    const preview = await api.bulkPreview(current.file.id);
+    if (!preview.eligible_count) {
+      showToast("Backend не разрешил ни одного готового действия");
+      await refreshCurrent();
+      return;
+    }
+    renderBulkModal(preview);
+  } catch (e) {
+    showToast(readError(e), "error");
+  }
+}
+
+function renderBulkModal(preview: BulkPreview): void {
+  const root = document.createElement("div");
+  root.className = "modal-root";
+  root.innerHTML = `<div class="modal-backdrop" data-close-modal></div><section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-title">
+    <button class="modal-close" data-close-modal title="Закрыть">${icons.close}</button>
+    <h2 id="bulk-title">Выполнить готовые действия?</h2>
+    <p>Состав повторно рассчитан backend. Проблемные и уже обработанные строки не попадут в выполнение.</p>
+    <div class="confirm-counts"><div><b>${preview.eligible_count}</b><span>Всего</span></div><div><b>${preview.withdraw_count}</b><span>Выводов</span></div><div><b>${preview.return_count}</b><span>Возвратов</span></div></div>
+    <div class="confirm-note">Отправка в production True API сейчас отключена системным gate. Интерфейс не может включить её.</div>
+    <div class="modal-actions"><button class="secondary-button" data-close-modal>Отмена</button><button id="confirm-bulk" class="primary-button">Выполнить ${preview.eligible_count}</button></div>
+  </section>`;
+  document.body.appendChild(root);
+  const close = () => root.remove();
+  root.querySelectorAll<HTMLElement>("[data-close-modal]").forEach((element) => element.addEventListener("click", close));
+  root.querySelector<HTMLButtonElement>("#confirm-bulk")!.addEventListener("click", async () => {
+    close();
+    if (!current) return;
+    bulkBusy = true;
+    renderWorkspace();
+    try {
+      const result = await api.executeBulk(current.file.id);
+      if (result.manual_review_count) {
+        showToast(`${result.manual_review_count} ${plural(result.manual_review_count, "строка требует", "строки требуют", "строк требуют")} внимания`, "warn");
+      } else {
+        showToast(`Запущено: ${result.started_count}`);
+      }
+      await refreshCurrent();
+    } catch (e) {
+      showToast(readError(e), "error");
+    } finally {
+      bulkBusy = false;
+      if (current) renderWorkspace();
+    }
+  });
+}
+
+function showToast(message: string, tone: "normal" | "warn" | "error" = "normal"): void {
+  const root = document.querySelector<HTMLDivElement>("#toast-root");
+  if (!root) return;
+  const node = document.createElement("div");
+  node.className = `toast ${tone}`;
+  node.textContent = message;
+  root.appendChild(node);
+  requestAnimationFrame(() => node.classList.add("show"));
+  window.setTimeout(() => { node.classList.remove("show"); window.setTimeout(() => node.remove(), 180); }, 3200);
+}
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  const mod10 = n % 10;
+  return mod10 === 1 ? one : mod10 >= 2 && mod10 <= 4 ? few : many;
+}
+
+function readError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function restoreInitialView(): Promise<void> {
+  const home = await api.workspaceHome();
+  homeHistory = home.history;
+  const requested = importFromUrl();
+  const target = requested || home.active_import_id;
+  if (target) await openImport(target, !requested);
+  else renderHome();
+}
+
+window.addEventListener("popstate", () => {
+  const importId = importFromUrl();
+  if (importId) void openImport(importId, false);
+  else renderHome();
+});
 
 (async () => {
   await api.seedCsrf();
   try {
-    await api.me();
-    await renderHome();
+    user = await api.me();
+    await restoreInitialView();
   } catch {
     renderLogin();
   }
