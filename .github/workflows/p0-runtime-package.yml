@@ -121,25 +121,29 @@ jobs:
           WBCZ_BROWSER_SCREENSHOT_DIR: candidate-browser-artifacts
         run: |
           set -euo pipefail
-          (cd source && python -m wbcz_web --host 127.0.0.1 --port 8765 > "$RUNNER_TEMP/candidate-backend.log" 2>&1) &
+          (cd source && exec python -m wbcz_web --host 127.0.0.1 --port 8765 > "$RUNNER_TEMP/candidate-backend.log" 2>&1) &
           echo $! > "$RUNNER_TEMP/candidate-backend.pid"
-          (cd source/frontend && npm run dev -- --host 127.0.0.1 --port 5173 > "$RUNNER_TEMP/candidate-vite.log" 2>&1) &
+          (cd source/frontend && exec npm run dev -- --host 127.0.0.1 --port 5173 > "$RUNNER_TEMP/candidate-vite.log" 2>&1) &
           echo $! > "$RUNNER_TEMP/candidate-vite.pid"
           for i in $(seq 1 40); do curl -fsS http://127.0.0.1:8765/api/health >/dev/null && break; sleep 1; done
           curl -fsS http://127.0.0.1:8765/api/health >/dev/null
           for i in $(seq 1 40); do curl -fsS http://127.0.0.1:5173/ >/dev/null && break; sleep 1; done
           curl -fsS http://127.0.0.1:5173/ >/dev/null
-          python source/tests/browser_p0_frontend.py
-          grep -q 'BROWSER_P0_FLOW=PASS' <(python - <<'PY'
-          print('BROWSER_P0_FLOW=PASS')
-          PY
-          )
+          python source/tests/browser_p0_frontend.py | tee "$RUNNER_TEMP/browser-flow.out"
+          grep -Fx 'BROWSER_P0_FLOW=PASS' "$RUNNER_TEMP/browser-flow.out"
       - name: Stop browser validation services
         if: always()
         shell: bash
         run: |
           test -f "$RUNNER_TEMP/candidate-backend.pid" && kill "$(cat "$RUNNER_TEMP/candidate-backend.pid")" 2>/dev/null || true
           test -f "$RUNNER_TEMP/candidate-vite.pid" && kill "$(cat "$RUNNER_TEMP/candidate-vite.pid")" 2>/dev/null || true
+          fuser -k 8765/tcp 2>/dev/null || true
+          fuser -k 5173/tcp 2>/dev/null || true
+          for i in $(seq 1 10); do
+            if ! curl -fsS http://127.0.0.1:8765/api/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          ! curl -fsS http://127.0.0.1:8765/api/health >/dev/null 2>&1
       - name: Production env and agent-safe bootstrap regression
         shell: bash
         run: |
@@ -234,6 +238,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          fuser -k 8765/tcp 2>/dev/null || true
           ROOT="$GITHUB_WORKSPACE/bundle-a/extracted/$BACKEND_ROOT"
           WBCZ_INIT_TEST_MODE=1 WBCZ_ENV_FILE_TARGET="$RUNNER_TEMP/bundle.env" sh "$ROOT/deploy/init-production-env.sh"
           set -a
