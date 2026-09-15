@@ -261,8 +261,9 @@ def test_fastapi_agent_endpoints_dispatch_machine_auth_and_duplicate_result_once
         assert completed is not None and completed.state == "COMPLETED"
         checks = list(db.scalars(select(CheckRecord).where(CheckRecord.event_id == event.event_id)))
         assert len(checks) == 1
-        assert checks[0].decision == Decision.MANUAL_REVIEW.value
-        assert checks[0].reason == "ORGANISATION_CONFIG_MISSING"
+        assert checks[0].decision == Decision.READY_TO_WITHDRAW.value
+        assert checks[0].reason == "SALE_IN_CIRCULATION"
+        assert db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) is None
 
 
 def test_direct_vps_true_api_production_path_is_absent():
