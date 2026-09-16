@@ -1,0 +1,233 @@
++    job_type: str
++    method: str
++    target: str
++    body: Any
++    audit_endpoint: str
++    cis_count: int = 0
++
++
++@dataclass(frozen=True, slots=True)
++class SafeTransportError:
++    http_status: int
++    content_type: str | None
++    safe_error_code: str | None
++    safe_error_message: str | None
++    body_sha256: str
++    raw_body_preview: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class TrueApiCisInfoWire:
++    requested_cis: str
++    cis_info: dict[str, Any] | None
++    error_code: str | None
++    error_message: str | None
++    raw: dict[str, Any]
++
++
++@dataclass(frozen=True, slots=True)
++class TrueApiCisSearchWire:
++    raw: dict[str, Any]
++    cis: str | None = None
++    sgtin: str | None = None
++    gtin: str | None = None
++    ownerInn: str | None = None
++    status: str | None = None
++    statusExt: str | None = None
++    eliminationReason: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class TrueApiCisHistoryWire:
++    raw: dict[str, Any]
++    cis: str | None = None
++    gtin: str | None = None
++    status: str | None = None
++    ownerInn: str | None = None
++    operationDate: Any = None
++    timestamp: Any = None
++
++
++@dataclass(frozen=True, slots=True)
++class TrueApiAggregateWire:
++    requested_cis: str
++    raw: dict[str, Any]
++
++
++@dataclass(frozen=True, slots=True)
++class TrueApiAggregationHistoryWire:
++    raw: dict[str, Any]
++    cis: str | None = None
++    operationType: str | None = None
++    operationDate: Any = None
++    packageType: str | None = None
++    extendedPackageType: str | None = None
++    parent: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class TrueApiProductInfoWire:
++    raw: dict[str, Any]
++    gtin: str | None = None
++    name: str | None = None
++    brand: str | None = None
++    productGroup: str | None = None
++    goodMarkFlag: bool | None = None
++    goodTurnFlag: bool | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class CisInventoryState:
++    requested_cis: str
++    cis: str | None
++    gtin: str | None
++    product_name: str | None
++    product_group: str | None
++    owner_inn: str | None
++    owner_name: str | None
++    status: str | None
++    status_ex: str | None
++    withdraw_reason: str | None
++    withdraw_reason_other: str | None
++    parent: Any
++    child: Any
++    raw: dict[str, Any]
++
++
++@dataclass(frozen=True, slots=True)
++class ProductEnrichmentState:
++    gtin: str
++    state: str
++    product: dict[str, Any] | None
++
++
++class SharedRateLimiter:
++    """Deterministic spacing limiter. One shared instance caps transport to <= max_rps."""
++
++    def __init__(
++        self,
++        max_rps: int = GLOBAL_TRUE_API_RPS,
++        *,
++        clock: Callable[[], float] = time.monotonic,
++        sleeper: Callable[[float], None] = time.sleep,
++    ) -> None:
++        if not isinstance(max_rps, int) or max_rps <= 0:
++            raise ValueError("max_rps must be a positive integer")
++        self.max_rps = max_rps
++        self._interval = 1.0 / max_rps
++        self._clock = clock
++        self._sleeper = sleeper
++        self._next_allowed = 0.0
++        self._lock = threading.Lock()
++
++    def acquire(self) -> None:
++        with self._lock:
++            now = self._clock()
++            wait = max(0.0, self._next_allowed - now)
++            if wait:
++                self._sleeper(wait)
++                now = self._clock()
++            self._next_allowed = max(self._next_allowed, now) + self._interval
++
++
++def _expect_object(value: Any, label: str) -> dict[str, Any]:
++    if not isinstance(value, dict):
++        raise CisInventoryContractError(f"{label} must be an object")
++    return dict(value)
++
++
++def _expect_string(value: Any, label: str, *, allow_empty: bool = False) -> str:
++    if not isinstance(value, str):
++        raise CisInventoryContractError(f"{label} must be a string")
++    if not allow_empty and not value:
++        raise CisInventoryContractError(f"{label} must not be empty")
++    return value
++
++
++def _expect_string_array(value: Any, label: str, *, max_items: int | None = None) -> list[str]:
++    if not isinstance(value, list):
++        raise CisInventoryContractError(f"{label} must be an array")
++    if max_items is not None and len(value) > max_items:
++        raise CisInventoryContractError(f"{label} exceeds max {max_items}")
++    result: list[str] = []
++    for index, item in enumerate(value):
++        result.append(_expect_string(item, f"{label}[{index}]"))
++    return result
++
++
++def _validate_period(value: Any, label: str) -> dict[str, Any]:
++    period = _expect_object(value, label)
++    # v726.0 documents only from/to. Their per-key requiredness is not proven,
++    # so M1 accepts either or both but never invents another period key.
++    if not period:
++        raise CisInventoryContractError(f"{label} must not be empty")
++    unknown = set(period) - {"from", "to"}
++    if unknown:
++        raise CisInventoryContractError(f"{label} has unknown fields: {sorted(unknown)}")
++    for key, item in period.items():
++        _expect_string(item, f"{label}.{key}")
++    return period
++
++
++def _validate_states(value: Any) -> list[dict[str, Any]]:
++    if not isinstance(value, list):
++        raise CisInventoryContractError("filter.states must be an array")
++    result: list[dict[str, Any]] = []
++    for index, item in enumerate(value):
++        state = _expect_object(item, f"filter.states[{index}]")
++        unknown = set(state) - {"status", "statusExt", "isStatusExtNull"}
++        if unknown:
++            raise CisInventoryContractError(
++                f"filter.states[{index}] has unknown fields: {sorted(unknown)}"
++            )
++        normalized: dict[str, Any] = {}
++        for key in ("status", "statusExt"):
++            if key in state:
++                normalized[key] = _expect_string(state[key], f"filter.states[{index}].{key}")
++        if "isStatusExtNull" in state:
++            if type(state["isStatusExtNull"]) is not bool:
++                raise CisInventoryContractError(
++                    f"filter.states[{index}].isStatusExtNull must be boolean"
++                )
++            normalized["isStatusExtNull"] = state["isStatusExtNull"]
++        result.append(normalized)
++    return result
++
++
++def _validate_mods(value: Any) -> list[dict[str, str]]:
++    if not isinstance(value, list):
++        raise CisInventoryContractError("filter.mods must be an array")
++    if len(value) > 50:
++        raise CisInventoryContractError("filter.mods exceeds max 50")
++    result: list[dict[str, str]] = []
++    for index, item in enumerate(value):
++        mod = _expect_object(item, f"filter.mods[{index}]")
++        unknown = set(mod) - {"kpp", "fiasId"}
++        if unknown:
++            raise CisInventoryContractError(
++                f"filter.mods[{index}] has unknown fields: {sorted(unknown)}"
++            )
++        normalized: dict[str, str] = {}
++        for key in ("kpp", "fiasId"):
++            if key in mod:
++                normalized[key] = _expect_string(mod[key], f"filter.mods[{index}].{key}")
++        result.append(normalized)
++    return result
++
++
++def validate_search_request(value: Any) -> dict[str, Any]:
++    root = _expect_object(value, "search request")
++    unknown_root = set(root) - {"filter", "pagination"}
++    if unknown_root:
++        raise CisInventoryContractError(f"unknown search request fields: {sorted(unknown_root)}")
++    if "filter" not in root:
++        raise CisInventoryContractError("filter is required")
++    filters = _expect_object(root["filter"], "filter")
++    unknown_filters = set(filters) - _SEARCH_FILTER_FIELDS
++    if unknown_filters:
++        raise CisInventoryContractError(f"unknown search filters: {sorted(unknown_filters)}")
++    if filters.get("productGroups") != [M1_PRODUCT_GROUP]:
++        raise CisInventoryContractError('filter.productGroups must be exactly ["lp"]')
++
++    normalized_filter: dict[str, Any] = {}
++    for key, item in filters.items():
