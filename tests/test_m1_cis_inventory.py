@@ -375,7 +375,7 @@ def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint(t
     )
     app = create_app(config, session_factory=factory)
     with factory() as db:
-        db.add(User(username="owner", password_hash=hash_password("pw-strong-enough"), is_active=True, is_admin=True))
+        db.add(User(id=1, username="owner", password_hash=hash_password("pw-strong-enough"), is_active=True, is_admin=True))
         db.commit()
     with TestClient(app) as client:
         assert client.post("/api/cis-inventory/info", json={"cises":[CIS]}).status_code in (401, 403)
