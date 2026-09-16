@@ -352,8 +352,11 @@ def test_m1_job_persists_across_backend_session_restart_and_duplicate_result_is_
     engine.dispose()
 
 
-def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint(tmp_path):
-    pytest.importorskip("psycopg")
+def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint():
+    import os
+    db_url = os.getenv("WBCZ_TEST_DATABASE_URL")
+    if not db_url:
+        pytest.skip("WBCZ_TEST_DATABASE_URL requires PostgreSQL")
     from fastapi.testclient import TestClient
     from sqlalchemy import create_engine, select
     from sqlalchemy.orm import sessionmaker
@@ -362,33 +365,37 @@ def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint(t
     from wbcz_web.main import create_app
     from wbcz_web.models import AgentJobRecord, Base, User
 
-    db_path = tmp_path / "m1-api.sqlite"
-    engine = create_engine(f"sqlite+pysqlite:///{db_path}", future=True, connect_args={"check_same_thread": False})
+    engine = create_engine(db_url, future=True)
+    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     config = WebConfig(
-        "postgresql+psycopg://u:p@localhost/db",
+        db_url,
         "1234567890",
         environment="test",
         agent_enabled=True,
         agent_machine_token="0123456789abcdef",
     )
     app = create_app(config, session_factory=factory)
-    with factory() as db:
-        db.add(User(id=1, username="owner", password_hash=hash_password("pw-strong-enough"), is_active=True, is_admin=True))
-        db.commit()
-    with TestClient(app) as client:
-        assert client.post("/api/cis-inventory/info", json={"cises":[CIS]}).status_code in (401, 403)
-        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
-        login = client.post("/api/auth/login", json={"username":"owner","password":"pw-strong-enough"}, headers={"X-CSRF-Token":csrf})
-        assert login.status_code == 200
-        queued = client.post("/api/cis-inventory/info", json={"cises":[CIS]}, headers={"X-CSRF-Token":csrf})
-        assert queued.status_code == 200
-        request_id = queued.json()["request_id"]
-        state = client.get(f"/api/cis-inventory/requests/{request_id}")
-        assert state.status_code == 200 and state.json()["status"] == "pending"
-        assert client.get("/api/agent/v1/jobs/next").status_code == 401
-    with factory() as db:
-        row = db.scalar(select(AgentJobRecord).where(AgentJobRecord.job_id == request_id))
-        assert row is not None and row.job_type == "CIS_INFO" and row.purpose == "CIS_INVENTORY"
-    engine.dispose()
+    request_id = None
+    try:
+        with factory() as db:
+            db.add(User(username="owner", password_hash=hash_password("pw-strong-enough"), is_active=True, is_admin=True))
+            db.commit()
+        with TestClient(app) as client:
+            assert client.post("/api/cis-inventory/info", json={"cises":[CIS]}).status_code in (401, 403)
+            csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+            login = client.post("/api/auth/login", json={"username":"owner","password":"pw-strong-enough"}, headers={"X-CSRF-Token":csrf})
+            assert login.status_code == 200
+            queued = client.post("/api/cis-inventory/info", json={"cises":[CIS]}, headers={"X-CSRF-Token":csrf})
+            assert queued.status_code == 200
+            request_id = queued.json()["request_id"]
+            state = client.get(f"/api/cis-inventory/requests/{request_id}")
+            assert state.status_code == 200 and state.json()["status"] == "pending"
+            assert client.get("/api/agent/v1/jobs/next").status_code == 401
+        with factory() as db:
+            row = db.scalar(select(AgentJobRecord).where(AgentJobRecord.job_id == request_id))
+            assert row is not None and row.job_type == "CIS_INFO" and row.purpose == "CIS_INVENTORY"
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
