@@ -1,0 +1,179 @@
++        items = []
++        for cis, raw_item in zip(requested, payload, strict=True):
++            wire = _wire_info(cis, raw_item)
++            normalized = _normalized_info(wire)
++            items.append({
++                "wire": asdict(wire),
++                "normalized": asdict(normalized) if normalized else None,
++                "item_error": (
++                    {"code": wire.error_code, "message": wire.error_message}
++                    if wire.error_code is not None or wire.error_message is not None else None
++                ),
++            })
++        return {"type": job_type, "items": items, "partial_item_errors_supported": True}
++
++    if job_type == "CIS_SEARCH":
++        root = _expect_object(payload, "cises/search response")
++        if type(root.get("isLastPage")) is not bool or not isinstance(root.get("result"), list):
++            raise CisInventoryContractError("cises/search response requires isLastPage and result")
++        result = []
++        for item in root["result"]:
++            raw = _expect_object(item, "cises/search result item")
++            wire = TrueApiCisSearchWire(
++                raw=raw,
++                cis=raw.get("cis"),
++                sgtin=raw.get("sgtin"),
++                gtin=raw.get("gtin"),
++                ownerInn=raw.get("ownerInn"),
++                status=raw.get("status"),
++                statusExt=raw.get("statusExt"),
++                eliminationReason=raw.get("eliminationReason"),
++            )
++            result.append({
++                "wire": asdict(wire),
++                "normalized": {
++                    "cis": wire.cis,
++                    "sgtin": wire.sgtin,
++                    "gtin": wire.gtin,
++                    "status": wire.status,
++                    "status_ext": wire.statusExt,
++                    "elimination_reason": wire.eliminationReason,
++                    "search_owner_inn": wire.ownerInn,
++                    "owner_authoritative": False,
++                },
++            })
++        return {
++            "type": job_type,
++            "isLastPage": root["isLastPage"],
++            "result": result,
++            "pagination": validate_m1_job_payload(job_type, request_payload)["request"].get("pagination"),
++            "auto_pagination": False,
++            "cursor_advancement": "UNKNOWN",
++            "result_ceiling": SEARCH_RESULT_CEILING,
++        }
++
++    if job_type == "CIS_HISTORY":
++        if not isinstance(payload, list):
++            raise CisInventoryContractError("cises/history response must be an array")
++        records = []
++        for item in payload:
++            raw = _expect_object(item, "cises/history item")
++            wire = TrueApiCisHistoryWire(
++                raw=raw,
++                cis=raw.get("cis"),
++                gtin=raw.get("gtin"),
++                status=raw.get("status"),
++                ownerInn=raw.get("ownerInn"),
++                operationDate=raw.get("operationDate"),
++                timestamp=raw.get("timestamp"),
++            )
++            records.append({"wire": asdict(wire)})
++        return {"type": job_type, "history": records}
++
++    if job_type == "CIS_AGGREGATED_LIST":
++        root = _expect_object(payload, "cises/aggregated/list response")
++        requested = validate_m1_job_payload(job_type, request_payload)["cises"]
++        result: list[dict[str, Any]] = []
++        for cis in requested:
++            raw = root.get(cis, {})
++            if not isinstance(raw, dict):
++                raise CisInventoryContractError("aggregated/list item must be an object")
++            wire = TrueApiAggregateWire(cis, dict(raw))
++            result.append({"wire": asdict(wire), "direct_layer_only": True, "recursive": False})
++        return {"type": job_type, "items": result}
++
++    if job_type == "CIS_AGGREGATION_HISTORY":
++        root = _expect_object(payload, "cises/history/list response")
++        rows = root.get("cisAggregation")
++        if not isinstance(rows, list):
++            raise CisInventoryContractError("cises/history/list response requires cisAggregation array")
++        result = []
++        for item in rows:
++            raw = _expect_object(item, "aggregation history item")
++            operation_type = raw.get("operationType")
++            if operation_type in {"AUTODISAGGREGATED", "AUTODISAGGREGATION"}:
++                semantic = "AUTODISAGGREGATION"
++            elif operation_type is None:
++                semantic = None
++            else:
++                semantic = None
++            wire = TrueApiAggregationHistoryWire(
++                raw=raw,
++                cis=raw.get("cis"),
++                operationType=operation_type,
++                operationDate=raw.get("operationDate"),
++                packageType=raw.get("packageType"),
++                extendedPackageType=raw.get("extendedPackageType"),
++                parent=raw.get("parent"),
++            )
++            result.append({
++                "wire": asdict(wire),
++                "normalized_operation_type": semantic,
++                "operation_type_known": semantic is not None,
++            })
++        return {"type": job_type, "cisAggregation": result, "operationDate_nullable": True}
++
++    if job_type == "PRODUCT_INFO":
++        root = _expect_object(payload, "product/info response")
++        results = root.get("results")
++        if not isinstance(results, list):
++            raise CisInventoryContractError("product/info response requires results array")
++        requested = validate_m1_job_payload(job_type, request_payload)["gtins"]
++        returned: dict[str, dict[str, Any]] = {}
++        parsed: list[dict[str, Any]] = []
++        for item in results:
++            raw = _expect_object(item, "product/info result item")
++            wire = TrueApiProductInfoWire(
++                raw=raw,
++                gtin=raw.get("gtin"),
++                name=raw.get("name"),
++                brand=raw.get("brand"),
++                productGroup=raw.get("productGroup"),
++                goodMarkFlag=raw.get("goodMarkFlag") if type(raw.get("goodMarkFlag")) is bool else None,
++                goodTurnFlag=raw.get("goodTurnFlag") if type(raw.get("goodTurnFlag")) is bool else None,
++            )
++            parsed.append({"wire": asdict(wire)})
++            if wire.gtin:
++                returned[str(wire.gtin)] = raw
++        enrichment = [
++            asdict(ProductEnrichmentState(
++                gtin=gtin,
++                state="RETURNED" if gtin in returned else "NOT_RETURNED_BY_PRODUCT_INFO",
++                product=returned.get(gtin),
++            ))
++            for gtin in requested
++        ]
++        return {
++            "type": job_type,
++            "results": parsed,
++            "total": root.get("total"),
++            "errorCode": root.get("errorCode"),
++            "requested": enrichment,
++            "absence_does_not_mean_nonexistent": True,
++        }
++    raise CisInventoryContractError(f"no parser for {job_type}")
++
++
++def parse_json_bytes(raw: bytes) -> Any:
++    try:
++        return json.loads(raw.decode("utf-8"))
++    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++        raise CisInventoryContractError("successful True API response is not valid UTF-8 JSON") from exc
++
++
++def _redact_secret_text(value: str) -> str:
++    text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+\-/]+=*", "Bearer [REDACTED]", value)
++    text = re.sub(r"(?i)(token|pin)\s*[:=]\s*\S+", r"\1=[REDACTED]", text)
++    return text
++
++
++def safe_transport_error(http_status: int, headers: Mapping[str, str], body: bytes) -> SafeTransportError:
++    body_sha = hashlib.sha256(body).hexdigest()
++    content_type = next((v for k, v in headers.items() if str(k).casefold() == "content-type"), None)
++    code: str | None = None
++    message: str | None = None
++    preview: str | None = None
++    if body:
++        lowered = (content_type or "").casefold()
++        if "json" in lowered:
++            try:
