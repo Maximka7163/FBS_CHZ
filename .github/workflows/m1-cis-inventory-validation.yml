@@ -50,7 +50,7 @@ jobs:
             echo 'FRONTEND_CHANGES must remain NONE for M1 backend task' >&2
             exit 1
           fi
-          test "$(git rev-parse p0/test-candidate-001)" = "395701f1757711b5a11b9348d929182d40f51f0a"
+          test "$(git rev-parse origin/p0/test-candidate-001)" = "395701f1757711b5a11b9348d929182d40f51f0a"
           echo "M1_BASE_VERIFIED=$M1_BASE_SHA"
 
       - uses: actions/setup-python@v5
@@ -135,7 +135,7 @@ jobs:
         run: |
           $base=(git merge-base HEAD $env:M1_BASE_SHA).Trim()
           if ($base -ne $env:M1_BASE_SHA) { throw "wrong M1 base: $base" }
-          $frozen=(git rev-parse p0/test-candidate-001).Trim()
+          $frozen=(git rev-parse origin/p0/test-candidate-001).Trim()
           if ($frozen -ne "395701f1757711b5a11b9348d929182d40f51f0a") { throw "frozen P0 branch changed: $frozen" }
 
       - uses: actions/setup-python@v5
