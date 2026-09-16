@@ -27,7 +27,10 @@ jobs:
           cat tmp-m1-bootstrap/patch.* > /tmp/m1.patch
           patch -p1 < /tmp/m1.patch
           rm -rf tmp-m1-bootstrap
-          rm -f .github/workflows/m1-bootstrap-apply.yml
+          # The Actions token may not modify workflow files. Keep this bootstrap
+          # workflow unchanged and let the authenticated repository connector
+          # install the final read-only validation workflow after source push.
+          rm -f .github/workflows/m1-cis-inventory-validation.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
