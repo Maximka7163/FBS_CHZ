@@ -193,6 +193,10 @@ class AgentOrchestrationBroker:
             self._after_poll(metadata.poll_attempt, result)
         elif metadata.purpose == RECONCILIATION_CIS:
             self._apply_reconciliation(metadata.event_id, result)
+        elif metadata.purpose == "CIS_INVENTORY":
+            # M1 read results are already sanitized/typed on Windows and durably
+            # stored by the job store. No P0 control/write state is touched.
+            pass
         else:
             raise AgentReplayConflict("unknown agent job purpose")
         self.db.flush()

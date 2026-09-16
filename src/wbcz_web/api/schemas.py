@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,3 +29,21 @@ class PreviewRequest(StrictModel):
 
 class BulkActionRequest(StrictModel):
     confirm: Literal[True]
+
+
+class CisInventoryCisesRequest(StrictModel):
+    cises: list[str] = Field(min_length=1, max_length=1000)
+
+
+class CisInventorySingleRequest(StrictModel):
+    cis: str = Field(min_length=18, max_length=74)
+
+
+class CisInventorySearchRequest(StrictModel):
+    filter: dict[str, Any]
+    pagination: dict[str, Any] | None = None
+
+
+class CisInventoryProductRequest(StrictModel):
+    gtins: list[str] = Field(min_length=1, max_length=1000)
+    rdInfo: bool = False

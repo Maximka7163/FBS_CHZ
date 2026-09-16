@@ -16,6 +16,17 @@ import subprocess
 import tempfile
 from typing import Any, Callable, Mapping, Protocol
 
+from wbcz.cis_inventory import (
+    M1_READ_JOB_TYPES,
+    SharedRateLimiter,
+    build_cis_to_product_info_request,
+    build_read_spec,
+    is_allowed_read_target,
+    parse_json_bytes,
+    parse_success_payload,
+    safe_transport_error,
+    validate_m1_job_payload,
+)
 from wbcz.models import Decision, KiState, canonical_json, utc_now
 from wbcz.true_api import normalize_cises
 from wbcz.write_pipeline import (
@@ -77,6 +88,13 @@ class AgentJobType(StrEnum):
     LK_RECEIPT = "LK_RECEIPT"
     LP_RETURN = "LP_RETURN"
     POLL_DOCUMENT = "POLL_DOCUMENT"
+    CIS_INFO = "CIS_INFO"
+    CIS_SEARCH = "CIS_SEARCH"
+    CIS_HISTORY = "CIS_HISTORY"
+    CIS_AGGREGATED_LIST = "CIS_AGGREGATED_LIST"
+    CIS_AGGREGATION_HISTORY = "CIS_AGGREGATION_HISTORY"
+    PRODUCT_INFO = "PRODUCT_INFO"
+    CIS_TO_PRODUCT = "CIS_TO_PRODUCT"
 
 
 class AgentJobState(StrEnum):
@@ -97,6 +115,7 @@ class AgentJob:
     product_document_base64: str | None = None
     cises: tuple[str, ...] = ()
     document_id: str | None = None
+    read_payload: dict[str, Any] | None = None
 
     def validate(self) -> None:
         if not self.job_id or not self.operation_id:
@@ -123,7 +142,7 @@ class AgentJob:
                 json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise AgentSecurityError("document bytes are not UTF-8 JSON") from exc
-            if self.cises or self.document_id:
+            if self.cises or self.document_id or self.read_payload is not None:
                 raise AgentSecurityError("write job contains unrelated fields")
         elif self.job_type is AgentJobType.CIS_CHECK:
             try:
@@ -132,13 +151,24 @@ class AgentJob:
                 raise AgentSecurityError(str(exc)) from exc
             if normalized != self.cises:
                 raise AgentSecurityError("CIS_CHECK cises must already be normalized")
-            if any((self.document_type, self.document_sha256, self.product_document_base64, self.document_id)):
-                raise AgentSecurityError("CIS_CHECK contains write/poll fields")
+            if any((self.document_type, self.document_sha256, self.product_document_base64, self.document_id)) or self.read_payload is not None:
+                raise AgentSecurityError("CIS_CHECK contains write/poll/read fields")
         elif self.job_type is AgentJobType.POLL_DOCUMENT:
             if not self.document_id or not re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", self.document_id):
                 raise AgentSecurityError("invalid document_id")
-            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises)):
+            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises)) or self.read_payload is not None:
                 raise AgentSecurityError("POLL_DOCUMENT contains unrelated fields")
+        elif self.job_type.value in M1_READ_JOB_TYPES:
+            if self.read_payload is None:
+                raise AgentSecurityError("M1 read job misses read_payload")
+            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):
+                raise AgentSecurityError("M1 read job contains P0/write fields")
+            try:
+                normalized = validate_m1_job_payload(self.job_type.value, self.read_payload)
+            except ValueError as exc:
+                raise AgentSecurityError(str(exc)) from exc
+            if normalized != self.read_payload:
+                raise AgentSecurityError("M1 read_payload must already be canonical")
         else:
             raise AgentSecurityError("unsupported agent job type")
 
@@ -162,6 +192,9 @@ class AgentResult:
     body_sha256: str | None = None
     cises: tuple[dict[str, Any], ...] = ()
     error_code: str | None = None
+    error_message: str | None = None
+    content_type: str | None = None
+    read_result: Any | None = None
 
     def safe_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -211,11 +244,13 @@ class ProductionAgentTrueApiTransport:
         audit: JsonlLiveAudit | None = None,
         timeout: float = 30.0,
         connection_factory: Callable[..., http.client.HTTPConnection] = http.client.HTTPConnection,
+        rate_limiter: SharedRateLimiter | None = None,
     ) -> None:
         self.tunnel = tunnel or CryptoProGostTlsTunnel()
         self.audit = audit or JsonlLiveAudit("windows_agent_true_api.jsonl")
         self.timeout = timeout
         self._connection_factory = connection_factory
+        self.rate_limiter = rate_limiter or SharedRateLimiter()
         self._read_only = ReadOnlyTrueApiTransport(
             tunnel=self.tunnel,
             audit=self.audit,
@@ -239,6 +274,7 @@ class ProductionAgentTrueApiTransport:
         method = method.upper()
         if (method, path) not in _P0_READ_ONLY:
             raise AgentSecurityError("arbitrary True API endpoint denied")
+        self.rate_limiter.acquire()
         return self._read_only.request_json(
             method,
             path,
@@ -263,6 +299,65 @@ class ProductionAgentTrueApiTransport:
             bearer_token=bearer_token,
             cis_count=len(normalized),
         )
+
+    def m1_read(self, job_type: str, payload: dict[str, Any], *, bearer_token: str) -> AgentHttpResponse:
+        if job_type == "CIS_TO_PRODUCT":
+            raise AgentSecurityError("composite M1 job has no single transport request")
+        spec = build_read_spec(job_type, payload)
+        if not is_allowed_read_target(spec):
+            raise AgentSecurityError("arbitrary True API read target denied")
+        if not bearer_token:
+            raise AgentSecurityError("True API bearer token is required")
+        headers = {
+            "Accept": "application/json, application/xml, text/xml",
+            "Host": PRODUCTION_HOST,
+            "Connection": "close",
+            "Authorization": "Bearer " + bearer_token,
+        }
+        data: bytes | None = None
+        if spec.body is not None:
+            headers["Content-Type"] = "application/json; charset=UTF-8"
+            data = json.dumps(spec.body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            headers["Content-Length"] = str(len(data))
+        connection: http.client.HTTPConnection | None = None
+        self.rate_limiter.acquire()
+        try:
+            marker = self.tunnel.session_marker()
+            connection = self._connection_factory("127.0.0.1", self.tunnel.local_port, timeout=self.timeout)
+            connection.putrequest(spec.method, spec.target, skip_host=True)
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            connection.endheaders(data)
+            response = connection.getresponse()
+            status = int(response.status)
+            raw = response.read()
+            self.tunnel.assert_gost_session(marker)
+            self.audit.record(
+                method=spec.method,
+                endpoint=spec.audit_endpoint,
+                cis_count=spec.cis_count,
+                http_status=status,
+                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+            )
+            return AgentHttpResponse(
+                status=status,
+                body=raw,
+                headers={str(k): str(v) for k, v in response.headers.items()},
+            )
+        except GostTlsUnavailable:
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            self.audit.record(
+                method=spec.method,
+                endpoint=spec.audit_endpoint,
+                cis_count=spec.cis_count,
+                http_status=None,
+                error=type(exc).__name__,
+            )
+            raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def create_document(
         self,
@@ -336,6 +431,7 @@ class ProductionAgentTrueApiTransport:
         if bearer_token:
             headers["Authorization"] = "Bearer " + bearer_token
         connection: http.client.HTTPConnection | None = None
+        self.rate_limiter.acquire()
         try:
             local_port = self.tunnel.local_port
             marker = self.tunnel.session_marker()
@@ -558,9 +654,91 @@ class WindowsAgentExecutor:
             raise AgentSecurityError("expected_inn mismatch")
         if job.job_type is AgentJobType.CIS_CHECK:
             return self._cis_check(job)
+        if job.job_type.value in M1_READ_JOB_TYPES:
+            return self._m1_read(job)
         if job.job_type is AgentJobType.POLL_DOCUMENT:
             return self._poll(job)
         return self._write(job)
+
+    @staticmethod
+    def _content_type(headers: Mapping[str, str]) -> str | None:
+        return next((str(v) for k, v in headers.items() if str(k).casefold() == "content-type"), None)
+
+    def _read_response(self, job: AgentJob, response: AgentHttpResponse, *, job_type: str, request_payload: dict[str, Any]) -> AgentResult:
+        body_sha = hashlib.sha256(response.body).hexdigest()
+        content_type = self._content_type(response.headers)
+        if 200 <= response.status < 300:
+            payload = parse_json_bytes(response.body)
+            parsed = parse_success_payload(job_type, request_payload, payload)
+            return AgentResult(
+                job.job_id,
+                job.operation_id,
+                "READ_COMPLETED",
+                http_status=response.status,
+                body_sha256=body_sha,
+                content_type=content_type,
+                read_result=parsed,
+            )
+        safe = safe_transport_error(response.status, response.headers, response.body)
+        return AgentResult(
+            job.job_id,
+            job.operation_id,
+            "READ_FAILED",
+            http_status=response.status,
+            body_sha256=safe.body_sha256,
+            content_type=safe.content_type,
+            error_code=safe.safe_error_code or f"HTTP_{response.status}",
+            error_message=safe.safe_error_message,
+            read_result={"transport_error": asdict(safe)},
+        )
+
+    def _m1_read(self, job: AgentJob) -> AgentResult:
+        assert job.read_payload is not None
+        bearer = self.session_manager.bearer_token()
+        if job.job_type is AgentJobType.CIS_TO_PRODUCT:
+            cises = tuple(job.read_payload["cises"])
+            info_payload = {"cises": list(cises)}
+            info_response = self.transport.m1_read("CIS_INFO", info_payload, bearer_token=bearer)
+            if not 200 <= info_response.status < 300:
+                return self._read_response(job, info_response, job_type="CIS_INFO", request_payload=info_payload)
+            info_raw = parse_json_bytes(info_response.body)
+            info_parsed, gtins = build_cis_to_product_info_request(info_raw, cises)
+            product_parsed: dict[str, Any] | None = None
+            product_http_status: int | None = None
+            product_body_sha256: str | None = None
+            if gtins:
+                product_payload = {"gtins": gtins, "rdInfo": False}
+                product_response = self.transport.m1_read("PRODUCT_INFO", product_payload, bearer_token=bearer)
+                product_http_status = product_response.status
+                product_body_sha256 = hashlib.sha256(product_response.body).hexdigest()
+                if not 200 <= product_response.status < 300:
+                    safe = safe_transport_error(product_response.status, product_response.headers, product_response.body)
+                    return AgentResult(
+                        job.job_id, job.operation_id, "READ_FAILED",
+                        http_status=product_response.status,
+                        body_sha256=safe.body_sha256,
+                        content_type=safe.content_type,
+                        error_code=safe.safe_error_code or f"HTTP_{product_response.status}",
+                        error_message=safe.safe_error_message,
+                        read_result={"type": "CIS_TO_PRODUCT", "cis_info": info_parsed, "product_transport_error": asdict(safe)},
+                    )
+                product_raw = parse_json_bytes(product_response.body)
+                product_parsed = parse_success_payload("PRODUCT_INFO", product_payload, product_raw)
+            return AgentResult(
+                job.job_id, job.operation_id, "READ_COMPLETED",
+                http_status=product_http_status or info_response.status,
+                body_sha256=product_body_sha256 or hashlib.sha256(info_response.body).hexdigest(),
+                content_type=self._content_type(info_response.headers),
+                read_result={
+                    "type": "CIS_TO_PRODUCT",
+                    "cis_info": info_parsed,
+                    "deduplicated_gtins": gtins,
+                    "product_info": product_parsed,
+                    "product_info_called": bool(gtins),
+                },
+            )
+        response = self.transport.m1_read(job.job_type.value, job.read_payload, bearer_token=bearer)
+        return self._read_response(job, response, job_type=job.job_type.value, request_payload=job.read_payload)
 
     def _cis_check(self, job: AgentJob) -> AgentResult:
         payload = self.transport.cises_info(

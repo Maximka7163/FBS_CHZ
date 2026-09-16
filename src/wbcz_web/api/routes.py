@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from wbcz.windows_agent import AgentJobType
 from wbcz.write_pipeline import InvalidWriteOperation
 from wbcz_web.auth import new_csrf_token
 from wbcz_web.repositories import ImportRepository
@@ -17,6 +18,7 @@ from wbcz_web.services import (
     import_view,
 )
 from wbcz_web.services.agent_orchestration import AgentControlService
+from wbcz_web.services.cis_inventory import CisInventoryService, CisInventoryUnavailable
 from wbcz_web.services.workspace import (
     BulkActionUnavailable,
     bulk_preview,
@@ -26,7 +28,16 @@ from wbcz_web.services.workspace import (
 )
 
 from .dependencies import AuthenticatedIdentity, get_db, require_csrf, require_user
-from .schemas import BulkActionRequest, ControlRequest, LoginRequest, PreviewRequest
+from .schemas import (
+    BulkActionRequest,
+    CisInventoryCisesRequest,
+    CisInventoryProductRequest,
+    CisInventorySearchRequest,
+    CisInventorySingleRequest,
+    ControlRequest,
+    LoginRequest,
+    PreviewRequest,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -259,3 +270,126 @@ def operation_preview(
         return ControlService(db, request.app.state.config.own_inn).preview(payload.import_id, identity.user_id, payload.mode, payload.event_ids)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+def _cis_inventory_service(request: Request, db: Session) -> CisInventoryService:
+    try:
+        return CisInventoryService(db, request.app.state.config)
+    except CisInventoryUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/cis-inventory/info")
+def cis_inventory_info(
+    payload: CisInventoryCisesRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return _cis_inventory_service(request, db).queue(AgentJobType.CIS_INFO, {"cises": payload.cises})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/cis-inventory/search")
+def cis_inventory_search(
+    payload: CisInventorySearchRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    body = payload.model_dump(exclude_none=True)
+    try:
+        return _cis_inventory_service(request, db).queue(AgentJobType.CIS_SEARCH, {"request": body})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/cis-inventory/history")
+def cis_inventory_history(
+    payload: CisInventorySingleRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return _cis_inventory_service(request, db).queue(AgentJobType.CIS_HISTORY, {"cis": payload.cis})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/cis-inventory/aggregates")
+def cis_inventory_aggregates(
+    payload: CisInventoryCisesRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return _cis_inventory_service(request, db).queue(AgentJobType.CIS_AGGREGATED_LIST, {"cises": payload.cises})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/cis-inventory/aggregation-history")
+def cis_inventory_aggregation_history(
+    payload: CisInventorySingleRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return _cis_inventory_service(request, db).queue(AgentJobType.CIS_AGGREGATION_HISTORY, {"cis": payload.cis})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/cis-inventory/product-info")
+def cis_inventory_product_info(
+    payload: CisInventoryProductRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return _cis_inventory_service(request, db).queue(
+            AgentJobType.PRODUCT_INFO,
+            {"gtins": payload.gtins, "rdInfo": payload.rdInfo},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/cis-inventory/enrich")
+def cis_inventory_enrich(
+    payload: CisInventoryCisesRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return _cis_inventory_service(request, db).queue(AgentJobType.CIS_TO_PRODUCT, {"cises": payload.cises})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/cis-inventory/requests/{request_id}")
+def cis_inventory_request_status(
+    request_id: str,
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return _cis_inventory_service(request, db).status(request_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="M1 request not found") from exc
