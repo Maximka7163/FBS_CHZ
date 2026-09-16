@@ -1,0 +1,155 @@
+name: M1 cis inventory validation
+
+on:
+  push:
+    branches:
+      - m1/cis-inventory-readonly-001
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  M1_BASE_SHA: bcb567a8f1e4e9261d68fa800ccc96e76518c596
+  WBCZ_ENV: test
+  WBCZ_OWN_INN: "1234567890"
+  WBCZ_TRUE_API_WRITE_ENABLED: "false"
+
+jobs:
+  linux-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_m1
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_m1"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m1
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove exact M1 base and frozen P0 isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$M1_BASE_SHA")" = "$M1_BASE_SHA"
+          test "$(git rev-parse "$M1_BASE_SHA")" = "$M1_BASE_SHA"
+          if git diff --name-only "$M1_BASE_SHA"...HEAD | grep '^frontend/'; then
+            echo 'FRONTEND_CHANGES must remain NONE for M1 backend task' >&2
+            exit 1
+          fi
+          test "$(git rev-parse p0/test-candidate-001)" = "395701f1757711b5a11b9348d929182d40f51f0a"
+          echo "M1_BASE_VERIFIED=$M1_BASE_SHA"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install backend dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: Build deterministic WB regression workbook
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python scripts/generate_regression_workbook.py /mnt/data/REF_WB_archive_9.xlsx
+          test -s /mnt/data/REF_WB_archive_9.xlsx
+
+      - name: Migration head and clean PostgreSQL upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(alembic heads | tr -d '\r')" = '0003_m1_cis_inventory_read_jobs (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          engine=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with engine.begin() as c:
+              c.exec_driver_sql('DROP SCHEMA public CASCADE')
+              c.exec_driver_sql('CREATE SCHEMA public')
+          engine.dispose()
+          PY
+          alembic upgrade head
+          test "$(alembic current | tr -d '\r')" = '0003_m1_cis_inventory_read_jobs (head)'
+
+      - name: Focused M1 tests
+        run: python -m pytest -q tests/test_m1_cis_inventory.py
+
+      - name: Full PostgreSQL backend regression
+        run: python -m pytest -q
+
+      - name: Frontend regression typecheck tests build
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm test
+          npm run build
+          if grep -R -E 'markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/' dist; then
+            echo 'forbidden production/agent boundary leaked into browser bundle' >&2
+            exit 1
+          fi
+          if grep -R -F 'localStorage' src; then
+            echo 'localStorage business persistence is forbidden' >&2
+            exit 1
+          fi
+
+      - name: Security and transport static assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R -F 'markirovka.crpt.ru' src/wbcz_web
+          ! grep -R -E 'TRUE_API_REQUEST|GENERIC_HTTP|RAW_URL|RAW_PATH|ARBITRARY_REQUEST' src
+          ! grep -R -E -- '-----BEGIN .*PRIVATE KEY-----' src frontend migrations
+          ! grep -R -E 'WBCZ_AGENT_MACHINE_TOKEN=[A-Za-z0-9._~-]{16,}' src frontend migrations
+          grep -F 'WBCZ_TRUE_API_WRITE_ENABLED=false' .env.production.example
+          python -m pytest -q \
+            tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent \
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener \
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
+
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove exact M1 base and frozen P0 isolation
+        shell: pwsh
+        run: |
+          $base=(git merge-base HEAD $env:M1_BASE_SHA).Trim()
+          if ($base -ne $env:M1_BASE_SHA) { throw "wrong M1 base: $base" }
+          $frozen=(git rev-parse p0/test-candidate-001).Trim()
+          if ($frozen -ne "395701f1757711b5a11b9348d929182d40f51f0a") { throw "frozen P0 branch changed: $frozen" }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: M1 typed-agent and P0 safety regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m1_cis_inventory.py
+          python -m pytest -q tests/test_windows_agent.py
+          python -m pytest -q `
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener `
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
