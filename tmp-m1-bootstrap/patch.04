@@ -1,0 +1,157 @@
++        if key in _SEARCH_STRING_ARRAY_FIELDS:
++            normalized_filter[key] = _expect_string_array(item, f"filter.{key}")
++        elif key in _SEARCH_BOOL_FIELDS:
++            if type(item) is not bool:
++                raise CisInventoryContractError(f"filter.{key} must be boolean")
++            normalized_filter[key] = item
++        elif key in _SEARCH_PERIOD_FIELDS:
++            normalized_filter[key] = _validate_period(item, f"filter.{key}")
++        elif key == "states":
++            normalized_filter[key] = _validate_states(item)
++        elif key == "mods":
++            normalized_filter[key] = _validate_mods(item)
++        elif key in {"manufacturerInns", "importerInns", "partyNumber", "tnVed", "tnVed10", "prVetDoc"}:
++            # Official v726.0 keeps these singular values as strings, including
++            # the plural manufacturerInns/importerInns field names.
++            normalized_filter[key] = _expect_string(item, f"filter.{key}")
++        else:
++            raise AssertionError(key)
++
++    normalized: dict[str, Any] = {"filter": normalized_filter}
++    if "pagination" in root and root["pagination"] is not None:
++        pagination = _expect_object(root["pagination"], "pagination")
++        unknown = set(pagination) - {"perPage", "lastEmissionDate", "sgtin", "direction"}
++        if unknown:
++            raise CisInventoryContractError(f"unknown pagination fields: {sorted(unknown)}")
++        if "lastEmissionDate" not in pagination or "sgtin" not in pagination:
++            raise CisInventoryContractError("pagination requires lastEmissionDate and sgtin")
++        per_page = pagination.get("perPage", SEARCH_DEFAULT_PER_PAGE)
++        if type(per_page) is not int or not 1 <= per_page <= SEARCH_MAX_PER_PAGE:
++            raise CisInventoryContractError("pagination.perPage must be 1..1000")
++        direction = pagination.get("direction", 0)
++        if type(direction) is not int or direction not in (0, 1):
++            raise CisInventoryContractError("pagination.direction must be 0 or 1")
++        normalized["pagination"] = {
++            "perPage": per_page,
++            "lastEmissionDate": _expect_string(pagination["lastEmissionDate"], "pagination.lastEmissionDate"),
++            "sgtin": _expect_string(pagination["sgtin"], "pagination.sgtin"),
++            "direction": direction,
++        }
++    return normalized
++
++
++def validate_m1_job_payload(job_type: str, payload: Any) -> dict[str, Any]:
++    if job_type not in M1_READ_JOB_TYPES:
++        raise CisInventoryContractError("unsupported M1 read job type")
++    root = _expect_object(payload, "read_payload")
++    if job_type in {"CIS_INFO", "CIS_AGGREGATED_LIST", "CIS_TO_PRODUCT"}:
++        if set(root) != {"cises"}:
++            raise CisInventoryContractError(f"{job_type} payload must contain only cises")
++        normalized = normalize_cises(_expect_string_array(root["cises"], "cises", max_items=MAX_BATCH))
++        return {"cises": list(normalized)}
++    if job_type in {"CIS_HISTORY", "CIS_AGGREGATION_HISTORY"}:
++        if set(root) != {"cis"}:
++            raise CisInventoryContractError(f"{job_type} payload must contain only cis")
++        return {"cis": normalize_cis(_expect_string(root["cis"], "cis"))}
++    if job_type == "PRODUCT_INFO":
++        unknown = set(root) - {"gtins", "rdInfo"}
++        if unknown or "gtins" not in root:
++            raise CisInventoryContractError("PRODUCT_INFO payload allows only gtins and rdInfo")
++        gtins = _expect_string_array(root["gtins"], "gtins", max_items=MAX_BATCH)
++        if not 1 <= len(gtins) <= MAX_BATCH:
++            raise CisInventoryContractError("product/info gtins must contain 1..1000 values")
++        rd_info = root.get("rdInfo", False)
++        if type(rd_info) is not bool:
++            raise CisInventoryContractError("rdInfo must be boolean")
++        return {"gtins": gtins, "rdInfo": rd_info}
++    if job_type == "CIS_SEARCH":
++        if set(root) != {"request"}:
++            raise CisInventoryContractError("CIS_SEARCH payload must contain only request")
++        return {"request": validate_search_request(root["request"])}
++    raise AssertionError(job_type)
++
++
++def build_read_spec(job_type: str, payload: Any) -> TrueApiReadSpec:
++    normalized = validate_m1_job_payload(job_type, payload)
++    if job_type == "CIS_INFO":
++        cises = normalized["cises"]
++        return TrueApiReadSpec(job_type, "POST", CIS_INFO_TARGET, cises, "/cises/info?pg=lp", len(cises))
++    if job_type == "CIS_SEARCH":
++        return TrueApiReadSpec(job_type, "POST", CIS_SEARCH_TARGET, normalized["request"], "/cises/search", 0)
++    if job_type == "CIS_HISTORY":
++        cis = normalized["cis"]
++        target = CIS_HISTORY_PREFIX + quote(cis, safe="")
++        return TrueApiReadSpec(job_type, "POST", target, None, "/cises/history?cis={CIS}", 1)
++    if job_type == "CIS_AGGREGATED_LIST":
++        cises = normalized["cises"]
++        return TrueApiReadSpec(job_type, "POST", AGGREGATED_LIST_TARGET, cises, "/cises/aggregated/list?pg=lp", len(cises))
++    if job_type == "CIS_AGGREGATION_HISTORY":
++        return TrueApiReadSpec(job_type, "POST", AGGREGATION_HISTORY_TARGET, {"cis": normalized["cis"]}, "/cises/history/list", 1)
++    if job_type == "PRODUCT_INFO":
++        return TrueApiReadSpec(job_type, "POST", PRODUCT_INFO_TARGET, normalized, "/product/info", 0)
++    raise CisInventoryContractError("CIS_TO_PRODUCT is a composite job and has no single request spec")
++
++
++def is_allowed_read_target(spec: TrueApiReadSpec) -> bool:
++    if spec.method != "POST":
++        return False
++    if spec.target in {
++        CIS_INFO_TARGET,
++        CIS_SEARCH_TARGET,
++        AGGREGATED_LIST_TARGET,
++        AGGREGATION_HISTORY_TARGET,
++        PRODUCT_INFO_TARGET,
++    }:
++        return True
++    if spec.job_type == "CIS_HISTORY" and spec.target.startswith(CIS_HISTORY_PREFIX):
++        encoded = spec.target[len(CIS_HISTORY_PREFIX):]
++        return bool(encoded) and "&" not in encoded and "#" not in encoded
++    return False
++
++
++def _dict_or_none(value: Any) -> dict[str, Any] | None:
++    return dict(value) if isinstance(value, dict) else None
++
++
++def _wire_info(requested_cis: str, item: Any) -> TrueApiCisInfoWire:
++    raw = _expect_object(item, "cises/info result item")
++    info = _dict_or_none(raw.get("cisInfo"))
++    return TrueApiCisInfoWire(
++        requested_cis=requested_cis,
++        cis_info=info,
++        error_code=str(raw["errorCode"]) if raw.get("errorCode") is not None else None,
++        error_message=str(raw["errorMessage"]) if raw.get("errorMessage") is not None else None,
++        raw=raw,
++    )
++
++
++def _normalized_info(wire: TrueApiCisInfoWire) -> CisInventoryState | None:
++    info = wire.cis_info
++    if info is None:
++        return None
++    return CisInventoryState(
++        requested_cis=wire.requested_cis,
++        cis=info.get("cis"),
++        gtin=info.get("gtin"),
++        product_name=info.get("productName"),
++        product_group=info.get("productGroup"),
++        owner_inn=info.get("ownerInn"),
++        owner_name=info.get("ownerName"),
++        status=info.get("status"),
++        status_ex=info.get("statusEx"),
++        withdraw_reason=info.get("withdrawReason"),
++        withdraw_reason_other=info.get("withdrawReasonOther"),
++        parent=info.get("parent"),
++        child=info.get("child"),
++        raw=info,
++    )
++
++
++def parse_success_payload(job_type: str, request_payload: dict[str, Any], payload: Any) -> dict[str, Any]:
++    """Parse official source-specific wire response while preserving unknown fields."""
++    if job_type == "CIS_INFO":
++        requested = validate_m1_job_payload(job_type, request_payload)["cises"]
++        if not isinstance(payload, list):
++            raise CisInventoryContractError("cises/info response must be an array")
++        if len(payload) != len(requested):
++            raise CisInventoryContractError("cises/info response item count mismatch")
