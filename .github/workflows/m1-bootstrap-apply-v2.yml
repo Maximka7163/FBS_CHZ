@@ -1,0 +1,35 @@
+name: M1 bootstrap apply v2
+
+on:
+  push:
+    branches:
+      - m1/cis-inventory-readonly-001
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply staged M1 source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=bcb567a8f1e4e9261d68fa800ccc96e76518c596
+          test "$(git merge-base HEAD "$BASE")" = "$BASE"
+          cat tmp-m1-bootstrap/patch.* > /tmp/m1.patch
+          patch -p1 < /tmp/m1.patch
+          rm -rf tmp-m1-bootstrap
+          rm -f .github/workflows/m1-cis-inventory-validation.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat: implement M1 read-only CIS inventory'
+          git push origin HEAD:m1/cis-inventory-readonly-001
