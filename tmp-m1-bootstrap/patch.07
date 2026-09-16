@@ -1,0 +1,149 @@
++    assert spec.target == CIS_INFO_TARGET
++    assert spec.body == [CIS]
++    assert spec.cis_count == 1
++    build_read_spec("CIS_INFO", {"cises": [CIS] * 1000})
++    with pytest.raises(ValueError):
++        build_read_spec("CIS_INFO", {"cises": []})
++    with pytest.raises(ValueError):
++        build_read_spec("CIS_INFO", {"cises": [CIS] * 1001})
++    with pytest.raises(ValueError):
++        build_read_spec("CIS_INFO", {"cises": ["short"]})
++
++
++def test_cis_info_partial_item_errors_are_not_transport_failure():
++    payload = [
++        {"cisInfo": {"cis": CIS, "gtin": "04601234567890", "status": "INTRODUCED", "ownerInn": "1234567890", "statusEx": "OK", "withdrawReason": None}},
++        {"errorCode": "404", "errorMessage": "not found"},
++    ]
++    parsed = parse_success_payload("CIS_INFO", {"cises": [CIS, CIS2]}, payload)
++    assert parsed["items"][0]["normalized"]["owner_inn"] == "1234567890"
++    assert parsed["items"][1]["normalized"] is None
++    assert parsed["items"][1]["item_error"] == {"code": "404", "message": "not found"}
++
++
++def test_search_exact_v4_lp_scope_wire_names_and_no_cursor_guess():
++    request = {
++        "filter": {
++            "productGroups": ["lp"],
++            "gtins": ["04601234567890"],
++            "manufacturerInns": "1234567890",
++            "importerInns": "1234567890",
++            "states": [{"status": "INTRODUCED", "statusExt": "ACTIVE", "isStatusExtNull": False}],
++            "tnVed": "6108",
++            "tnVed10": "6108210000",
++            "prVetDoc": "vet-doc",
++            "productionDatePeriod": {"from": "2026-01-01T00:00:00Z"},
++            "mods": [{"kpp": "123456789", "fiasId": "11111111-2222-3333-4444-555555555555"}],
++        },
++        "pagination": {
++            "perPage": 1000,
++            "lastEmissionDate": "2026-09-01T00:00:00Z",
++            "sgtin": "04601234567890123456789012",
++            "direction": 0,
++        },
++    }
++    spec = build_read_spec("CIS_SEARCH", {"request": request})
++    assert spec.target == CIS_SEARCH_TARGET
++    assert spec.body["filter"]["manufacturerInns"] == "1234567890"
++    assert spec.body["filter"]["importerInns"] == "1234567890"
++    assert spec.body["pagination"]["perPage"] == 1000
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"]}, "pagination": {"perPage": 1001, "lastEmissionDate": "x", "sgtin": "y"}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["other"]}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "manufacturerInns": ["123"]}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "states": ["INTRODUCED"]}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "mods": [{"raw": "x"}]}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "mods": [{"kpp": "x"}] * 51}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "tnVed": ["6108"]}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "prVetDoc": True}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "withdrawDatePeriod": {"from": "x"}}})
++    with pytest.raises(ValueError):
++        validate_search_request({"filter": {"productGroups": ["lp"], "productionDatePeriod": {"from": "x", "after": "y"}}})
++
++    normalized_request = validate_search_request(request)
++    assert normalized_request["filter"]["states"][0]["statusExt"] == "ACTIVE"
++    assert normalized_request["filter"]["mods"][0]["fiasId"].startswith("11111111")
++    assert normalized_request["filter"]["productionDatePeriod"] == {"from": "2026-01-01T00:00:00Z"}
++    assert normalized_request["filter"]["tnVed"] == "6108"
++    assert normalized_request["filter"]["tnVed10"] == "6108210000"
++    assert normalized_request["filter"]["prVetDoc"] == "vet-doc"
++
++    response = {
++        "isLastPage": False,
++        "result": [{"cis": CIS, "sgtin": "S", "gtin": "G", "ownerInn": "111", "status": "X", "statusExt": "Y", "eliminationReason": "Z"}],
++    }
++    parsed = parse_success_payload("CIS_SEARCH", {"request": request}, response)
++    item = parsed["result"][0]
++    assert item["wire"]["statusExt"] == "Y"
++    assert item["wire"]["eliminationReason"] == "Z"
++    assert item["normalized"]["owner_authoritative"] is False
++    assert parsed["auto_pagination"] is False
++    assert parsed["cursor_advancement"] == "UNKNOWN"
++    assert parsed["result_ceiling"] == SEARCH_RESULT_CEILING == 10000
++
++
++def test_history_exact_target_escapes_query_and_does_not_invent_status_ex():
++    cis = "01 04601234567890/21ABCDEF?XYZ"
++    # spaces and reserved query characters must be encoded after normalization.
++    spec = build_read_spec("CIS_HISTORY", {"cis": cis})
++    assert spec.target.startswith(CIS_HISTORY_PREFIX)
++    assert " " not in spec.target and "?XYZ" not in spec.target and "/21" not in spec.target
++    assert spec.body is None
++    parsed = parse_success_payload("CIS_HISTORY", {"cis": cis}, [{"cis": cis.strip(), "status": "INTRODUCED", "operationDate": None}])
++    assert "statusEx" not in parsed["history"][0]["wire"]["raw"]
++
++
++def test_aggregated_list_exact_target_direct_layer_and_empty_unknown():
++    spec = build_read_spec("CIS_AGGREGATED_LIST", {"cises": [CIS, CIS2]})
++    assert spec.target == AGGREGATED_LIST_TARGET
++    parsed = parse_success_payload("CIS_AGGREGATED_LIST", {"cises": [CIS, CIS2]}, {CIS: {"child": ["a"]}, CIS2: {}})
++    assert parsed["items"][0]["direct_layer_only"] is True
++    assert parsed["items"][0]["recursive"] is False
++    assert parsed["items"][1]["wire"]["raw"] == {}
++
++
++def test_aggregation_history_accepts_both_official_values_unknown_and_nullable_date():
++    spec = build_read_spec("CIS_AGGREGATION_HISTORY", {"cis": CIS})
++    assert spec.target == AGGREGATION_HISTORY_TARGET
++    payload = {"cisAggregation": [
++        {"cis": CIS, "operationType": "AUTODISAGGREGATED", "operationDate": None},
++        {"cis": CIS, "operationType": "AUTODISAGGREGATION"},
++        {"cis": CIS, "operationType": "FUTURE_ENUM"},
++    ]}
++    parsed = parse_success_payload("CIS_AGGREGATION_HISTORY", {"cis": CIS}, payload)
++    assert parsed["operationDate_nullable"] is True
++    assert parsed["cisAggregation"][0]["normalized_operation_type"] == "AUTODISAGGREGATION"
++    assert parsed["cisAggregation"][1]["normalized_operation_type"] == "AUTODISAGGREGATION"
++    assert parsed["cisAggregation"][2]["wire"]["operationType"] == "FUTURE_ENUM"
++    assert parsed["cisAggregation"][2]["operation_type_known"] is False
++
++
++def test_product_info_exact_v4_limit_rdinfo_default_and_missing_not_nonexistent():
++    payload = validate_m1_job_payload("PRODUCT_INFO", {"gtins": ["1", "2"]})
++    assert payload == {"gtins": ["1", "2"], "rdInfo": False}
++    spec = build_read_spec("PRODUCT_INFO", payload)
++    assert spec.target == PRODUCT_INFO_TARGET
++    with pytest.raises(ValueError):
++        validate_m1_job_payload("PRODUCT_INFO", {"gtins": []})
++    with pytest.raises(ValueError):
++        validate_m1_job_payload("PRODUCT_INFO", {"gtins": ["1"] * 1001})
++    parsed = parse_success_payload(
++        "PRODUCT_INFO",
++        payload,
++        {"results": [{"gtin": "1", "name": "A", "goodTurnFlag": True, "goodMarkFlag": True, "futureGroupField": {"x": 1}}], "total": 1},
++    )
++    assert parsed["requested"][0]["state"] == "RETURNED"
++    assert parsed["requested"][1]["state"] == "NOT_RETURNED_BY_PRODUCT_INFO"
++    assert parsed["absence_does_not_mean_nonexistent"] is True
++    assert parsed["results"][0]["wire"]["raw"]["futureGroupField"] == {"x": 1}
++
++
++def test_strict_m1_jobs_have_no_generic_proxy_or_arbitrary_path_method():
