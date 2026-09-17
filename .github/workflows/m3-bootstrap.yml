@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Apply M3 auth/signing hardening
+      - name: Apply source hardening
         shell: bash
         run: |
           python - <<'PY'
@@ -33,353 +33,31 @@ jobs:
                   raise SystemExit(f'target not found in {path}: {old[:100]!r}')
               p.write_text(s.replace(old,new,1),encoding='utf-8')
 
-          # Reuse the already accepted M1 safe transport error model for auth HTTP errors.
-          replace_once(
-              'src/wbcz_ui/_live_true_api_base.py',
-              'from wbcz.models import KiState\nfrom wbcz.true_api import TrueApiError\n',
-              'from wbcz.cis_inventory import safe_transport_error\nfrom wbcz.models import KiState\nfrom wbcz.true_api import TrueApiError\n',
-          )
-          replace_once(
-              'src/wbcz_ui/_live_true_api_base.py',
-              '''class TrueApiHttpError(TrueApiError):\n    def __init__(self, status: int | None, message: str) -> None:\n        super().__init__(message)\n        self.status = status\n''',
-              '''class TrueApiHttpError(TrueApiError):\n    def __init__(\n        self,\n        status: int | None,\n        message: str,\n        *,\n        content_type: str | None = None,\n        body_sha256: str | None = None,\n        safe_error_code: str | None = None,\n    ) -> None:\n        super().__init__(message)\n        self.status = status\n        self.content_type = content_type\n        self.body_sha256 = body_sha256\n        self.safe_error_code = safe_error_code\n''',
-          )
-          replace_once(
-              'src/wbcz_ui/_live_true_api_base.py',
-              '''@dataclass(frozen=True, slots=True)\nclass AuthSession:\n    bearer_token: str\n    expire_date: datetime\n''',
-              '''@dataclass(frozen=True, slots=True)\nclass AuthSession:\n    \"\"\"Windows-memory UUID session. `token` is never used as the bearer.\"\"\"\n\n    uuid_token: str\n    expire_date: datetime\n\n    @property\n    def bearer_token(self) -> str:\n        # Backward-compatible internal name; the official credential is uuidToken.\n        return self.uuid_token\n''',
-          )
-          replace_once(
-              'src/wbcz_ui/_live_true_api_base.py',
-              '''            if not 200 <= status < 300:\n                text = raw[:4096].decode("utf-8", errors="replace")\n                raise TrueApiHttpError(\n                    status, f"True API HTTP {status}: {text[:500]}"\n                )\n''',
-              '''            if not 200 <= status < 300:\n                safe = safe_transport_error(\n                    status,\n                    {str(k): str(v) for k, v in response_headers.items()},\n                    raw,\n                )\n                message = safe.safe_error_message or f"True API HTTP {status}"\n                raise TrueApiHttpError(\n                    status,\n                    message,\n                    content_type=safe.content_type,\n                    body_sha256=safe.body_sha256,\n                    safe_error_code=safe.safe_error_code,\n                )\n''',
-          )
-          replace_once(
-              'src/wbcz_ui/_live_true_api_base.py',
-              '''        try:\n            expire_date = datetime.fromisoformat(expire.replace("Z", "+00:00"))\n            if expire_date.tzinfo is None:\n                expire_date = expire_date.replace(tzinfo=timezone.utc)\n        except ValueError as exc:\n            raise TrueApiProtocolError(\n                "Invalid expireDate in authentication response"\n            ) from exc\n        return AuthSession(token, expire_date.astimezone(timezone.utc))\n''',
-              '''        try:\n            expire_date = datetime.fromisoformat(expire.replace("Z", "+00:00"))\n        except ValueError as exc:\n            raise TrueApiProtocolError(\n                "Invalid expireDate in authentication response"\n            ) from exc\n        if expire_date.tzinfo is None or expire_date.utcoffset() is None:\n            raise TrueApiProtocolError(\n                "expireDate must include an explicit timezone"\n            )\n        return AuthSession(\n            uuid_token=token,\n            expire_date=expire_date.astimezone(timezone.utc),\n        )\n''',
-          )
+          replace_once('src/wbcz_ui/_live_true_api_base.py', 'from wbcz.models import KiState\nfrom wbcz.true_api import TrueApiError\n', 'from wbcz.cis_inventory import safe_transport_error\nfrom wbcz.models import KiState\nfrom wbcz.true_api import TrueApiError\n')
+          replace_once('src/wbcz_ui/_live_true_api_base.py', 'class TrueApiHttpError(TrueApiError):\n    def __init__(self, status: int | None, message: str) -> None:\n        super().__init__(message)\n        self.status = status\n', 'class TrueApiHttpError(TrueApiError):\n    def __init__(self, status: int | None, message: str, *, content_type: str | None = None, body_sha256: str | None = None, safe_error_code: str | None = None) -> None:\n        super().__init__(message)\n        self.status = status\n        self.content_type = content_type\n        self.body_sha256 = body_sha256\n        self.safe_error_code = safe_error_code\n')
+          replace_once('src/wbcz_ui/_live_true_api_base.py', '@dataclass(frozen=True, slots=True)\nclass AuthSession:\n    bearer_token: str\n    expire_date: datetime\n', '@dataclass(frozen=True, slots=True)\nclass AuthSession:\n    """Windows-memory UUID session; legacy token is never used as bearer."""\n    uuid_token: str\n    expire_date: datetime\n\n    @property\n    def bearer_token(self) -> str:\n        return self.uuid_token\n')
+          replace_once('src/wbcz_ui/_live_true_api_base.py', '            if not 200 <= status < 300:\n                text = raw[:4096].decode("utf-8", errors="replace")\n                raise TrueApiHttpError(\n                    status, f"True API HTTP {status}: {text[:500]}"\n                )\n', '            if not 200 <= status < 300:\n                safe = safe_transport_error(status, {str(k): str(v) for k, v in response_headers.items()}, raw)\n                raise TrueApiHttpError(status, safe.safe_error_message or f"True API HTTP {status}", content_type=safe.content_type, body_sha256=safe.body_sha256, safe_error_code=safe.safe_error_code)\n')
+          replace_once('src/wbcz_ui/_live_true_api_base.py', '        try:\n            expire_date = datetime.fromisoformat(expire.replace("Z", "+00:00"))\n            if expire_date.tzinfo is None:\n                expire_date = expire_date.replace(tzinfo=timezone.utc)\n        except ValueError as exc:\n            raise TrueApiProtocolError(\n                "Invalid expireDate in authentication response"\n            ) from exc\n        return AuthSession(token, expire_date.astimezone(timezone.utc))\n', '        try:\n            expire_date = datetime.fromisoformat(expire.replace("Z", "+00:00"))\n        except ValueError as exc:\n            raise TrueApiProtocolError("Invalid expireDate in authentication response") from exc\n        if expire_date.tzinfo is None or expire_date.utcoffset() is None:\n            raise TrueApiProtocolError("expireDate must include an explicit timezone")\n        return AuthSession(uuid_token=token, expire_date=expire_date.astimezone(timezone.utc))\n')
 
-          # XML/text auth errors also receive bounded secret redaction.
-          replace_once(
-              'src/wbcz/cis_inventory.py',
-              '''def _redact_secret_text(value: str) -> str:\n    text = re.sub(r"(?i)bearer\\s+[A-Za-z0-9._~+\\-/]+=*", "Bearer [REDACTED]", value)\n    text = re.sub(r"(?i)(token|pin)\\s*[:=]\\s*\\S+", r"\\1=[REDACTED]", text)\n    return text\n''',
-              '''def _redact_secret_text(value: str) -> str:\n    text = re.sub(r"(?i)bearer\\s+[A-Za-z0-9._~+\\-/]+=*", "Bearer [REDACTED]", value)\n    text = re.sub(r"(?i)(token|pin)\\s*[:=]\\s*\\S+", r"\\1=[REDACTED]", text)\n    text = re.sub(\n        r"(?is)(<\\s*(?:uuidtoken|token|pin)\\b[^>]*>).*?(</\\s*(?:uuidtoken|token|pin)\\s*>)",\n        r"\\1[REDACTED]\\2",\n        text,\n    )\n    return text\n''',
-          )
+          replace_once('src/wbcz/cis_inventory.py', 'def _redact_secret_text(value: str) -> str:\n    text = re.sub(r"(?i)bearer\\s+[A-Za-z0-9._~+\\-/]+=*", "Bearer [REDACTED]", value)\n    text = re.sub(r"(?i)(token|pin)\\s*[:=]\\s*\\S+", r"\\1=[REDACTED]", text)\n    return text\n', 'def _redact_secret_text(value: str) -> str:\n    text = re.sub(r"(?i)bearer\\s+[A-Za-z0-9._~+\\-/]+=*", "Bearer [REDACTED]", value)\n    text = re.sub(r"(?i)(token|pin)\\s*[:=]\\s*\\S+", r"\\1=[REDACTED]", text)\n    text = re.sub(r"(?is)(<\\s*(?:uuidtoken|token|pin)\\b[^>]*>).*?(</\\s*(?:uuidtoken|token|pin)\\s*>)", r"\\1[REDACTED]\\2", text)\n    return text\n')
 
-          # Windows session lifecycle and 401 invalidation; no refresh endpoint is invented.
-          replace_once(
-              'src/wbcz/windows_agent.py',
-              '''    TrueApiError,\n    TrueApiProtocolError,\n''',
-              '''    TrueApiError,\n    TrueApiHttpError,\n    TrueApiProtocolError,\n''',
-          )
-          replace_once(
-              'src/wbcz/windows_agent.py',
-              '''        if hashlib.sha256(payload).hexdigest() != document_sha256:\n            raise AgentSecurityError("document hash mismatch")\n        cert = self.inspector.inspect()\n''',
-              '''        if hashlib.sha256(payload).hexdigest() != document_sha256:\n            raise AgentSecurityError("document hash mismatch")\n        try:\n            parsed_document = json.loads(payload.decode("utf-8"))\n        except (UnicodeDecodeError, json.JSONDecodeError) as exc:\n            raise AgentSecurityError("document bytes are not UTF-8 JSON") from exc\n        if not isinstance(parsed_document, dict):\n            raise AgentSecurityError("document JSON root must be an object")\n        cert = self.inspector.inspect()\n''',
-          )
-          old='''class AgentSessionManager:\n    \"\"\"Keeps the True API UUID bearer only in Windows process memory.\"\"\"\n\n    def __init__(\n        self,\n        authenticator: TrueApiAuthenticator,\n        *,\n        refresh_margin: timedelta = timedelta(minutes=2),\n        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),\n    ) -> None:\n        self.authenticator = authenticator\n        self.refresh_margin = refresh_margin\n        self._now = now\n        self._session: AuthSession | None = None\n\n    def bearer_token(self) -> str:\n        now = self._now().astimezone(timezone.utc)\n        if (\n            self._session is None\n            or self._session.expire_date <= now + self.refresh_margin\n        ):\n            self._session = self.authenticator.authenticate()\n        return self._session.bearer_token\n\n    @property\n    def expire_date(self) -> datetime | None:\n        return self._session.expire_date if self._session else None\n'''
-          new='''class AgentSessionManager:\n    \"\"\"Keeps the True API UUID bearer only in Windows process memory.\n\n    There is no refresh-token endpoint. Expiry/401 invalidates the local UUID\n    session; the next bearer request performs the full /auth/key -> sign ->\n    /auth/simpleSignIn flow again.\n    \"\"\"\n\n    def __init__(\n        self,\n        authenticator: TrueApiAuthenticator,\n        *,\n        refresh_margin: timedelta = timedelta(minutes=2),\n        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),\n    ) -> None:\n        self.authenticator = authenticator\n        self.refresh_margin = refresh_margin\n        self._now = now\n        self._session: AuthSession | None = None\n\n    def invalidate(self) -> None:\n        self._session = None\n\n    def observe_http_status(self, status: int | None) -> None:\n        if status == 401:\n            self.invalidate()\n\n    def bearer_token(self) -> str:\n        now = self._now().astimezone(timezone.utc)\n        if (\n            self._session is None\n            or self._session.expire_date <= now + self.refresh_margin\n        ):\n            # Clear stale material before obtaining a new challenge. If auth\n            # fails, no expired/near-expiry UUID token remains reusable.\n            self._session = None\n            self._session = self.authenticator.authenticate()\n        return self._session.uuid_token\n\n    @property\n    def expire_date(self) -> datetime | None:\n        return self._session.expire_date if self._session else None\n'''
+          replace_once('src/wbcz/windows_agent.py', '    TrueApiError,\n    TrueApiProtocolError,\n', '    TrueApiError,\n    TrueApiHttpError,\n    TrueApiProtocolError,\n')
+          replace_once('src/wbcz/windows_agent.py', '        if hashlib.sha256(payload).hexdigest() != document_sha256:\n            raise AgentSecurityError("document hash mismatch")\n        cert = self.inspector.inspect()\n', '        if hashlib.sha256(payload).hexdigest() != document_sha256:\n            raise AgentSecurityError("document hash mismatch")\n        try:\n            parsed_document = json.loads(payload.decode("utf-8"))\n        except (UnicodeDecodeError, json.JSONDecodeError) as exc:\n            raise AgentSecurityError("document bytes are not UTF-8 JSON") from exc\n        if not isinstance(parsed_document, dict):\n            raise AgentSecurityError("document JSON root must be an object")\n        cert = self.inspector.inspect()\n')
+          old='class AgentSessionManager:\n    """Keeps the True API UUID bearer only in Windows process memory."""\n\n    def __init__(\n        self,\n        authenticator: TrueApiAuthenticator,\n        *,\n        refresh_margin: timedelta = timedelta(minutes=2),\n        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),\n    ) -> None:\n        self.authenticator = authenticator\n        self.refresh_margin = refresh_margin\n        self._now = now\n        self._session: AuthSession | None = None\n\n    def bearer_token(self) -> str:\n        now = self._now().astimezone(timezone.utc)\n        if (\n            self._session is None\n            or self._session.expire_date <= now + self.refresh_margin\n        ):\n            self._session = self.authenticator.authenticate()\n        return self._session.bearer_token\n\n    @property\n    def expire_date(self) -> datetime | None:\n        return self._session.expire_date if self._session else None\n'
+          new='class AgentSessionManager:\n    """Memory-only UUID session; expiry/401 causes full re-auth, never refresh."""\n\n    def __init__(\n        self,\n        authenticator: TrueApiAuthenticator,\n        *,\n        refresh_margin: timedelta = timedelta(minutes=2),\n        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),\n    ) -> None:\n        self.authenticator = authenticator\n        self.refresh_margin = refresh_margin\n        self._now = now\n        self._session: AuthSession | None = None\n\n    def invalidate(self) -> None:\n        self._session = None\n\n    def observe_http_status(self, status: int | None) -> None:\n        if status == 401:\n            self.invalidate()\n\n    def bearer_token(self) -> str:\n        now = self._now().astimezone(timezone.utc)\n        if self._session is None or self._session.expire_date <= now + self.refresh_margin:\n            self._session = None\n            self._session = self.authenticator.authenticate()\n        return self._session.uuid_token\n\n    @property\n    def expire_date(self) -> datetime | None:\n        return self._session.expire_date if self._session else None\n'
           replace_once('src/wbcz/windows_agent.py', old, new)
-          replace_once(
-              'src/wbcz/windows_agent.py',
-              '''        body_sha = hashlib.sha256(response.body).hexdigest()\n        content_type = self._content_type(response.headers)\n        if 200 <= response.status < 300:\n''',
-              '''        body_sha = hashlib.sha256(response.body).hexdigest()\n        content_type = self._content_type(response.headers)\n        self.session_manager.observe_http_status(response.status)\n        if 200 <= response.status < 300:\n''',
-          )
-          replace_once(
-              'src/wbcz/windows_agent.py',
-              '''                product_http_status = product_response.status\n                product_body_sha256 = hashlib.sha256(product_response.body).hexdigest()\n                if not 200 <= product_response.status < 300:\n''',
-              '''                product_http_status = product_response.status\n                product_body_sha256 = hashlib.sha256(product_response.body).hexdigest()\n                self.session_manager.observe_http_status(product_response.status)\n                if not 200 <= product_response.status < 300:\n''',
-          )
-          replace_once(
-              'src/wbcz/windows_agent.py',
-              '''    def _cis_check(self, job: AgentJob) -> AgentResult:\n        payload = self.transport.cises_info(\n            job.cises, bearer_token=self.session_manager.bearer_token()\n        )\n''',
-              '''    def _cis_check(self, job: AgentJob) -> AgentResult:\n        try:\n            payload = self.transport.cises_info(\n                job.cises, bearer_token=self.session_manager.bearer_token()\n            )\n        except TrueApiHttpError as exc:\n            self.session_manager.observe_http_status(exc.status)\n            raise\n''',
-          )
-          replace_once(
-              'src/wbcz/windows_agent.py',
-              '''        response = self.transport.create_document(\n            document_type=job.document_type,\n            product_document_base64=job.product_document_base64,\n            signature_base64=signature,\n            bearer_token=self.session_manager.bearer_token(),\n        )\n        body_sha = hashlib.sha256(response.body).hexdigest()\n''',
-              '''        response = self.transport.create_document(\n            document_type=job.document_type,\n            product_document_base64=job.product_document_base64,\n            signature_base64=signature,\n            bearer_token=self.session_manager.bearer_token(),\n        )\n        self.session_manager.observe_http_status(response.status)\n        body_sha = hashlib.sha256(response.body).hexdigest()\n''',
-          )
-          replace_once(
-              'src/wbcz/windows_agent.py',
-              '''        response = self.transport.poll_document(\n            job.document_id, bearer_token=self.session_manager.bearer_token()\n        )\n        body_sha = hashlib.sha256(response.body).hexdigest()\n''',
-              '''        response = self.transport.poll_document(\n            job.document_id, bearer_token=self.session_manager.bearer_token()\n        )\n        self.session_manager.observe_http_status(response.status)\n        body_sha = hashlib.sha256(response.body).hexdigest()\n''',
-          )
-
-          Path('docs/M3_AUTH_SIGNING_CONTRACT.md').write_text('''# M3 Auth / Signing hardening contract\n\nOfficial source baseline: **True API v726.0 (04.09.2026)**.\n\n## Authentication\n\nPrimary UUID flow remains Windows-local: `GET /api/v3/true-api/auth/key` -> validate `uuid` + `data` -> sign the exact UTF-8 challenge using the locally selected CryptoPro certificate in **attached** mode -> `POST /api/v3/true-api/auth/simpleSignIn` with `uuid`, attached signature in `data`, participant `inn`, and `unitedToken=true`. The bearer credential is strictly `uuidToken`; an optional/legacy `token` field is not used. `expireDate` must carry timezone information and is normalized to UTC. The token is memory-only on the Windows agent.\n\nThere is no refresh endpoint. On local expiry/near-expiry or HTTP 401 the local session is invalidated; the next request repeats the full challenge/sign/sign-in flow. No True API bearer is persisted, returned to the backend, or exposed to the browser.\n\nThe backend cannot provide an auth challenge or arbitrary bytes to a signer: agent jobs have no auth-sign job or challenge/signature fields. The authentication signer is wired only inside the Windows runtime to `TrueApiAuthenticator`, which obtains challenge provenance directly from `/auth/key`.\n\n## Signing modes\n\nAuthentication challenge signing is structurally separate from business-document signing. `WindowsCryptoProAuthSigner` uses CryptoPro `cryptcp -signf -attached ...`. `WindowsCryptoProDocumentSigner` signs only the immutable P0 business-document bytes and intentionally omits `-attached`, producing the detached CMS/CAdES-BES-compatible signature required by document create. There is no generic `sign(bytes)` RPC.\n\nBefore document signing, the Windows boundary revalidates allowed document type (`LK_RECEIPT` / `LP_RETURN`), `pg=lp`, participant INN, SHA-256, Base64-decoded exact bytes, valid UTF-8 JSON, and object root. Certificate thumbprint is taken from local trusted runtime configuration and cannot be overridden by a job.\n\n## Error and secret handling\n\nAuth HTTP errors reuse the M1 safe transport-error policy for JSON, XML, text, and empty bodies. Persisted/audited diagnostics are bounded and redacted; bearer/token/PIN/private-key material is not logged.\n\n## Boundaries preserved\n\n- Windows outbound-only; no inbound listener.\n- CryptoPro CSP + stunnel_msspi/MSSPI GOST TLS architecture unchanged.\n- Private key export: **NO**.\n- PIN in backend/DB/job/log/browser: **NO**.\n- Direct VPS True API: **NO**.\n- Generic HTTP/True API proxy: **NO**.\n- Production write remains default-off/hard-disabled pending runtime contract tests.\n- No new document types, product groups, mutation operations, or frontend capability.\n- No DB migration and no auth-session persistence.\n\n## Runtime-only acceptance\n\nThis M3 task does **not** claim real certificate discovery, real CryptoPro CSP/Rutoken/PIN prompting, real GOST TLS negotiation, or real True API authentication. Those require an explicit runtime task on the authorized Windows machine and must not be faked in CI.\n''', encoding='utf-8')
-
-          Path('tests/test_m3_auth_signing.py').write_text(r'''from __future__ import annotations
-
-import base64
-from dataclasses import fields
-from datetime import datetime, timedelta, timezone
-import hashlib
-import json
-from pathlib import Path
-import subprocess
-
-import pytest
-
-from wbcz.windows_agent import (
-    AgentHttpResponse,
-    AgentJob,
-    AgentJobType,
-    AgentSecurityError,
-    AgentSessionManager,
-    WindowsCryptoProDocumentSigner,
-)
-from wbcz_ui.live_true_api import (
-    AuthSession,
-    JsonlLiveAudit,
-    ReadOnlyTrueApiTransport,
-    TrueApiAuthenticator,
-    TrueApiHttpError,
-    TrueApiProtocolError,
-    WindowsCryptoProAuthSigner,
-)
-
-OWN = "1234567890"
-
-
-class FakeHeaders(dict):
-    pass
-
-
-class FakeHttpResponse:
-    def __init__(self, status, body, headers=None):
-        self.status = status
-        self._body = body
-        self.headers = FakeHeaders(headers or {})
-
-    def read(self):
-        return self._body
-
-
-class FakeConnection:
-    def __init__(self, response, calls, host, port, timeout=None):
-        self.response = response
-        self.calls = calls
-        self.host = host
-        self.port = port
-        self.timeout = timeout
-        self.headers = {}
-        self.data = None
-
-    def putrequest(self, method, target, skip_host=False):
-        self.method = method
-        self.target = target
-
-    def putheader(self, name, value):
-        self.headers[name] = value
-
-    def endheaders(self, data=None):
-        self.data = data
-        self.calls.append(self)
-
-    def getresponse(self):
-        return self.response
-
-    def close(self):
-        pass
-
-
-class FakeTunnel:
-    local_port = 41414
-
-    def session_marker(self):
-        return 0
-
-    def assert_gost_session(self, marker=0):
-        return None
-
-    def diagnostics(self):
-        return {"mechanism": "test"}
-
-
-def transport_for(tmp_path, responses):
-    calls = []
-    queue = list(responses)
-
-    def factory(host, port, timeout=None):
-        response = queue.pop(0)
-        return FakeConnection(response, calls, host, port, timeout)
-
-    return ReadOnlyTrueApiTransport(
-        audit=JsonlLiveAudit(tmp_path / "auth.jsonl"),
-        tunnel=FakeTunnel(),
-        connection_factory=factory,
-    ), calls
-
-
-def test_auth_key_is_get_without_authorization_and_signin_uses_uuidtoken(tmp_path):
-    key = FakeHttpResponse(200, json.dumps({"uuid": "u-1", "data": "  exact\nchallenge  "}).encode(), {})
-    signin = FakeHttpResponse(
-        200,
-        json.dumps({
-            "token": "must-not-be-used",
-            "uuidToken": "uuid-token-used",
-            "expireDate": "2026-09-17T10:00:00+05:00",
-        }).encode(),
-        {},
-    )
-    transport, calls = transport_for(tmp_path, [key, signin])
-
-    class Signer:
-        def __init__(self): self.values=[]
-        def sign_auth_challenge(self, value):
-            self.values.append(value)
-            return "ATTACHED"
-
-    signer=Signer()
-    session=TrueApiAuthenticator(transport, signer, OWN).authenticate()
-    assert signer.values == ["  exact\nchallenge  "]
-    assert session.uuid_token == "uuid-token-used"
-    assert session.bearer_token == "uuid-token-used"
-    assert session.expire_date == datetime(2026, 9, 17, 5, 0, tzinfo=timezone.utc)
-    assert calls[0].method == "GET"
-    assert calls[0].target == "/api/v3/true-api/auth/key"
-    assert "Authorization" not in calls[0].headers
-    assert calls[1].method == "POST"
-    assert calls[1].target == "/api/v3/true-api/auth/simpleSignIn"
-    assert json.loads(calls[1].data) == {
-        "uuid": "u-1",
-        "data": "ATTACHED",
-        "inn": OWN,
-        "unitedToken": True,
-    }
-    assert "Authorization" not in calls[1].headers
-
-
-def test_auth_requires_uuid_data_uuidtoken_and_timezone_expiry():
-    class Transport:
-        def __init__(self, key, signin): self.key=key; self.signin=signin
-        def request_json(self, method, path, **kwargs): return self.key if path.endswith("/key") else self.signin
-    class Signer:
-        def sign_auth_challenge(self, value): return "sig"
-
-    with pytest.raises(TrueApiProtocolError):
-        TrueApiAuthenticator(Transport({"data":"x"}, {}), Signer(), OWN).authenticate()
-    with pytest.raises(TrueApiProtocolError):
-        TrueApiAuthenticator(Transport({"uuid":"u","data":"x"}, {"token":"legacy","expireDate":"2026-09-17T10:00:00Z"}), Signer(), OWN).authenticate()
-    with pytest.raises(TrueApiProtocolError, match="timezone"):
-        TrueApiAuthenticator(Transport({"uuid":"u","data":"x"}, {"uuidToken":"u","expireDate":"2026-09-17T10:00:00"}), Signer(), OWN).authenticate()
-
-
-def test_session_expiry_clears_old_token_and_reauthenticates():
-    now = datetime(2026, 9, 17, 5, 0, tzinfo=timezone.utc)
-    class Auth:
-        def __init__(self): self.calls=0
-        def authenticate(self):
-            self.calls += 1
-            return AuthSession(f"uuid-{self.calls}", now + timedelta(minutes=3*self.calls))
-    clock=[now]
-    auth=Auth()
-    manager=AgentSessionManager(auth, now=lambda: clock[0])
-    assert manager.bearer_token() == "uuid-1"
-    clock[0] = now + timedelta(minutes=2)
-    assert manager.bearer_token() == "uuid-2"
-    manager.observe_http_status(401)
-    assert manager.expire_date is None
-    assert manager.bearer_token() == "uuid-3"
-    assert auth.calls == 3
-
-
-def test_failed_reauth_does_not_leave_expired_session():
-    now=datetime(2026,9,17,5,0,tzinfo=timezone.utc)
-    class Auth:
-        def __init__(self): self.calls=0
-        def authenticate(self):
-            self.calls += 1
-            if self.calls == 1:
-                return AuthSession("old", now + timedelta(minutes=1))
-            raise RuntimeError("auth failed")
-    manager=AgentSessionManager(Auth(), now=lambda: now, refresh_margin=timedelta(0))
-    assert manager.bearer_token() == "old"
-    manager._now=lambda: now + timedelta(minutes=2)
-    with pytest.raises(RuntimeError): manager.bearer_token()
-    assert manager.expire_date is None
-
-
-def test_auth_signer_is_attached_and_preserves_exact_utf8_challenge(tmp_path):
-    cryptcp=tmp_path/'cryptcp.exe'; cryptcp.write_bytes(b'x')
-    seen={}
-    class Inspector:
-        def inspect(self): return {}
-    def runner(command, **kwargs):
-        source=Path(command[command.index('-fext')-1])
-        seen['bytes']=source.read_bytes(); seen['command']=command
-        source.with_name(source.name+'.sgn').write_bytes(b'AUTH')
-        return subprocess.CompletedProcess(command,0,stdout='',stderr='')
-    signer=WindowsCryptoProAuthSigner('AA11', cryptcp_path=cryptcp, inspector=Inspector(), runner=runner)
-    challenge='  строка\nwith-space  '
-    assert base64.b64decode(signer.sign_auth_challenge(challenge)) == b'AUTH'
-    assert seen['bytes'] == challenge.encode('utf-8')
-    assert '-attached' in seen['command']
-    assert '-pin' not in seen['command']
-
-
-def test_document_signer_is_detached_and_revalidates_exact_json_bytes(tmp_path):
-    cryptcp=tmp_path/'cryptcp.exe'; cryptcp.write_bytes(b'x')
-    seen={}
-    class Inspector:
-        def inspect(self): return {}
-    def runner(command, **kwargs):
-        source=Path(command[command.index('-fext')-1])
-        seen['bytes']=source.read_bytes(); seen['command']=command
-        source.with_name(source.name+'.sgn').write_bytes(b'DOC')
-        return subprocess.CompletedProcess(command,0,stdout='',stderr='')
-    signer=WindowsCryptoProDocumentSigner(certificate_thumbprint='AA11', participant_inn=OWN, cryptcp_path=cryptcp, inspector=Inspector(), runner=runner)
-    payload=b'{"inn":"1234567890","x":1}'
-    sig,_=signer.sign_document_bytes(operation_id='op', document_type='LK_RECEIPT', pg='lp', expected_inn=OWN, document_sha256=hashlib.sha256(payload).hexdigest(), payload=payload)
-    assert base64.b64decode(sig)==b'DOC'
-    assert seen['bytes']==payload
-    assert '-attached' not in seen['command']
-    assert '-der' in seen['command'] and '-strict' in seen['command']
-    with pytest.raises(AgentSecurityError):
-        signer.sign_document_bytes(operation_id='op', document_type='LK_RECEIPT', pg='lp', expected_inn=OWN, document_sha256='0'*64, payload=payload)
-    bad=b'[1,2,3]'
-    with pytest.raises(AgentSecurityError, match='root'):
-        signer.sign_document_bytes(operation_id='op', document_type='LK_RECEIPT', pg='lp', expected_inn=OWN, document_sha256=hashlib.sha256(bad).hexdigest(), payload=bad)
-
-
-def test_backend_job_protocol_has_no_auth_signing_rpc_or_thumbprint_override():
-    names={f.name for f in fields(AgentJob)}
-    forbidden={'auth_challenge','challenge','bytes_to_sign','sign_payload','certificate_thumbprint','pin','private_key'}
-    assert names.isdisjoint(forbidden)
-    assert all('AUTH_SIGN' not in item.value and 'SIGN_AUTH' not in item.value for item in AgentJobType)
-
-
-def test_auth_error_json_xml_text_empty_are_safe_and_redacted(tmp_path):
-    bodies=[
-        (b'{"message":"Bearer SUPERSECRET"}', 'application/json'),
-        (b'<error><token>SUPERSECRET</token></error>', 'application/xml'),
-        (b'pin=SUPERSECRET', 'text/plain'),
-        (b'', 'text/plain'),
-    ]
-    for i,(body,ctype) in enumerate(bodies):
-        transport,calls=transport_for(tmp_path, [FakeHttpResponse(401, body, {'Content-Type':ctype})])
-        with pytest.raises(TrueApiHttpError) as exc:
-            transport.request_json('GET','/auth/key')
-        err=exc.value
-        assert err.status==401
-        assert err.body_sha256==hashlib.sha256(body).hexdigest()
-        assert 'SUPERSECRET' not in str(err)
-        assert 'SUPERSECRET' not in (tmp_path/'auth.jsonl').read_text(encoding='utf-8')
-
-
-def test_no_auth_session_secret_fields_in_agent_protocol():
-    job_fields={f.name for f in fields(AgentJob)}
-    assert 'uuid_token' not in job_fields and 'bearer_token' not in job_fields
-    assert 'token' not in job_fields and 'pin' not in job_fields and 'private_key' not in job_fields
-''', encoding='utf-8')
+          replace_once('src/wbcz/windows_agent.py', '        body_sha = hashlib.sha256(response.body).hexdigest()\n        content_type = self._content_type(response.headers)\n        if 200 <= response.status < 300:\n', '        body_sha = hashlib.sha256(response.body).hexdigest()\n        content_type = self._content_type(response.headers)\n        self.session_manager.observe_http_status(response.status)\n        if 200 <= response.status < 300:\n')
+          replace_once('src/wbcz/windows_agent.py', '                product_http_status = product_response.status\n                product_body_sha256 = hashlib.sha256(product_response.body).hexdigest()\n                if not 200 <= product_response.status < 300:\n', '                product_http_status = product_response.status\n                product_body_sha256 = hashlib.sha256(product_response.body).hexdigest()\n                self.session_manager.observe_http_status(product_response.status)\n                if not 200 <= product_response.status < 300:\n')
+          replace_once('src/wbcz/windows_agent.py', '    def _cis_check(self, job: AgentJob) -> AgentResult:\n        payload = self.transport.cises_info(\n            job.cises, bearer_token=self.session_manager.bearer_token()\n        )\n', '    def _cis_check(self, job: AgentJob) -> AgentResult:\n        try:\n            payload = self.transport.cises_info(job.cises, bearer_token=self.session_manager.bearer_token())\n        except TrueApiHttpError as exc:\n            self.session_manager.observe_http_status(exc.status)\n            raise\n')
+          replace_once('src/wbcz/windows_agent.py', '        response = self.transport.create_document(\n            document_type=job.document_type,\n            product_document_base64=job.product_document_base64,\n            signature_base64=signature,\n            bearer_token=self.session_manager.bearer_token(),\n        )\n        body_sha = hashlib.sha256(response.body).hexdigest()\n', '        response = self.transport.create_document(\n            document_type=job.document_type,\n            product_document_base64=job.product_document_base64,\n            signature_base64=signature,\n            bearer_token=self.session_manager.bearer_token(),\n        )\n        self.session_manager.observe_http_status(response.status)\n        body_sha = hashlib.sha256(response.body).hexdigest()\n')
+          replace_once('src/wbcz/windows_agent.py', '        response = self.transport.poll_document(\n            job.document_id, bearer_token=self.session_manager.bearer_token()\n        )\n        body_sha = hashlib.sha256(response.body).hexdigest()\n', '        response = self.transport.poll_document(\n            job.document_id, bearer_token=self.session_manager.bearer_token()\n        )\n        self.session_manager.observe_http_status(response.status)\n        body_sha = hashlib.sha256(response.body).hexdigest()\n')
           PY
-      - name: Commit implementation
+      - name: Commit source changes
         shell: bash
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/wbcz_ui/_live_true_api_base.py src/wbcz/cis_inventory.py src/wbcz/windows_agent.py docs/M3_AUTH_SIGNING_CONTRACT.md tests/test_m3_auth_signing.py
+          git add src/wbcz_ui/_live_true_api_base.py src/wbcz/cis_inventory.py src/wbcz/windows_agent.py
           git commit -m 'feat: harden M3 auth and signing boundaries'
           git push origin HEAD:m3/auth-signing-hardening-001
