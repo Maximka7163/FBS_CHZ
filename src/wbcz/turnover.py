@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 import re
 from typing import Any, Callable, Mapping, Sequence
@@ -20,10 +20,18 @@ _INN_RE = re.compile(r"^(?:\d{10}|\d{12})$")
 _KPP_RE = re.compile(r"^\d{9}$")
 _TNVED_RE = re.compile(r"^\d{10}$")
 _COUNTRY_RE = re.compile(r"^\d{3}$")
-_ALLOWED_PRIMARY_TYPES = frozenset({"RECEIPT", "SALES_RECEIPT", "OTHER"})
-_ALLOWED_CERT_TYPES = frozenset({"CONFORMITY_CERTIFICATE", "CONFORMITY_DECLARATION"})
+_DECLARATION_8_RE = re.compile(r"^\d{8}/\d{6}/\d{7}$")
+_DECLARATION_FLEX_RE = re.compile(r"^(?:\d{2}|\d{5}|\d{8})/\d{6}/\d{7}$")
+_RETURN_PRIMARY_TYPES = frozenset({"RECEIPT", "SALES_RECEIPT", "OTHER"})
+_WITHDRAW_DISTANCE_PRIMARY_TYPES = frozenset(
+    {"RECEIPT", "SALES_RECEIPT", "OTHER", "CONSIGNMENT_NOTE", "UTD"}
+)
 _WRITE_OFF_SOURCE_TYPES = frozenset({"DESTRUCTION_ACT", "CUSTOMS_DECLARATION", "OTHER"})
 WRITE_OFF_START_STATES = frozenset({"EMITTED", "APPLIED", "INTRODUCED", "APPLIED_NOT_PAID"})
+KNOWN_LP_RETURN_TYPES = frozenset(
+    {"REMOTE_SALE_RETURN", "RETAIL_RETURN", "OWN_USE_RETURN", "STATE_CONTRACT_RETURN", "NOT_FOR_SALE_RETURN"}
+)
+UNSUPPORTED_LP_RETURN_TYPES = frozenset({"VENDING_RETURN"})
 
 
 class TurnoverContractError(ValueError):
@@ -73,58 +81,58 @@ class TurnoverOperationDefinition:
 
 TURNOVER_OPERATION_REGISTRY: Mapping[TurnoverOperationKind, TurnoverOperationDefinition] = {
     TurnoverOperationKind.INTRODUCE_DOMESTIC: TurnoverOperationDefinition(
-        TurnoverOperationKind.INTRODUCE_DOMESTIC, "LP_INTRODUCE_GOODS", ("MANUAL",), ("lp",),
-        (), "DOMESTIC_INTRODUCTION", "INTRODUCED", None),
+        TurnoverOperationKind.INTRODUCE_DOMESTIC, "LP_INTRODUCE_GOODS", ("MANUAL",), (M5_PG,), (),
+        "DOMESTIC_INTRODUCTION", "INTRODUCED", None),
     TurnoverOperationKind.INTRODUCE_FROM_INDIVIDUAL: TurnoverOperationDefinition(
-        TurnoverOperationKind.INTRODUCE_FROM_INDIVIDUAL, "LK_INDI_COMMISSIONING", ("MANUAL",), ("lp",),
-        (), "INDIVIDUAL_COMMISSIONING", "INTRODUCED", None),
+        TurnoverOperationKind.INTRODUCE_FROM_INDIVIDUAL, "LK_INDI_COMMISSIONING", ("MANUAL",), (M5_PG,), (),
+        "INDIVIDUAL_COMMISSIONING", "INTRODUCED", None),
     TurnoverOperationKind.INTRODUCE_IMPORT_PRE_MANDATORY: TurnoverOperationDefinition(
-        TurnoverOperationKind.INTRODUCE_IMPORT_PRE_MANDATORY, "LP_GOODS_IMPORT", ("MANUAL",), ("lp",),
-        (), "IMPORT_PRE_MANDATORY", "INTRODUCED", None),
+        TurnoverOperationKind.INTRODUCE_IMPORT_PRE_MANDATORY, "LP_GOODS_IMPORT", ("MANUAL",), (M5_PG,), (),
+        "IMPORT_PRE_MANDATORY", "INTRODUCED", None),
     TurnoverOperationKind.INTRODUCE_EAEU: TurnoverOperationDefinition(
-        TurnoverOperationKind.INTRODUCE_EAEU, "CROSSBORDER", ("MANUAL",), ("lp",),
-        (), "EAEU_INTRODUCTION", "INTRODUCED", None),
+        TurnoverOperationKind.INTRODUCE_EAEU, "CROSSBORDER", ("MANUAL",), (M5_PG,), (),
+        "EAEU_INTRODUCTION", "INTRODUCED", None),
     TurnoverOperationKind.INTRODUCE_REMAINS: TurnoverOperationDefinition(
-        TurnoverOperationKind.INTRODUCE_REMAINS, "LP_INTRODUCE_OST", ("MANUAL",), ("lp",),
-        ("REMAINS",), "REMAINS_INTRODUCTION", "INTRODUCED", None),
+        TurnoverOperationKind.INTRODUCE_REMAINS, "LP_INTRODUCE_OST", ("MANUAL",), (M5_PG,), ("REMAINS",),
+        "REMAINS_INTRODUCTION", "INTRODUCED", None),
     TurnoverOperationKind.INTRODUCE_CONTRACT: TurnoverOperationDefinition(
-        TurnoverOperationKind.INTRODUCE_CONTRACT, "LK_CONTRACT_COMMISSIONING", ("MANUAL",), ("lp",),
+        TurnoverOperationKind.INTRODUCE_CONTRACT, "LK_CONTRACT_COMMISSIONING", ("MANUAL",), (M5_PG,),
         ("CONTRACT_PRODUCTION",), "CONTRACT_INTRODUCTION", "INTRODUCED", None),
     TurnoverOperationKind.INTRODUCE_FTS: TurnoverOperationDefinition(
-        TurnoverOperationKind.INTRODUCE_FTS, "LP_FTS_INTRODUCE", ("MANUAL",), ("lp",),
-        (), "FTS_INTRODUCTION", "INTRODUCED", None),
+        TurnoverOperationKind.INTRODUCE_FTS, "LP_FTS_INTRODUCE", ("MANUAL",), (M5_PG,), (),
+        "FTS_INTRODUCTION", "INTRODUCED", None),
     TurnoverOperationKind.WITHDRAW: TurnoverOperationDefinition(
-        TurnoverOperationKind.WITHDRAW, "LK_RECEIPT", ("MANUAL",), ("lp",),
-        ("DISTANCE",), "WITHDRAWAL", "RETIRED", "LK_RECEIPT_CANCEL"),
+        TurnoverOperationKind.WITHDRAW, "LK_RECEIPT", ("MANUAL",), (M5_PG,), ("DISTANCE",),
+        "WITHDRAWAL", "RETIRED", "LK_RECEIPT_CANCEL"),
     TurnoverOperationKind.WITHDRAW_DISTANCE: TurnoverOperationDefinition(
-        TurnoverOperationKind.WITHDRAW_DISTANCE, "LK_RECEIPT", ("MANUAL",), ("lp",),
-        ("DISTANCE",), "DISTANCE_WITHDRAWAL", "RETIRED:DISTANCE", "LK_RECEIPT_CANCEL"),
+        TurnoverOperationKind.WITHDRAW_DISTANCE, "LK_RECEIPT", ("MANUAL",), (M5_PG,), ("DISTANCE",),
+        "DISTANCE_WITHDRAWAL", "RETIRED:DISTANCE", "LK_RECEIPT_CANCEL"),
     TurnoverOperationKind.RETURN_TO_CIRCULATION: TurnoverOperationDefinition(
-        TurnoverOperationKind.RETURN_TO_CIRCULATION, "LP_RETURN", ("MANUAL",), ("lp",),
-        ("REMOTE_SALE_RETURN", "RETAIL_RETURN", "OWN_USE_RETURN", "STATE_CONTRACT_RETURN", "NOT_FOR_SALE_RETURN"),
-        "RETURN_REASON_MATRIX", "INTRODUCED", None),
+        TurnoverOperationKind.RETURN_TO_CIRCULATION, "LP_RETURN", ("MANUAL",), (M5_PG,),
+        tuple(sorted(KNOWN_LP_RETURN_TYPES)), "RETURN_REASON_MATRIX", "INTRODUCED", None,
+        capability="FAIL_CLOSED_MATRIX_GATED"),
     TurnoverOperationKind.RETURN_REMOTE_SALE: TurnoverOperationDefinition(
-        TurnoverOperationKind.RETURN_REMOTE_SALE, "LP_RETURN", ("MANUAL",), ("lp",),
-        ("REMOTE_SALE_RETURN",), "REMOTE_SALE_RETURN", "INTRODUCED", None),
+        TurnoverOperationKind.RETURN_REMOTE_SALE, "LP_RETURN", ("MANUAL",), (M5_PG,), ("REMOTE_SALE_RETURN",),
+        "REMOTE_SALE_RETURN", "INTRODUCED", None),
     TurnoverOperationKind.REMARK: TurnoverOperationDefinition(
-        TurnoverOperationKind.REMARK, "LK_REMARK", ("MANUAL",), ("lp",),
+        TurnoverOperationKind.REMARK, "LK_REMARK", ("MANUAL",), (M5_PG,),
         ("DESCRIPTION_ERRORS", "RETAIL_RETURN", "REMOTE_SALE_RETURN", "KM_SPOILED"),
         "REMARK", "INTRODUCED", None),
     TurnoverOperationKind.WRITE_OFF: TurnoverOperationDefinition(
-        TurnoverOperationKind.WRITE_OFF, "WRITE_OFF", ("MANUAL",), ("lp",),
-        (), "WRITE_OFF", "WRITTEN_OFF", None),
+        TurnoverOperationKind.WRITE_OFF, "WRITE_OFF", ("MANUAL",), (M5_PG,), (),
+        "WRITE_OFF", "WRITTEN_OFF", None),
     TurnoverOperationKind.CANCEL_WITHDRAWAL: TurnoverOperationDefinition(
-        TurnoverOperationKind.CANCEL_WITHDRAWAL, "LK_RECEIPT_CANCEL", ("MANUAL",), ("lp",),
-        (), "CANCEL_ELIGIBLE_LK_RECEIPT", "RESTORE_FROM_ORIGINAL", "LK_RECEIPT"),
+        TurnoverOperationKind.CANCEL_WITHDRAWAL, "LK_RECEIPT_CANCEL", ("MANUAL",), (M5_PG,), (),
+        "CANCEL_ELIGIBLE_LK_RECEIPT", "RESTORE_FROM_ORIGINAL", "LK_RECEIPT"),
 }
 
-M5_DOCUMENT_TYPES = frozenset(defn.document_type for defn in TURNOVER_OPERATION_REGISTRY.values())
+M5_DOCUMENT_TYPES = frozenset(item.document_type for item in TURNOVER_OPERATION_REGISTRY.values())
+M5_AGENT_WRITE_JOB_TYPES = frozenset(M5_DOCUMENT_TYPES)
 KNOWN_FAIL_CLOSED_DOCUMENT_TYPES: Mapping[str, str] = {
     "LP_CANCEL_SHIPMENT": "SOURCE_DOCUMENT_REQUIRED",
     "LK_UNIVERSAL_INTRODUCE": "NOT_EXPOSED_FOR_LP",
     "LP_FTS_INTRODUCE_AUTO": "SYSTEM_GENERATED_NOT_CLIENT_SUBMIT",
 }
-M5_AGENT_WRITE_JOB_TYPES = frozenset(M5_DOCUMENT_TYPES)
 
 
 def document_type_for_operation(kind: TurnoverOperationKind | str) -> str:
@@ -161,10 +169,9 @@ def _kpp(value: Any, label: str = "kpp") -> str:
 def _fias(value: Any, label: str = "fias_id") -> str:
     text = _nonempty(value, label, max_len=36)
     try:
-        parsed = UUID(text)
+        return str(UUID(text))
     except (ValueError, AttributeError) as exc:
         raise TurnoverContractError(f"{label} must be UUID") from exc
-    return str(parsed)
 
 
 def _cis(value: Any, label: str = "cis") -> str:
@@ -204,6 +211,44 @@ def _day(value: Any, label: str) -> str:
     raise TurnoverContractError(f"{label} must be a date")
 
 
+def _utc_millis(value: Any, label: str) -> str:
+    if isinstance(value, str):
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise TurnoverContractError(f"{label} must be yyyy-MM-ddTHH:mm:ss.SSSZ") from exc
+    elif isinstance(value, datetime) and value.tzinfo is not None:
+        parsed = value.astimezone(timezone.utc)
+    else:
+        raise TurnoverContractError(f"{label} must be timezone-aware datetime")
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S.") + f"{parsed.microsecond // 1000:03d}Z"
+
+
+def _shift_year(value: date, years: int) -> date:
+    try:
+        return value.replace(year=value.year + years)
+    except ValueError:
+        return value.replace(year=value.year + years, day=28)
+
+
+def _bounded_day(value: Any, label: str, *, min_day: date | None = None, max_day: date | None = None) -> str:
+    text = _day(value, label)
+    parsed = date.fromisoformat(text)
+    if min_day is not None and parsed < min_day:
+        raise TurnoverContractError(f"{label} is earlier than the official range")
+    if max_day is not None and parsed > max_day:
+        raise TurnoverContractError(f"{label} is later than the official range")
+    return text
+
+
+def _declaration(value: Any, label: str, *, flexible_prefix: bool = False) -> str:
+    text = _nonempty(value, label, max_len=23)
+    pattern = _DECLARATION_FLEX_RE if flexible_prefix else _DECLARATION_8_RE
+    if pattern.fullmatch(text) is None:
+        raise TurnoverContractError(f"{label} has invalid customs declaration format")
+    return text
+
+
 def _unique_cises(values: Sequence[str], label: str) -> tuple[str, ...]:
     if not values:
         raise TurnoverContractError(f"{label} must be non-empty")
@@ -220,11 +265,8 @@ class PermitDocument:
     certificate_date: date | str
 
     def to_wire(self) -> dict[str, Any]:
-        cert_type = _nonempty(self.certificate_type, "certificate_type", max_len=64)
-        if cert_type not in _ALLOWED_CERT_TYPES:
-            raise TurnoverContractError("unsupported certificate_type")
         return {
-            "certificate_type": cert_type,
+            "certificate_type": _nonempty(self.certificate_type, "certificate_type", max_len=64),
             "certificate_number": _nonempty(self.certificate_number, "certificate_number"),
             "certificate_date": _day(self.certificate_date, "certificate_date"),
         }
@@ -237,14 +279,14 @@ class PrimaryDocument:
     document_date: date | str
     custom_name: str | None = None
 
-    def to_return_wire(self) -> dict[str, Any]:
-        kind = _nonempty(self.document_type, "primary_document_type", max_len=32).upper()
-        if kind not in _ALLOWED_PRIMARY_TYPES:
-            raise TurnoverContractError("unsupported primary_document_type")
-        result = {
-            "primary_document_type": kind,
-            "primary_document_number": _nonempty(self.number, "primary_document_number"),
-            "primary_document_date": _day(self.document_date, "primary_document_date"),
+    def _common(self, *, kind_label: str, number_label: str, date_label: str, allowed: frozenset[str]) -> dict[str, Any]:
+        kind = _nonempty(self.document_type, kind_label, max_len=32).upper()
+        if kind not in allowed:
+            raise TurnoverContractError(f"unsupported {kind_label}")
+        result: dict[str, Any] = {
+            kind_label: kind,
+            number_label: _nonempty(self.number, number_label),
+            date_label: _day(self.document_date, date_label),
         }
         if kind == "OTHER":
             result["primary_document_custom_name"] = _nonempty(self.custom_name, "primary_document_custom_name")
@@ -252,20 +294,26 @@ class PrimaryDocument:
             raise TurnoverContractError("primary_document_custom_name must be absent unless type=OTHER")
         return result
 
+    def to_return_wire(self) -> dict[str, Any]:
+        return self._common(
+            kind_label="primary_document_type",
+            number_label="primary_document_number",
+            date_label="primary_document_date",
+            allowed=_RETURN_PRIMARY_TYPES,
+        )
+
     def to_withdrawal_wire(self) -> dict[str, Any]:
-        kind = _nonempty(self.document_type, "document_type", max_len=32).upper()
-        if kind not in _ALLOWED_PRIMARY_TYPES:
-            raise TurnoverContractError("unsupported document_type")
-        result = {
-            "document_type": kind,
-            "document_number": _nonempty(self.number, "document_number"),
-            "document_date": _day(self.document_date, "document_date"),
-        }
-        if kind == "OTHER":
-            result["primary_document_custom_name"] = _nonempty(self.custom_name, "primary_document_custom_name")
-        elif self.custom_name not in (None, ""):
-            raise TurnoverContractError("primary_document_custom_name must be absent unless type=OTHER")
-        return result
+        return self._common(
+            kind_label="document_type",
+            number_label="document_number",
+            date_label="document_date",
+            allowed=_WITHDRAW_DISTANCE_PRIMARY_TYPES,
+        )
+
+    def to_remark_wire(self, cause: str) -> dict[str, Any]:
+        if cause not in {"RETAIL_RETURN", "REMOTE_SALE_RETURN"}:
+            raise TurnoverContractError("primary document is unsupported for this M5 remarking cause")
+        return self.to_return_wire()
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +342,7 @@ class IntroduceProduct:
     def to_wire(self) -> dict[str, Any]:
         result: dict[str, Any] = {"uit_code": _cis(self.uit_code, "uit_code"), "tnved_code": _tnved(self.tnved_code)}
         if self.permit_documents:
-            result["certificate_document_data"] = [doc.to_wire() for doc in self.permit_documents]
+            result["certificate_document_data"] = [item.to_wire() for item in self.permit_documents]
         return result
 
 
@@ -303,19 +351,21 @@ class LpIntroduceGoodsDocument:
     participant_inn: str
     producer_inn: str
     owner_inn: str
-    production_type: str
     products: tuple[IntroduceProduct, ...]
     production_date: date | str | None = None
+    production_type: str = "OWN_PRODUCTION"
     document_type = "LP_INTRODUCE_GOODS"
 
     def to_wire(self) -> dict[str, Any]:
+        if self.production_type != "OWN_PRODUCTION":
+            raise TurnoverContractError("LP_INTRODUCE_GOODS production_type must be OWN_PRODUCTION")
         if not self.products:
             raise TurnoverContractError("products must be non-empty")
         result: dict[str, Any] = {
             "participant_inn": _inn(self.participant_inn, "participant_inn"),
             "producer_inn": _inn(self.producer_inn, "producer_inn"),
             "owner_inn": _inn(self.owner_inn, "owner_inn"),
-            "production_type": _nonempty(self.production_type, "production_type", max_len=64),
+            "production_type": "OWN_PRODUCTION",
             "products": [item.to_wire() for item in self.products],
         }
         if self.production_date is not None:
@@ -327,17 +377,20 @@ class LpIntroduceGoodsDocument:
 class IndividualProduct:
     uit: str | None = None
     uitu: str | None = None
+    product_receiving_date: datetime | str | None = None
     product_name: str | None = None
-    children: tuple[str, ...] = ()
+    children: tuple["IndividualProduct", ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         if (self.uit is None) == (self.uitu is None):
             raise TurnoverContractError("individual product requires exactly one of uit/uitu")
         result: dict[str, Any] = {"uit": _cis(self.uit, "uit")} if self.uit is not None else {"uitu": _cis(self.uitu, "uitu")}
+        if self.product_receiving_date is not None:
+            result["product_receiving_date"] = _utc_millis(self.product_receiving_date, "product_receiving_date")
         if self.product_name is not None:
             result["productName"] = _nonempty(self.product_name, "productName")
         if self.children:
-            result["children"] = list(_unique_cises(self.children, "children"))
+            result["children"] = [item.to_wire() for item in self.children]
         return result
 
 
@@ -345,15 +398,18 @@ class IndividualProduct:
 class LkIndiCommissioningDocument:
     participant_inn: str
     products_list: tuple[IndividualProduct, ...]
-    product_receiving_date: date | str | None = None
+    product_receiving_date: datetime | str | None = None
     document_type = "LK_INDI_COMMISSIONING"
 
     def to_wire(self) -> dict[str, Any]:
         if not self.products_list:
             raise TurnoverContractError("products_list must be non-empty")
-        result: dict[str, Any] = {"participant_inn": _inn(self.participant_inn, "participant_inn"), "products_list": [item.to_wire() for item in self.products_list]}
+        result: dict[str, Any] = {
+            "participant_inn": _inn(self.participant_inn, "participant_inn"),
+            "products_list": [item.to_wire() for item in self.products_list],
+        }
         if self.product_receiving_date is not None:
-            result["product_receiving_date"] = _day(self.product_receiving_date, "product_receiving_date")
+            result["product_receiving_date"] = _utc_millis(self.product_receiving_date, "product_receiving_date")
         return result
 
 
@@ -383,7 +439,20 @@ class LpGoodsImportDocument:
     def to_wire(self) -> dict[str, Any]:
         if not self.products:
             raise TurnoverContractError("products must be non-empty")
-        return {"participant_inn": _inn(self.participant_inn, "participant_inn"), "declaration_date": _day(self.declaration_date, "declaration_date"), "declaration_number": _nonempty(self.declaration_number, "declaration_number"), "customs_code": _nonempty(self.customs_code, "customs_code", max_len=64), "decision_code": _nonempty(self.decision_code, "decision_code", max_len=64), "products": [item.to_wire() for item in self.products]}
+        customs = _nonempty(self.customs_code, "customs_code", max_len=8)
+        if not customs.isdigit() or len(customs) != 8:
+            raise TurnoverContractError("customs_code must be 8 digits")
+        decision = _nonempty(str(self.decision_code), "decision_code", max_len=2)
+        if not decision.isdigit() or len(decision) != 2:
+            raise TurnoverContractError("decision_code must be a two digit classifier code")
+        return {
+            "participant_inn": _inn(self.participant_inn, "participant_inn"),
+            "declaration_date": _day(self.declaration_date, "declaration_date"),
+            "declaration_number": _declaration(self.declaration_number, "declaration_number"),
+            "customs_code": customs,
+            "decision_code": int(decision),
+            "products": [item.to_wire() for item in self.products],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,14 +483,42 @@ class CrossborderDocument:
     def to_wire(self) -> dict[str, Any]:
         if not self.products_list:
             raise TurnoverContractError("products_list must be non-empty")
-        return {"trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"), "sender_tax_number": _nonempty(self.sender_tax_number, "sender_tax_number", max_len=64), "exporter_name": _nonempty(self.exporter_name, "exporter_name"), "country_oksm": _country(self.country_oksm), "import_date": _day(self.import_date, "import_date"), "primary_document_number": _nonempty(self.primary_document_number, "primary_document_number"), "primary_document_date": _day(self.primary_document_date, "primary_document_date"), "products_list": [item.to_wire() for item in self.products_list]}
+        sender = _nonempty(self.sender_tax_number, "sender_tax_number", max_len=14)
+        if not sender.isdigit() or len(sender) not in {8, 9, 12, 14}:
+            raise TurnoverContractError("sender_tax_number must contain 8, 9, 12 or 14 digits")
+        country = _country(self.country_oksm)
+        if country not in {"051", "112", "398", "417"}:
+            raise TurnoverContractError("country_oksm is not a supported EAEU source country")
+        return {
+            "trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"),
+            "sender_tax_number": sender,
+            "exporter_name": _nonempty(self.exporter_name, "exporter_name"),
+            "country_oksm": country,
+            "import_date": _day(self.import_date, "import_date"),
+            "primary_document_number": _nonempty(self.primary_document_number, "primary_document_number"),
+            "primary_document_date": _day(self.primary_document_date, "primary_document_date"),
+            "products_list": [item.to_wire() for item in self.products_list],
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class RemainsProduct:
     ki: str
+    country: str
+    declaration_number: str
+    declaration_date: date | str
+    permit_documents: tuple[PermitDocument, ...] = ()
+
     def to_wire(self) -> dict[str, Any]:
-        return {"ki": _cis(self.ki, "ki")}
+        result: dict[str, Any] = {
+            "ki": _cis(self.ki, "ki"),
+            "country": _country(self.country, "country"),
+            "declaration_number": _declaration(self.declaration_number, "declaration_number", flexible_prefix=True),
+            "declaration_date": _day(self.declaration_date, "declaration_date"),
+        }
+        if self.permit_documents:
+            result["certificate_document_data"] = [item.to_wire() for item in self.permit_documents]
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,7 +530,10 @@ class LpIntroduceOstDocument:
     def to_wire(self) -> dict[str, Any]:
         if not self.products_list:
             raise TurnoverContractError("products_list must be non-empty")
-        return {"trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"), "products_list": [item.to_wire() for item in self.products_list]}
+        wires = [item.to_wire() for item in self.products_list]
+        if len({item["ki"] for item in wires}) != len(wires):
+            raise TurnoverContractError("products_list[].ki must be unique")
+        return {"trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"), "products_list": wires}
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,7 +560,12 @@ class LkContractCommissioningDocument:
     def to_wire(self) -> dict[str, Any]:
         if not self.products_list:
             raise TurnoverContractError("products_list must be non-empty")
-        result: dict[str, Any] = {"producer_inn": _inn(self.producer_inn, "producer_inn"), "owner_inn": _inn(self.owner_inn, "owner_inn"), "production_order": "CONTRACT_PRODUCTION", "products_list": [item.to_wire() for item in self.products_list]}
+        result: dict[str, Any] = {
+            "producer_inn": _inn(self.producer_inn, "producer_inn"),
+            "owner_inn": _inn(self.owner_inn, "owner_inn"),
+            "production_order": "CONTRACT_PRODUCTION",
+            "products_list": [item.to_wire() for item in self.products_list],
+        }
         if self.production_date is not None:
             result["production_date"] = _day(self.production_date, "production_date")
         return result
@@ -469,15 +574,15 @@ class LkContractCommissioningDocument:
 @dataclass(frozen=True, slots=True)
 class FtsProduct:
     cis: str
-    color: str | None = None
-    product_size: str | None = None
+    color: str
+    product_size: str
+
     def to_wire(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"cis": _cis(self.cis, "cis")}
-        if self.color is not None:
-            result["color"] = _nonempty(self.color, "color")
-        if self.product_size is not None:
-            result["productSize"] = _nonempty(self.product_size, "productSize")
-        return result
+        return {
+            "cis": _cis(self.cis, "cis"),
+            "color": _nonempty(self.color, "color", max_len=1024),
+            "productSize": _nonempty(self.product_size, "productSize", max_len=1024),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,18 +596,22 @@ class LpFtsIntroduceDocument:
     def to_wire(self) -> dict[str, Any]:
         if not self.products_list:
             raise TurnoverContractError("products_list must be non-empty")
-        return {"trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"), "declaration_number": _nonempty(self.declaration_number, "declaration_number"), "declaration_date": _day(self.declaration_date, "declaration_date"), "products_list": [item.to_wire() for item in self.products_list]}
+        return {
+            "trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"),
+            "declaration_number": _declaration(self.declaration_number, "declaration_number"),
+            "declaration_date": _day(self.declaration_date, "declaration_date"),
+            "products_list": [item.to_wire() for item in self.products_list],
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class WithdrawalProduct:
     cis: str
     product_cost: int
+
     def to_wire(self) -> dict[str, Any]:
-        if type(self.product_cost) is not int or self.product_cost < 0:
-            raise TurnoverContractError("product_cost must be a non-negative integer number of kopecks")
-        if len(str(self.product_cost)) > 17:
-            raise TurnoverContractError("product_cost exceeds official numeric range")
+        if type(self.product_cost) is not int or self.product_cost < 0 or self.product_cost > 99999999999999999:
+            raise TurnoverContractError("product_cost must be integer kopecks in official 0..99999999999999999 range")
         return {"cis": _cis(self.cis, "cis"), "product_cost": self.product_cost}
 
 
@@ -522,7 +631,14 @@ class LkReceiptDistanceDocument:
         product_wires = [item.to_wire() for item in self.products]
         if len({item["cis"] for item in product_wires}) != len(product_wires):
             raise TurnoverContractError("products[].cis must be unique")
-        result: dict[str, Any] = {"inn": _inn(self.inn), "action": "DISTANCE", "action_date": _day(self.action_date, "action_date"), **self.mod.to_withdrawal_wire(), "products": product_wires}
+        today = datetime.now(timezone.utc).date()
+        result: dict[str, Any] = {
+            "inn": _inn(self.inn),
+            "action": "DISTANCE",
+            "action_date": _bounded_day(self.action_date, "action_date", min_day=_shift_year(today, -5), max_day=today),
+            **self.mod.to_withdrawal_wire(),
+            "products": product_wires,
+        }
         if self.primary_document is not None:
             result.update(self.primary_document.to_withdrawal_wire())
         return result
@@ -531,18 +647,18 @@ class LkReceiptDistanceDocument:
 @dataclass(frozen=True, slots=True)
 class ReturnProduct:
     ki: str
-    paid: bool | None = None
     primary_document: PrimaryDocument | None = None
     permit: PermitDocument | None = None
-    def to_wire(self) -> dict[str, Any]:
+
+    def to_wire(self, *, include_primary: bool, include_permit: bool) -> dict[str, Any]:
         result: dict[str, Any] = {"ki": _cis(self.ki, "ki")}
-        if self.paid is not None:
-            if type(self.paid) is not bool:
-                raise TurnoverContractError("item paid must be boolean")
-            result["paid"] = self.paid
         if self.primary_document is not None:
+            if not include_primary:
+                raise TurnoverContractError("item primary document is forbidden by the selected root tuple")
             result.update(self.primary_document.to_return_wire())
         if self.permit is not None:
+            if not include_permit:
+                raise TurnoverContractError("item permit is forbidden by the selected root tuple")
             result.update(self.permit.to_wire())
         return result
 
@@ -550,38 +666,47 @@ class ReturnProduct:
 @dataclass(frozen=True, slots=True)
 class LpReturnDocument:
     trade_participant_inn: str
-    return_type: str
     products_list: tuple[ReturnProduct, ...]
-    paid: bool | None = None
+    paid: bool | None
     primary_document: PrimaryDocument | None = None
     permit: PermitDocument | None = None
+    return_type: str = "REMOTE_SALE_RETURN"
     document_type = "LP_RETURN"
 
     def to_wire(self) -> dict[str, Any]:
-        return_type = _nonempty(self.return_type, "return_type", max_len=64)
-        if return_type != "REMOTE_SALE_RETURN":
-            raise TurnoverManualReview("RETURN_TYPE_MATRIX_NOT_IMPLEMENTED_FOR_WIRE_ASSEMBLY")
-        if not self.products_list:
-            raise TurnoverContractError("products_list must be non-empty")
-        item_wires = [item.to_wire() for item in self.products_list]
-        cises = [item["ki"] for item in item_wires]
-        if len(set(cises)) != len(cises):
-            raise TurnoverContractError("products_list[].ki must be unique")
+        if self.return_type in UNSUPPORTED_LP_RETURN_TYPES:
+            raise TurnoverManualReview("RETURN_TYPE_NOT_APPLICABLE_TO_LP")
+        if self.return_type != "REMOTE_SALE_RETURN":
+            raise TurnoverManualReview("RETURN_TYPE_MATRIX_NOT_CONFIRMED_FOR_M5_WIRE_ASSEMBLY")
         if self.paid is None:
             raise TurnoverManualReview("REMOTE_SALE_RETURN_PAID_REQUIRED")
         if type(self.paid) is not bool:
             raise TurnoverContractError("paid must be boolean")
-        if any(item.paid is not None for item in self.products_list):
-            raise TurnoverContractError("item-level paid cannot be mixed with required root paid in M5")
-        if self.permit is not None and any(item.permit is not None for item in self.products_list):
-            raise TurnoverContractError("permit data must be either root-level or item-level, not both")
-        if self.primary_document is not None and any(item.primary_document is not None for item in self.products_list):
-            raise TurnoverContractError("primary document must be either root-level or item-level, not both")
-        if self.paid and self.primary_document is None:
-            raise TurnoverManualReview("REMOTE_SALE_RETURN_PRIMARY_DOCUMENT_REQUIRED")
-        if not self.paid and self.primary_document is not None:
-            raise TurnoverContractError("primary document is not accepted by M5 when paid=false")
-        result: dict[str, Any] = {"trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"), "return_type": return_type, "paid": self.paid, "products_list": item_wires}
+        if not self.products_list:
+            raise TurnoverContractError("products_list must be non-empty")
+        has_item_primary = any(item.primary_document is not None for item in self.products_list)
+        has_item_permit = any(item.permit is not None for item in self.products_list)
+        if self.primary_document is not None and has_item_primary:
+            raise TurnoverContractError("primary document must be root-level or item-level, not mixed")
+        if self.permit is not None and has_item_permit:
+            raise TurnoverContractError("permit must be root-level or item-level, not mixed")
+        if self.paid:
+            if self.primary_document is None and not all(item.primary_document is not None for item in self.products_list):
+                raise TurnoverManualReview("REMOTE_SALE_RETURN_PRIMARY_DOCUMENT_REQUIRED")
+        elif self.primary_document is not None or has_item_primary:
+            raise TurnoverContractError("primary document must be absent for REMOTE_SALE_RETURN paid=false")
+        wires = [
+            item.to_wire(include_primary=self.primary_document is None, include_permit=self.permit is None)
+            for item in self.products_list
+        ]
+        if len({item["ki"] for item in wires}) != len(wires):
+            raise TurnoverContractError("products_list[].ki must be unique")
+        result: dict[str, Any] = {
+            "trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"),
+            "return_type": "REMOTE_SALE_RETURN",
+            "paid": self.paid,
+            "products_list": wires,
+        }
         if self.primary_document is not None:
             result.update(self.primary_document.to_return_wire())
         if self.permit is not None:
@@ -592,22 +717,23 @@ class LpReturnDocument:
 @dataclass(frozen=True, slots=True)
 class RemarkProduct:
     new_uin: str
-    tnved_10: str
-    production_country: str
-    color: str
-    product_size: str
     last_uin: str | None = None
-    remarking_date: date | str | None = None
-    remarking_cause: str | None = None
+    tnved_10: str | None = None
+    primary_document: PrimaryDocument | None = None
     permit_documents: tuple[PermitDocument, ...] = ()
-    def to_wire(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"new_uin": _cis(self.new_uin, "new_uin"), "tnved_10": _tnved(self.tnved_10, "tnved_10"), "production_country": _country(self.production_country, "production_country"), "color": _nonempty(self.color, "color"), "product_size": _nonempty(self.product_size, "product_size")}
+
+    def to_wire(self, *, cause: str) -> dict[str, Any]:
+        result: dict[str, Any] = {"new_uin": _cis(self.new_uin, "new_uin")}
         if self.last_uin is not None:
             result["last_uin"] = _cis(self.last_uin, "last_uin")
-        if self.remarking_date is not None:
-            result["remarking_date"] = _day(self.remarking_date, "remarking_date")
-        if self.remarking_cause is not None:
-            result["remarking_cause"] = _nonempty(self.remarking_cause, "remarking_cause", max_len=64)
+        if self.tnved_10 is not None:
+            result["tnved_10"] = _tnved(self.tnved_10, "tnved_10")
+        elif self.last_uin is None:
+            raise TurnoverContractError("tnved_10 is required when last_uin is absent")
+        if cause == "DESCRIPTION_ERRORS" and self.last_uin is None:
+            raise TurnoverContractError("DESCRIPTION_ERRORS requires last_uin")
+        if self.primary_document is not None:
+            result.update(self.primary_document.to_remark_wire(cause))
         if self.permit_documents:
             result["certificate_document_data"] = [item.to_wire() for item in self.permit_documents]
         return result
@@ -616,27 +742,22 @@ class RemarkProduct:
 @dataclass(frozen=True, slots=True)
 class LkRemarkDocument:
     participant_inn: str
+    remarking_date: date | str
+    remarking_cause: str
     products: tuple[RemarkProduct, ...]
-    remarking_date: date | str | None = None
-    remarking_cause: str | None = None
     document_type = "LK_REMARK"
 
     def to_wire(self) -> dict[str, Any]:
+        cause = _nonempty(self.remarking_cause, "remarking_cause", max_len=64)
         if not self.products:
             raise TurnoverContractError("products must be non-empty")
-        if self.remarking_date is None and any(item.remarking_date is None for item in self.products):
-            raise TurnoverContractError("remarking_date required at root or every product")
-        if self.remarking_cause is None and any(item.remarking_cause is None for item in self.products):
-            raise TurnoverContractError("remarking_cause required at root or every product")
-        cause = _nonempty(self.remarking_cause, "remarking_cause", max_len=64) if self.remarking_cause is not None else None
-        if cause == "DESCRIPTION_ERRORS" and any(item.last_uin is None for item in self.products):
-            raise TurnoverContractError("DESCRIPTION_ERRORS requires last_uin")
-        result: dict[str, Any] = {"participant_inn": _inn(self.participant_inn, "participant_inn"), "products": [item.to_wire() for item in self.products]}
-        if self.remarking_date is not None:
-            result["remarking_date"] = _day(self.remarking_date, "remarking_date")
-        if cause is not None:
-            result["remarking_cause"] = cause
-        return result
+        today = datetime.now(timezone.utc).date()
+        return {
+            "participant_inn": _inn(self.participant_inn, "participant_inn"),
+            "remarking_date": _bounded_day(self.remarking_date, "remarking_date", min_day=_shift_year(today, -5), max_day=today),
+            "remarking_cause": cause,
+            "products": [item.to_wire(cause=cause) for item in self.products],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,18 +778,37 @@ class WriteOffDocument:
 
     def to_wire(self) -> dict[str, Any]:
         codes = _unique_cises(self.sntins, "sntins")
+        reason = _nonempty(self.dropout_reason, "dropoutReason", max_len=64)
         source_type = _nonempty(self.source_doc_type, "sourceDocType", max_len=64).upper()
         if source_type not in _WRITE_OFF_SOURCE_TYPES:
             raise TurnoverContractError("unsupported sourceDocType")
-        result: dict[str, Any] = {"participantId": _inn(self.participant_id, "participantId"), "dropoutReason": _nonempty(self.dropout_reason, "dropoutReason", max_len=64), "sourceDocType": source_type, "sourceDocNum": _nonempty(self.source_doc_num, "sourceDocNum"), "sourceDocDate": _day(self.source_doc_date, "sourceDocDate"), "sntins": list(codes)}
+        if reason in {"EAS_TRADE", "BEYOND_EEC_EXPORT"}:
+            if source_type not in {"CUSTOMS_DECLARATION", "OTHER"}:
+                raise TurnoverContractError("export write-off sourceDocType must be CUSTOMS_DECLARATION or OTHER")
+        elif source_type == "CUSTOMS_DECLARATION":
+            raise TurnoverContractError("CUSTOMS_DECLARATION is only accepted for export write-off reasons")
+        if source_type == "DESTRUCTION_ACT" and reason != "DESTRUCTION":
+            raise TurnoverContractError("DESTRUCTION_ACT requires dropoutReason=DESTRUCTION")
+        today = datetime.now(timezone.utc).date()
+        result: dict[str, Any] = {
+            "participantId": _inn(self.participant_id, "participantId"),
+            "dropoutReason": reason,
+            "sourceDocType": source_type,
+            "sourceDocNum": _nonempty(self.source_doc_num, "sourceDocNum"),
+            "sourceDocDate": _bounded_day(self.source_doc_date, "sourceDocDate", min_day=_shift_year(today, -5), max_day=today + timedelta(days=30)),
+            "sntins": list(codes),
+        }
         if source_type == "OTHER":
             result["sourceDocName"] = _nonempty(self.source_doc_name, "sourceDocName")
         elif self.source_doc_name not in (None, ""):
             raise TurnoverContractError("sourceDocName must be absent unless sourceDocType=OTHER")
-        if self.destination_country_code is not None:
+        if reason == "EAS_TRADE":
+            if self.destination_country_code is None or self.buyer_id is None:
+                raise TurnoverContractError("EAS_TRADE requires destinationCountryCode and buyerId")
             result["destinationCountryCode"] = _country(self.destination_country_code, "destinationCountryCode")
-        if self.buyer_id is not None:
             result["buyerId"] = _nonempty(self.buyer_id, "buyerId", max_len=64)
+        elif self.destination_country_code is not None or self.buyer_id is not None:
+            raise TurnoverContractError("destinationCountryCode/buyerId are only accepted for EAS_TRADE")
         if self.fias_id is not None:
             result["fiasId"] = _fias(self.fias_id, "fiasId")
         if self.kpp is not None:
@@ -677,8 +817,6 @@ class WriteOffDocument:
             if type(self.with_child) is not bool:
                 raise TurnoverContractError("withChild must be boolean")
             result["withChild"] = self.with_child
-        if result["dropoutReason"] == "EAS_TRADE" and ("destinationCountryCode" not in result or "buyerId" not in result):
-            raise TurnoverContractError("EAS_TRADE requires destinationCountryCode and buyerId")
         return result
 
 
@@ -687,11 +825,17 @@ class LkReceiptCancelDocument:
     inn: str
     lk_receipt_id: str
     document_type = "LK_RECEIPT_CANCEL"
+
     def to_wire(self) -> dict[str, Any]:
         return {"inn": _inn(self.inn), "lk_receipt_id": _nonempty(self.lk_receipt_id, "lk_receipt_id", max_len=512)}
 
 
-TypedDocument = LpIntroduceGoodsDocument | LkIndiCommissioningDocument | LpGoodsImportDocument | CrossborderDocument | LpIntroduceOstDocument | LkContractCommissioningDocument | LpFtsIntroduceDocument | LkReceiptDistanceDocument | LpReturnDocument | LkRemarkDocument | WriteOffDocument | LkReceiptCancelDocument
+TypedDocument = (
+    LpIntroduceGoodsDocument | LkIndiCommissioningDocument | LpGoodsImportDocument |
+    CrossborderDocument | LpIntroduceOstDocument | LkContractCommissioningDocument |
+    LpFtsIntroduceDocument | LkReceiptDistanceDocument | LpReturnDocument |
+    LkRemarkDocument | WriteOffDocument | LkReceiptCancelDocument
+)
 
 _EXPECTED_CLASS: Mapping[TurnoverOperationKind, type] = {
     TurnoverOperationKind.INTRODUCE_DOMESTIC: LpIntroduceGoodsDocument,
@@ -733,8 +877,9 @@ def prepare_turnover_document(kind: TurnoverOperationKind | str, document: Typed
     definition = TURNOVER_OPERATION_REGISTRY[normalized]
     if document.document_type != definition.document_type:
         raise TurnoverContractError("operation/document type registry mismatch")
-    exact = ExactDocumentBuilder.from_json_value(document.to_wire())
-    reason = None
+    wire = document.to_wire()
+    exact = ExactDocumentBuilder.from_json_value(wire)
+    reason: str | None = None
     if isinstance(document, LkReceiptDistanceDocument):
         reason = "DISTANCE"
     elif isinstance(document, LpReturnDocument):
@@ -743,7 +888,9 @@ def prepare_turnover_document(kind: TurnoverOperationKind | str, document: Typed
         reason = document.remarking_cause
     elif isinstance(document, WriteOffDocument):
         reason = document.dropout_reason
-    return PreparedTurnoverDocument(normalized, definition.document_type, "MANUAL", M5_PG, exact, reason, definition.postcondition_class)
+    return PreparedTurnoverDocument(
+        normalized, definition.document_type, "MANUAL", M5_PG, exact, reason, definition.postcondition_class
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,6 +901,7 @@ class CisSnapshot:
     owner_inn: str | None
     withdraw_reason: str | None
     emission_type: str | None = None
+    commission_from_individual_confirmed: bool | None = None
     fetched_at: datetime | None = None
 
     def validated(self) -> "CisSnapshot":
@@ -773,6 +921,7 @@ class ProductReferenceSnapshot:
     participant_mod_ready: bool
     rd_ready: bool | None
     fetched_at: datetime | None
+
     def validated(self) -> "ProductReferenceSnapshot":
         if not self.gtin:
             raise TurnoverContractError("gtin required")
@@ -783,12 +932,27 @@ class ProductReferenceSnapshot:
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class PreconditionEvidence:
+    operation_kind: TurnoverOperationKind
+    checked_cises: tuple[str, ...]
+    observed: tuple[dict[str, Any], ...]
+    verified_at: str
+
+    def to_ledger(self) -> dict[str, Any]:
+        return {
+            "operation_kind": self.operation_kind.value,
+            "checked_cises": list(self.checked_cises),
+            "observed": list(self.observed),
+            "verified_at": self.verified_at,
+            "verified_fresh": True,
+        }
+
+
 RETURN_REASON_MATRIX: Mapping[tuple[str, str, str, str], str] = {
-    ("lp", "RETIRED", "DISTANCE", "REMOTE_SALE_RETURN"): "SUPPORTED",
-    ("lp", "RETIRED", "BY_SAMPLES", "REMOTE_SALE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "DISTANCE", "REMOTE_SALE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "BY_SAMPLES", "REMOTE_SALE_RETURN"): "SUPPORTED",
 }
-KNOWN_RETURN_TYPES = frozenset({"REMOTE_SALE_RETURN", "RETAIL_RETURN", "OWN_USE_RETURN", "STATE_CONTRACT_RETURN", "NOT_FOR_SALE_RETURN"})
-UNSUPPORTED_LP_RETURN_TYPES = frozenset({"VENDING_RETURN"})
 
 
 def validate_return_reason_matrix(*, pg: str, current_status: str | None, current_withdraw_reason: str | None, return_type: str) -> None:
@@ -800,7 +964,13 @@ def validate_return_reason_matrix(*, pg: str, current_status: str | None, curren
 
 
 class OperationPreconditionService:
-    def __init__(self, *, participant_inn: str, now: Callable[[], datetime] | None = None, max_snapshot_age: timedelta = timedelta(minutes=5)) -> None:
+    def __init__(
+        self,
+        *,
+        participant_inn: str,
+        now: Callable[[], datetime] | None = None,
+        max_snapshot_age: timedelta = timedelta(minutes=5),
+    ) -> None:
         self.participant_inn = _inn(participant_inn, "participant_inn")
         self._now = now or (lambda: datetime.now(timezone.utc))
         self.max_snapshot_age = max_snapshot_age
@@ -817,76 +987,185 @@ class OperationPreconditionService:
         if snapshot.owner_inn != self.participant_inn:
             raise TurnoverManualReview("CIS_NOT_OWNED_BY_PARTICIPANT")
 
-    def validate_distance(self, snapshots: Sequence[CisSnapshot]) -> None:
+    @staticmethod
+    def _plain(snapshot: CisSnapshot) -> None:
+        if snapshot.status_ex not in (None, ""):
+            raise TurnoverManualReview("SPECIAL_STATE_NOT_ALLOWED")
+
+    def _evidence(self, kind: TurnoverOperationKind, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        return PreconditionEvidence(
+            operation_kind=kind,
+            checked_cises=tuple(item.cis for item in snapshots),
+            observed=tuple(
+                {
+                    "cis": item.cis,
+                    "status": item.status,
+                    "statusEx": item.status_ex,
+                    "ownerInn": item.owner_inn,
+                    "withdrawReason": item.withdraw_reason,
+                    "emissionType": item.emission_type,
+                }
+                for item in snapshots
+            ),
+            verified_at=self._now().astimezone(timezone.utc).isoformat(),
+        )
+
+    def validate_product_references(
+        self, refs: Sequence[ProductReferenceSnapshot], *, require_mod: bool = False
+    ) -> None:
+        if not refs:
+            raise TurnoverManualReview("FRESH_PRODUCT_REFERENCE_REQUIRED")
+        for ref in refs:
+            self._fresh(ref)
+            if not ref.product_ready or ref.tnved_code is None:
+                raise TurnoverManualReview("PRODUCT_NOT_READY_FOR_MARKING_TURNOVER")
+            if require_mod and not ref.participant_mod_ready:
+                raise TurnoverManualReview("PARTICIPANT_MOD_NOT_READY")
+            if ref.rd_ready is False:
+                raise TurnoverManualReview("PERMIT_REFERENCE_NOT_READY")
+
+    def _introduced_from_applied(
+        self,
+        kind: TurnoverOperationKind,
+        snapshots: Sequence[CisSnapshot],
+        *,
+        emission: str,
+    ) -> PreconditionEvidence:
+        if not snapshots:
+            raise TurnoverContractError("operation requires CIS snapshots")
+        for snapshot in snapshots:
+            self._fresh(snapshot)
+            self._owned(snapshot)
+            self._plain(snapshot)
+            if snapshot.status != "APPLIED" or snapshot.emission_type != emission:
+                raise TurnoverManualReview(f"{kind.value}_PRECONDITION_FAILED")
+        return self._evidence(kind, snapshots)
+
+    def validate_domestic(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        return self._introduced_from_applied(TurnoverOperationKind.INTRODUCE_DOMESTIC, snapshots, emission="LOCAL")
+
+    def validate_individual(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        if not snapshots:
+            raise TurnoverContractError("individual commissioning requires CIS snapshots")
+        for snapshot in snapshots:
+            self._fresh(snapshot)
+            self._owned(snapshot)
+            self._plain(snapshot)
+            if snapshot.status != "APPLIED" or snapshot.commission_from_individual_confirmed is not True:
+                raise TurnoverManualReview("INDIVIDUAL_COMMISSIONING_PRECONDITION_FAILED")
+        return self._evidence(TurnoverOperationKind.INTRODUCE_FROM_INDIVIDUAL, snapshots)
+
+    def validate_import_pre_mandatory(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        return self._introduced_from_applied(
+            TurnoverOperationKind.INTRODUCE_IMPORT_PRE_MANDATORY, snapshots, emission="FOREIGN"
+        )
+
+    def validate_crossborder(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        return self._introduced_from_applied(TurnoverOperationKind.INTRODUCE_EAEU, snapshots, emission="FOREIGN")
+
+    def validate_remains(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        return self._introduced_from_applied(TurnoverOperationKind.INTRODUCE_REMAINS, snapshots, emission="REMAINS")
+
+    def validate_contract(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        return self._introduced_from_applied(TurnoverOperationKind.INTRODUCE_CONTRACT, snapshots, emission="LOCAL")
+
+    def validate_fts(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        if not snapshots:
+            raise TurnoverContractError("FTS introduction requires CIS snapshots")
+        for snapshot in snapshots:
+            self._fresh(snapshot)
+            self._owned(snapshot)
+            if snapshot.status != "APPLIED" or snapshot.emission_type != "FOREIGN":
+                raise TurnoverManualReview("FTS_INTRODUCTION_PRECONDITION_FAILED")
+            if snapshot.status_ex not in (None, "", "FTS_RESPOND_NOT_OK", "FTS_CONTROL"):
+                raise TurnoverManualReview("FTS_INTRODUCTION_SPECIAL_STATE_INVALID")
+        return self._evidence(TurnoverOperationKind.INTRODUCE_FTS, snapshots)
+
+    def validate_distance(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
         if not snapshots:
             raise TurnoverContractError("distance requires CIS snapshots")
         for snapshot in snapshots:
-            self._fresh(snapshot); self._owned(snapshot)
+            self._fresh(snapshot)
+            self._owned(snapshot)  # Sellari backend policy; CRPT itself is not universally this strict.
+            self._plain(snapshot)
             if snapshot.status != "INTRODUCED":
                 raise TurnoverManualReview("DISTANCE_REQUIRES_INTRODUCED")
-            if snapshot.status_ex not in (None, ""):
-                raise TurnoverManualReview("DISTANCE_SPECIAL_STATE_NOT_ALLOWED")
+        return self._evidence(TurnoverOperationKind.WITHDRAW_DISTANCE, snapshots)
 
-    def validate_remote_sale_return(self, snapshots: Sequence[CisSnapshot]) -> None:
+    def validate_remote_sale_return(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
         if not snapshots:
             raise TurnoverContractError("return requires CIS snapshots")
         for snapshot in snapshots:
-            self._fresh(snapshot); self._owned(snapshot)
+            self._fresh(snapshot)
+            self._owned(snapshot)
+            self._plain(snapshot)
             if snapshot.status != "RETIRED":
                 raise TurnoverManualReview("REMOTE_RETURN_REQUIRES_RETIRED")
-            if snapshot.status_ex not in (None, ""):
-                raise TurnoverManualReview("REMOTE_RETURN_SPECIAL_STATE_NOT_ALLOWED")
-            validate_return_reason_matrix(pg=M5_PG, current_status=snapshot.status, current_withdraw_reason=snapshot.withdraw_reason, return_type="REMOTE_SALE_RETURN")
+            validate_return_reason_matrix(
+                pg=M5_PG,
+                current_status=snapshot.status,
+                current_withdraw_reason=snapshot.withdraw_reason,
+                return_type="REMOTE_SALE_RETURN",
+            )
+        return self._evidence(TurnoverOperationKind.RETURN_REMOTE_SALE, snapshots)
 
-    def validate_import_pre_mandatory(self, snapshots: Sequence[CisSnapshot]) -> None:
-        for snapshot in snapshots:
-            self._fresh(snapshot)
-            if snapshot.status != "APPLIED" or snapshot.emission_type != "FOREIGN":
-                raise TurnoverManualReview("PRE_MANDATORY_IMPORT_REQUIRES_APPLIED_FOREIGN")
-            if snapshot.status_ex not in (None, ""):
-                raise TurnoverManualReview("PRE_MANDATORY_IMPORT_SPECIAL_STATE_NOT_ALLOWED")
-
-    def validate_remains(self, snapshots: Sequence[CisSnapshot]) -> None:
-        for snapshot in snapshots:
-            self._fresh(snapshot)
-            if snapshot.status != "APPLIED" or snapshot.emission_type != "REMAINS":
-                raise TurnoverManualReview("REMAINS_REQUIRES_APPLIED_REMAINS")
-            if snapshot.status_ex not in (None, ""):
-                raise TurnoverManualReview("REMAINS_SPECIAL_STATE_NOT_ALLOWED")
-
-    def validate_remark(self, *, new_codes: Sequence[CisSnapshot], old_codes: Sequence[CisSnapshot] = (), cause: str, remote_sale_return: bool = False) -> None:
+    def validate_remark(
+        self,
+        *,
+        new_codes: Sequence[CisSnapshot],
+        old_codes: Sequence[CisSnapshot] = (),
+        cause: str,
+    ) -> PreconditionEvidence:
         if not new_codes:
             raise TurnoverContractError("remark requires new code snapshots")
         for snapshot in new_codes:
             self._fresh(snapshot)
-            if snapshot.status != "APPLIED" or snapshot.status_ex not in (None, "") or snapshot.emission_type not in {"REMARK", "REAPPLY"}:
+            self._plain(snapshot)
+            if snapshot.status != "APPLIED" or snapshot.emission_type not in {"REMARK", "REAPPLY"}:
                 raise TurnoverManualReview("REMARK_NEW_CODE_PRECONDITION_FAILED")
         for snapshot in old_codes:
-            self._fresh(snapshot); self._owned(snapshot)
+            self._fresh(snapshot)
+            self._owned(snapshot)
+            self._plain(snapshot)
             if snapshot.status not in {"INTRODUCED", "RETIRED"}:
                 raise TurnoverManualReview("REMARK_OLD_CODE_STATE_INVALID")
-            if remote_sale_return and snapshot.status != "RETIRED":
-                raise TurnoverManualReview("REMOTE_SALE_REMARK_OLD_CODE_REQUIRES_RETIRED")
+            if cause in {"REMOTE_SALE_RETURN", "RETAIL_RETURN"} and snapshot.status != "RETIRED":
+                raise TurnoverManualReview("RETURN_REMARK_OLD_CODE_REQUIRES_RETIRED")
         if cause == "DESCRIPTION_ERRORS" and not old_codes:
             raise TurnoverManualReview("DESCRIPTION_ERRORS_REQUIRES_OLD_CODE")
+        return self._evidence(TurnoverOperationKind.REMARK, tuple(new_codes) + tuple(old_codes))
 
-    def validate_write_off(self, snapshots: Sequence[CisSnapshot]) -> None:
+    def validate_write_off(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
         if not snapshots:
             raise TurnoverContractError("write-off requires CIS snapshots")
         for snapshot in snapshots:
-            self._fresh(snapshot); self._owned(snapshot)
+            self._fresh(snapshot)
+            self._owned(snapshot)
             if snapshot.status not in WRITE_OFF_START_STATES:
                 raise TurnoverManualReview("WRITE_OFF_START_STATE_NOT_ALLOWED")
             if snapshot.status_ex not in (None, "", "IN_GRAY_ZONE"):
                 raise TurnoverManualReview("WRITE_OFF_SPECIAL_STATE_NOT_ALLOWED")
+        return self._evidence(TurnoverOperationKind.WRITE_OFF, snapshots)
 
-    def validate_cancel_withdrawal(self, *, original_document_status: str | None, original_sender_inn: str | None, latest_operation_is_original: bool) -> None:
+    def validate_cancel_withdrawal(
+        self,
+        *,
+        original_document_status: str | None,
+        original_sender_inn: str | None,
+        latest_operation_is_original: bool,
+    ) -> PreconditionEvidence:
         if original_document_status != "CHECKED_OK":
             raise TurnoverManualReview("CANCEL_REQUIRES_CHECKED_OK_SOURCE")
         if original_sender_inn != self.participant_inn:
             raise TurnoverManualReview("CANCEL_SOURCE_SENDER_MISMATCH")
         if not latest_operation_is_original:
             raise TurnoverManualReview("CANCEL_SOURCE_NOT_LATEST_ELIGIBLE_OPERATION")
+        return PreconditionEvidence(
+            TurnoverOperationKind.CANCEL_WITHDRAWAL,
+            (),
+            ({"sourceDocumentStatus": original_document_status, "sourceSenderInn": original_sender_inn},),
+            self._now().astimezone(timezone.utc).isoformat(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -898,12 +1177,28 @@ class ReconciliationResult:
 
 
 class OperationReconciliationService:
-    def reconcile(self, *, operation_kind: TurnoverOperationKind | str, document_status_raw: str | None, snapshots: Sequence[CisSnapshot], expected_restore: Mapping[str, tuple[str | None, str | None]] | None = None) -> ReconciliationResult:
+    def reconcile(
+        self,
+        *,
+        operation_kind: TurnoverOperationKind | str,
+        document_status_raw: str | None,
+        snapshots: Sequence[CisSnapshot],
+        expected_restore: Mapping[str, tuple[str | None, str | None]] | None = None,
+    ) -> ReconciliationResult:
         try:
             kind = operation_kind if isinstance(operation_kind, TurnoverOperationKind) else TurnoverOperationKind(operation_kind)
         except ValueError:
             return ReconciliationResult(ReconciliationState.MANUAL_REVIEW, document_status_raw, "UNKNOWN_OPERATION_KIND", ())
-        observed = tuple({"cis": item.cis, "status": item.status, "statusEx": item.status_ex, "ownerInn": item.owner_inn, "withdrawReason": item.withdraw_reason} for item in snapshots)
+        observed = tuple(
+            {
+                "cis": item.cis,
+                "status": item.status,
+                "statusEx": item.status_ex,
+                "ownerInn": item.owner_inn,
+                "withdrawReason": item.withdraw_reason,
+            }
+            for item in snapshots
+        )
         if document_status_raw != "CHECKED_OK":
             if document_status_raw in {"CHECKED_NOT_OK", "PARSE_ERROR", "PROCESSING_ERROR"}:
                 return ReconciliationResult(ReconciliationState.MANUAL_REVIEW, document_status_raw, "DOCUMENT_TERMINAL_FAILURE", observed)
@@ -912,17 +1207,36 @@ class OperationReconciliationService:
             return ReconciliationResult(ReconciliationState.PENDING, document_status_raw, "FRESH_CIS_POSTCONDITION_REQUIRED", observed)
         if kind in {TurnoverOperationKind.WITHDRAW, TurnoverOperationKind.WITHDRAW_DISTANCE}:
             ok = all(item.status == "RETIRED" and item.withdraw_reason == "DISTANCE" for item in snapshots)
-        elif kind in {TurnoverOperationKind.RETURN_TO_CIRCULATION, TurnoverOperationKind.RETURN_REMOTE_SALE, TurnoverOperationKind.INTRODUCE_DOMESTIC, TurnoverOperationKind.INTRODUCE_FROM_INDIVIDUAL, TurnoverOperationKind.INTRODUCE_IMPORT_PRE_MANDATORY, TurnoverOperationKind.INTRODUCE_EAEU, TurnoverOperationKind.INTRODUCE_REMAINS, TurnoverOperationKind.INTRODUCE_CONTRACT, TurnoverOperationKind.INTRODUCE_FTS, TurnoverOperationKind.REMARK}:
-            ok = all(item.status == "INTRODUCED" for item in snapshots)
+        elif kind in {
+            TurnoverOperationKind.RETURN_TO_CIRCULATION,
+            TurnoverOperationKind.RETURN_REMOTE_SALE,
+            TurnoverOperationKind.INTRODUCE_DOMESTIC,
+            TurnoverOperationKind.INTRODUCE_FROM_INDIVIDUAL,
+            TurnoverOperationKind.INTRODUCE_IMPORT_PRE_MANDATORY,
+            TurnoverOperationKind.INTRODUCE_EAEU,
+            TurnoverOperationKind.INTRODUCE_REMAINS,
+            TurnoverOperationKind.INTRODUCE_CONTRACT,
+            TurnoverOperationKind.INTRODUCE_FTS,
+            TurnoverOperationKind.REMARK,
+        }:
+            ok = all(item.status == "INTRODUCED" and item.status_ex in (None, "") for item in snapshots)
         elif kind is TurnoverOperationKind.WRITE_OFF:
-            ok = all(item.status == "WRITTEN_OFF" for item in snapshots)
+            ok = all(item.status == "WRITTEN_OFF" and item.status_ex in (None, "") for item in snapshots)
         elif kind is TurnoverOperationKind.CANCEL_WITHDRAWAL:
             if not expected_restore:
                 return ReconciliationResult(ReconciliationState.MANUAL_REVIEW, document_status_raw, "CANCEL_RESTORE_EXPECTATION_REQUIRED", observed)
-            ok = all(item.cis in expected_restore and (item.status, item.withdraw_reason) == expected_restore[item.cis] for item in snapshots)
+            ok = bool(snapshots) and all(
+                item.cis in expected_restore and (item.status, item.withdraw_reason) == expected_restore[item.cis]
+                for item in snapshots
+            )
         else:
             ok = False
-        return ReconciliationResult(ReconciliationState.RECONCILED if ok else ReconciliationState.PENDING, document_status_raw, "POSTCONDITION_CONFIRMED" if ok else "POSTCONDITION_MISMATCH", observed)
+        return ReconciliationResult(
+            ReconciliationState.RECONCILED if ok else ReconciliationState.PENDING,
+            document_status_raw,
+            "POSTCONDITION_CONFIRMED" if ok else "POSTCONDITION_MISMATCH",
+            observed,
+        )
 
 
 def remark_reason_readback_matches(submitted: str, observed: str | None) -> bool:
