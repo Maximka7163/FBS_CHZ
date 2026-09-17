@@ -1,0 +1,196 @@
+name: M7 EDO Lite foundation validation
+
+on:
+  push:
+    branches:
+      - m7/edo-lite-foundation-001
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  M7_BASE_SHA: 934cc313ab0b2ab1d216a0d4185558d46892c521
+  FROZEN_P0_SHA: 395701f1757711b5a11b9348d929182d40f51f0a
+  WBCZ_ENV: test
+  WBCZ_OWN_INN: "1234567890"
+  WBCZ_TRUE_API_WRITE_ENABLED: "false"
+
+jobs:
+  linux-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_m7
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_m7"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m7
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove accepted base and frozen boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$M7_BASE_SHA")" = "$M7_BASE_SHA"
+          test "$(git rev-parse "$M7_BASE_SHA")" = "$M7_BASE_SHA"
+          test "$(git rev-parse origin/p0/test-candidate-001)" = "$FROZEN_P0_SHA"
+          if git diff --name-only "$M7_BASE_SHA"...HEAD | grep '^frontend/'; then
+            echo 'FRONTEND_SOURCE_CHANGES must remain NONE for M7 foundation' >&2; exit 1
+          fi
+          if git diff --name-only "$M7_BASE_SHA"...HEAD | grep -E '^migrations/versions/000[1-7]'; then
+            echo 'historical migration changed in M7' >&2; exit 1
+          fi
+          if git diff --name-only "$M7_BASE_SHA"...HEAD | grep -Ei '(^|/)(m8|suz)(_|/|\.)'; then
+            echo 'M8/SUZ implementation must not start in M7' >&2; exit 1
+          fi
+          if find .github/workflows -maxdepth 1 -type f \( -name '*m7*bootstrap*.yml' -o -name '*m7*patch*.yml' \) -print -quit | grep .; then
+            echo 'temporary M7 workflow remains at final head' >&2; exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install backend dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+      - name: Build deterministic WB regression workbook
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python scripts/generate_regression_workbook.py /mnt/data/REF_WB_archive_9.xlsx
+          test -s /mnt/data/REF_WB_archive_9.xlsx
+      - name: Migration head is M7 foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(alembic heads | tr -d '\r')" = '0008_m7_edo_lite_foundation (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          e=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with e.begin() as c:
+              c.exec_driver_sql('DROP SCHEMA public CASCADE')
+              c.exec_driver_sql('CREATE SCHEMA public')
+          e.dispose()
+          PY
+          alembic upgrade head
+          test "$(alembic current | tr -d '\r')" = '0008_m7_edo_lite_foundation (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          e=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with e.connect() as c:
+              assert c.execute(text("select count(*) from edo_lite_schema_registry where enabled_for_lp=true")).scalar_one() == 0
+          e.dispose()
+          PY
+      - name: Focused M7 foundation tests
+        run: python -m pytest -q tests/test_m7_edo_lite_foundation.py
+      - name: M6 M5 M4 M3 M2 M1 regressions
+        run: |
+          python -m pytest -q tests/test_m6_aggregation.py
+          python -m pytest -q tests/test_m5_turnover.py
+          python -m pytest -q tests/test_m4_document_lifecycle.py
+          python -m pytest -q tests/test_m3_auth_signing.py
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+      - name: P0 regressions
+        run: |
+          python -m pytest -q tests/test_p0_document_assembler.py
+          python -m pytest -q tests/test_write_pipeline.py
+          python -m pytest -q tests/test_p0_endtoend_wiring.py
+      - name: Full PostgreSQL backend regression
+        run: python -m pytest -q
+      - name: Frontend regression
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm test
+          npm run build
+          if grep -R -E 'markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/' dist; then
+            echo 'forbidden production/agent boundary leaked into browser bundle' >&2; exit 1
+          fi
+      - name: M7 security and contract assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R -F 'markirovka.crpt.ru' src/wbcz_web
+          ! grep -R -E 'GENERIC_EDO_HTTP|RAW_URL|RAW_PATH|RAW_METHOD|RAW_HEADERS|ARBITRARY_BODY|ARBITRARY_XML_SIGN|ARBITRARY_FILE_SIGN' src/wbcz src/wbcz_web
+          ! grep -R -E -- '-----BEGIN .*PRIVATE KEY-----' src frontend migrations
+          ! grep -R -E 'WBCZ_AGENT_MACHINE_TOKEN=[A-Za-z0-9._~-]{16,}' src frontend migrations
+          grep -F 'WBCZ_TRUE_API_WRITE_ENABLED=false' .env.production.example
+          test ! -d schemas/m7
+          ! find . -type f \( -iname '*970*.xsd' -o -iname '*736*.xsd' \) -print -quit | grep .
+          python - <<'PY'
+          from wbcz.edo_lite import (
+              EDO_LITE_ANNUAL_OUTGOING_LIMIT, M7_MUTATION_REGISTRY,
+              PRODUCTION_SCHEMA_REGISTRY, TRUE_API_ENDPOINT_FORMAT_UKD,
+              CURRENT_FNS_736_STATUS, REPLACEMENT_FNS_ORDER, UKD_FORMAT_COMPATIBILITY,
+          )
+          assert EDO_LITE_ANNUAL_OUTGOING_LIMIT == 1000
+          assert all(not x.enabled_for_lp for x in PRODUCTION_SCHEMA_REGISTRY.values())
+          assert all(not x.enabled for x in M7_MUTATION_REGISTRY.values())
+          assert TRUE_API_ENDPOINT_FORMAT_UKD == '736'
+          assert CURRENT_FNS_736_STATUS == 'REPEALED'
+          assert REPLACEMENT_FNS_ORDER == 'ЕД-1-26/29@'
+          assert UKD_FORMAT_COMPATIBILITY == 'UNRESOLVED'
+          PY
+          python -m pytest -q \
+            tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent \
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener \
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
+
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prove accepted base and frozen P0
+        shell: pwsh
+        run: |
+          $base=(git merge-base HEAD $env:M7_BASE_SHA).Trim()
+          if ($base -ne $env:M7_BASE_SHA) { throw "wrong M7 base: $base" }
+          $frozen=(git rev-parse origin/p0/test-candidate-001).Trim()
+          if ($frozen -ne $env:FROZEN_P0_SHA) { throw "frozen P0 changed: $frozen" }
+          $frontend=(git diff --name-only "$env:M7_BASE_SHA...HEAD" | Select-String '^frontend/')
+          if ($frontend) { throw 'frontend source changed in M7 foundation' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+      - name: M7 and M6 M5 focused tests
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m7_edo_lite_foundation.py
+          python -m pytest -q tests/test_m6_aggregation.py
+          python -m pytest -q tests/test_m5_turnover.py
+      - name: M4 M3 M2 M1 Windows regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m4_document_lifecycle.py
+          python -m pytest -q tests/test_m3_auth_signing.py
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+          python -m pytest -q tests/test_windows_agent.py
+      - name: P0 Windows safety regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_p0_document_assembler.py
+          python -m pytest -q `
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener `
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
