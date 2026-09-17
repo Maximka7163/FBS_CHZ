@@ -376,3 +376,132 @@ def test_no_generic_wb_proxy_or_forbidden_mutation_paths_in_m9_source() -> None:
     for marker in forbidden:
         assert marker not in source
     assert "M10" not in source
+
+
+def test_stateful_rate_limiter_is_family_token_type_and_secret_ref_keyed() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter
+    limiter = StatefulWbRateLimiter()
+    first = limiter.consume(
+        family="ORDER_FEED", token_type=WbTokenType.PERSONAL,
+        environment=WbEnvironment.PRODUCTION, token_secret_ref="secret://a", now_monotonic=0.0,
+    )
+    second = limiter.consume(
+        family="ORDER_FEED", token_type=WbTokenType.PERSONAL,
+        environment=WbEnvironment.PRODUCTION, token_secret_ref="secret://a", now_monotonic=0.0,
+    )
+    other_token = limiter.consume(
+        family="ORDER_FEED", token_type=WbTokenType.PERSONAL,
+        environment=WbEnvironment.PRODUCTION, token_secret_ref="secret://b", now_monotonic=0.0,
+    )
+    assert first.allowed
+    assert not second.allowed and second.retry_after_seconds == pytest.approx(60.0)
+    assert other_token.allowed
+    after_minute = limiter.consume(
+        family="ORDER_FEED", token_type=WbTokenType.PERSONAL,
+        environment=WbEnvironment.PRODUCTION, token_secret_ref="secret://a", now_monotonic=60.0,
+    )
+    assert after_minute.allowed
+
+
+def test_stateful_marketplace_4xx_charge_is_scoped_and_sandbox_methods_share_bucket() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter
+    limiter = StatefulWbRateLimiter()
+    for _ in range(20):
+        assert limiter.consume(
+            family="MARKETPLACE_FBS", token_type=WbTokenType.PERSONAL,
+            environment=WbEnvironment.PRODUCTION, token_secret_ref="secret://m", now_monotonic=0.0,
+        ).allowed
+    assert not limiter.consume(
+        family="MARKETPLACE_FBS", token_type=WbTokenType.PERSONAL,
+        environment=WbEnvironment.PRODUCTION, token_secret_ref="secret://m", now_monotonic=0.0,
+    ).allowed
+
+    sandbox = StatefulWbRateLimiter()
+    test_type = WbTokenType.TEST
+    assert sandbox.consume(
+        family="MARKETPLACE_FBS", token_type=test_type, environment=WbEnvironment.SANDBOX,
+        token_secret_ref="secret://sandbox", now_monotonic=0.0,
+    ).allowed
+    blocked = sandbox.consume(
+        family="MARKETPLACE_FBS", token_type=test_type, environment=WbEnvironment.SANDBOX,
+        token_secret_ref="secret://sandbox", now_monotonic=0.1,
+    )
+    assert not blocked.allowed
+    assert sandbox.consume(
+        family="MARKETPLACE_FBS", token_type=test_type, environment=WbEnvironment.SANDBOX,
+        token_secret_ref="secret://sandbox", now_monotonic=1.0,
+    ).allowed
+
+
+def test_order_feed_normalizer_preserves_required_and_unknown_evidence() -> None:
+    from wbcz.wb_fbs import normalize_order_feed_row
+    raw = {
+        "nmId": 11, "chrtId": 22, "srid": "SRID-X",
+        "createdAt": "2026-09-18T10:00:00+03:00",
+        "updatedAt": "2026-09-18T11:00:00+03:00",
+        "status": "FutureStatus", "cancelType": "app",
+        "warehouseName": "WH", "warehouseRegion": "R",
+        "isMp": True, "destinationCity": "Ufa", "destinationDistrict": "D",
+        "sellerPrice": 123.45, "isB2b": False, "futureField": {"x": 1},
+    }
+    row = normalize_order_feed_row(raw)
+    assert row.nm_id == 11 and row.chrt_id == 22 and row.srid == "SRID-X"
+    assert row.status.raw == "FutureStatus" and not row.status.known
+    assert row.cancel_type.raw == "app" and row.cancel_type.known
+    assert row.seller_price_raw == 123.45
+    assert row.raw_sanitized["futureField"] == {"x": 1}
+    assert len(row.source_fingerprint) == 64
+
+
+def test_marketplace_status_normalizer_never_converts_to_order_feed_status() -> None:
+    from wbcz.wb_fbs import normalize_marketplace_order_status
+    row = normalize_marketplace_order_status({
+        "id": 123, "supplierStatus": "complete", "wbStatus": "sold",
+        "isCancellable": False, "future": "kept",
+    })
+    assert row.assembly_order_id == 123
+    assert row.supplier_status_raw == "complete"
+    assert row.wb_status_raw == "sold"
+    assert row.is_cancellable is False
+    assert row.raw_sanitized["future"] == "kept"
+
+
+def test_goods_return_normalizer_preserves_timezone_unknown_and_completed_gate() -> None:
+    from wbcz.wb_fbs import normalize_goods_return_row
+    row = normalize_goods_return_row({
+        "orderId": 777, "srid": "S-1", "barcode": "B", "nmId": 44,
+        "stickerId": "ST", "shkId": "SHK",
+        "readyToReturnDt": "2026-09-18T10:00:00",
+        "completedDt": "2026-09-18T12:00:00+03:00",
+        "status": "future-status", "type": "future-type", "future": 9,
+    })
+    assert row.order_id_raw == "777" and row.srid == "S-1"
+    assert row.ready_to_return.parsed is None
+    assert row.ready_to_return.semantics is TimestampSemantics.TIMEZONE_UNKNOWN
+    assert row.completed.parsed is not None
+    assert row.physically_returned
+    assert row.raw_return_status == "future-status"
+    assert row.raw_sanitized["future"] == 9
+
+
+def test_supplier_sales_cursor_uses_exact_last_row_last_change_date() -> None:
+    from wbcz.wb_fbs import supplier_sales_next_date_from
+    rows = [
+        {"lastChangeDate": "2026-09-18T10:00:00"},
+        {"lastChangeDate": "2026-09-18T10:05:00.123456"},
+    ]
+    assert supplier_sales_next_date_from(rows, "old") == "2026-09-18T10:05:00.123456"
+    assert supplier_sales_next_date_from([], "2026-09-01T00:00:00") == "2026-09-01T00:00:00"
+    with pytest.raises(WbContractError):
+        supplier_sales_next_date_from([{"srid": "x"}], "old")
+
+
+def test_current_archive_same_identity_conflict_never_overwrites() -> None:
+    from wbcz.wb_fbs import AssemblyEvidenceMergeState, AssemblyOrderEvidence, compare_assembly_evidence
+    current = AssemblyOrderEvidence(1, 100, "FBS_CURRENT", "a" * 64)
+    replay = AssemblyOrderEvidence(1, 100, "FBS_ARCHIVE", "a" * 64)
+    conflict = AssemblyOrderEvidence(1, 100, "FBS_ARCHIVE", "b" * 64)
+    other = AssemblyOrderEvidence(1, 101, "FBS_ARCHIVE", "b" * 64)
+    assert compare_assembly_evidence(current, replay) is AssemblyEvidenceMergeState.DUPLICATE
+    assert compare_assembly_evidence(current, conflict) is AssemblyEvidenceMergeState.EVIDENCE_CONFLICT
+    assert compare_assembly_evidence(current, other) is AssemblyEvidenceMergeState.NEW
