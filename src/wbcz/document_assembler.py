@@ -92,6 +92,34 @@ class ReturnPrimaryDocument:
             raise DocumentAssemblyManualReview("RETURN_PRIMARY_DOCUMENT_CUSTOM_NAME_FORBIDDEN")
         return result
 
+    def withdrawal_fields(self) -> dict[str, Any]:
+        document_type = self.document_type.strip().upper() if isinstance(self.document_type, str) else ""
+        if document_type not in _ALLOWED_PRIMARY_TYPES:
+            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_TYPE_INVALID")
+        number = self.number.strip() if isinstance(self.number, str) else ""
+        if not 1 <= len(number) <= 255:
+            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_NUMBER_INVALID")
+        value = self.document_date
+        if isinstance(value, datetime):
+            day = value.date()
+        elif isinstance(value, date):
+            day = value
+        else:
+            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_DATE_INVALID")
+        result: dict[str, Any] = {
+            "document_type": document_type,
+            "document_number": number,
+            "document_date": day.isoformat(),
+        }
+        if document_type == "OTHER":
+            custom = self.custom_name.strip() if isinstance(self.custom_name, str) else ""
+            if not 1 <= len(custom) <= 255:
+                raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_CUSTOM_NAME_REQUIRED")
+            result["primary_document_custom_name"] = custom
+        elif self.custom_name not in (None, ""):
+            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_CUSTOM_NAME_FORBIDDEN")
+        return result
+
 
 PrimaryDocumentProvider = Callable[[Event], ReturnPrimaryDocument | None]
 
@@ -153,9 +181,11 @@ class OfficialP0DocumentAssembler:
         organisation: P0OrganisationConfig | None,
         *,
         primary_document_provider: PrimaryDocumentProvider | None = None,
+        withdrawal_primary_document_provider: PrimaryDocumentProvider | None = None,
     ) -> None:
         self.organisation = organisation
         self.primary_document_provider = primary_document_provider
+        self.withdrawal_primary_document_provider = withdrawal_primary_document_provider
 
     def build_exact(self, event: Event, decision: Decision) -> ExactDocument:
         if decision is Decision.READY_TO_WITHDRAW:
@@ -195,7 +225,12 @@ class OfficialP0DocumentAssembler:
         if organisation.organisation_type is OrganisationType.LEGAL_ENTITY:
             assert organisation.kpp is not None
             payload["kpp"] = organisation.kpp
-        # buyer_inn and optional primary-document/fiscal fields are intentionally absent.
+        if self.withdrawal_primary_document_provider is not None:
+            primary = self.withdrawal_primary_document_provider(event)
+            if primary is not None:
+                payload.update(primary.withdrawal_fields())
+        # buyer_inn, withdrawal_type_other, state_contract_id, fiscal drive, currency,
+        # synthetic paid/VAT and WB-only identifiers are intentionally absent.
         return ExactDocumentBuilder.from_json_value(payload)
 
     def _lp_return_remote_sale(self, event: Event) -> ExactDocument:
