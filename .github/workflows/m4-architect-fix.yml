@@ -1,0 +1,125 @@
+name: M4 architect review fix
+
+on:
+  push:
+    branches:
+      - m4/document-lifecycle-001
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m4/document-lifecycle-001
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply architect resolution 1-5
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              s = p.read_text(encoding="utf-8")
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, got {count}: {old[:120]!r}")
+              p.write_text(s.replace(old, new, 1), encoding="utf-8")
+
+          p = "src/wbcz/document_lifecycle.py"
+          replace_once(p,
+          '''class LocalDocumentCategory(StrEnum):\n    """Sellari-local categorisation only; these are not True API document_format values."""\n\n    MANUAL = "MANUAL"\n    ADDOPTION = "ADDOPTION"\n    AGENCY = "AGENCY"\n    OTHER = "OTHER"\n\n\n''', '')
+          replace_once(p,
+          '''class LocalProcessingErrorCode(StrEnum):\n    """Sellari-local error categories; never replace CRPT commonErrors.errorCode."""\n\n    INVALID_DOCUMENT_ID = "INVALID_DOCUMENT_ID"\n    INVALID_DOCUMENT_STATUS = "INVALID_DOCUMENT_STATUS"\n    DOCUMENT_ALREADY_PROCESSED = "DOCUMENT_ALREADY_PROCESSED"\n    CONTRACT_ERROR = "CONTRACT_ERROR"\n\n\n''', '')
+          replace_once(p,
+          '''class CommonProcessingError:\n    raw_code: str | None\n    message: str | None\n    error_object: Any\n    local_code: LocalProcessingErrorCode | None = None\n''',
+          '''class CommonProcessingError:\n    raw_code: str | None\n    message: str | None\n    error_object: Any\n''')
+          replace_once(p,
+          '''def _page_cursor(value: Any) -> dict[str, str]:\n    item = _expect_object(value, "page")\n    unknown = set(item) - {"ordered_column_value", "direction"}\n    if unknown:\n        raise DocumentLifecycleContractError(f"page has unknown fields: {sorted(unknown)}")\n    cursor = _expect_string(item.get("ordered_column_value"), "page.ordered_column_value")\n    direction = _expect_string(item.get("direction", "NEXT"), "page.direction").upper()\n    if direction not in {"PREV", "NEXT"}:\n        raise DocumentLifecycleContractError("page.direction must be PREV or NEXT")\n    return {"ordered_column_value": cursor, "direction": direction}\n\n\n''', '')
+          replace_once(p,
+          '''        allowed = {\n            "document_id", "did", "document_type_code", "document_status_code", "operation",\n            "document_format", "date_from", "date_to", "limit", "order", "page",\n            "sender_inn", "receiver_inn",\n        }\n''',
+          '''        allowed = {\n            "document_id", "did", "number", "document_type_code", "document_status_code",\n            "document_format", "date_from", "date_to", "limit", "order",\n            "ordered_column_value", "page_dir", "sender_inn", "receiver_inn",\n        }\n''')
+          replace_once(p,
+          '''        if "document_id" in root and root["document_id"] is not None:\n            normalized["document_id"] = _document_id(root["document_id"])\n        if "did" in root and root["did"] is not None:\n            normalized["did"] = _expect_string(root["did"], "did")\n''',
+          '''        if "document_id" in root and root["document_id"] is not None:\n            if "did" in root and root["did"] is not None:\n                raise DocumentLifecycleContractError("document_id is a local alias for did; provide only one")\n            normalized["did"] = _document_id(root["document_id"])\n        elif "did" in root and root["did"] is not None:\n            normalized["did"] = _expect_string(root["did"], "did")\n        if "number" in root and root["number"] is not None:\n            normalized["number"] = _expect_string(root["number"], "number")\n''')
+          replace_once(p,
+          '''        if "operation" in root and root["operation"] is not None:\n            if "document_status_code" in normalized:\n                raise DocumentLifecycleContractError("operation and document_status_code are aliases; provide only one")\n            normalized["document_status_code"] = _expect_string(root["operation"], "operation")\n''', '')
+          replace_once(p,
+          '''        if "page" in root and root["page"] is not None:\n            normalized["page"] = _page_cursor(root["page"])\n''',
+          '''        if "ordered_column_value" in root and root["ordered_column_value"] is not None:\n            normalized["ordered_column_value"] = _expect_string(root["ordered_column_value"], "ordered_column_value")\n        if "page_dir" in root and root["page_dir"] is not None:\n            page_dir = _expect_string(root["page_dir"], "page_dir").upper()\n            if page_dir not in {"PREV", "NEXT"}:\n                raise DocumentLifecycleContractError("page_dir must be PREV or NEXT")\n            normalized["page_dir"] = page_dir\n''')
+          replace_once(p,
+          '''        if "document_id" in normalized:\n            pairs.append(("number", normalized["document_id"]))\n        if "page" in normalized:\n            pairs.append(("orderedColumnValue", normalized["page"]["ordered_column_value"]))\n            pairs.append(("pageDir", normalized["page"]["direction"]))\n''',
+          '''        if "number" in normalized:\n            pairs.append(("number", normalized["number"]))\n        if "ordered_column_value" in normalized:\n            pairs.append(("orderedColumnValue", normalized["ordered_column_value"]))\n        if "page_dir" in normalized:\n            pairs.append(("pageDir", normalized["page_dir"]))\n''')
+          replace_once(p,
+          '''            CommonProcessingError(\n                raw_code=str(code) if code is not None else None,\n                message=str(message) if message is not None else None,\n                error_object=item.get("errorObject"),\n                local_code=None,\n            )\n''',
+          '''            CommonProcessingError(\n                raw_code=str(code) if code is not None else None,\n                message=str(message) if message is not None else None,\n                error_object=item.get("errorObject"),\n            )\n''')
+          replace_once(p,
+          '''    # Generic True API does not expose a chronological operations list,\n    # attachments collection or generic receipts collection. Keep explicit local\n    # stubs so API consumers cannot mistake absent generic capabilities for empty\n    # authoritative history.\n''', '')
+          replace_once(p,
+          '''        "operations": [],\n        "attachments": [],\n        "receipts": [],\n        "generic_capabilities": {\n            "operations": "NOT_DOCUMENTED_GENERIC_TRUE_API",\n            "attachments": "NOT_DOCUMENTED_GENERIC_TRUE_API",\n            "receipts": "EDO_SPECIFIC_OPTIONAL_LATER",\n        },\n''', '')
+
+          p = "src/wbcz_web/services/document_lifecycle.py"
+          replace_once(p, '    LocalDocumentCategory,\n', '')
+          replace_once(p, '            "local_document_categories": [item.value for item in LocalDocumentCategory],\n', '')
+
+          p = "src/wbcz_web/api/schemas.py"
+          replace_once(p,
+          '''class DocumentPageRequest(StrictModel):\n    ordered_column_value: str = Field(min_length=1, max_length=512)\n    direction: Literal["PREV", "NEXT"] = "NEXT"\n\n\n''', '')
+          replace_once(p,
+          '''    document_id: str | None = Field(default=None, min_length=1, max_length=256)\n    did: str | None = Field(default=None, min_length=1, max_length=512)\n    document_type_code: str | list[str] | None = None\n    document_status_code: str | None = Field(default=None, min_length=1, max_length=128)\n    operation: str | None = Field(default=None, min_length=1, max_length=128)\n    document_format: Literal["MANUAL", "UPD", "XML", "CSV"] | None = None\n    date_from: str | None = None\n    date_to: str | None = None\n    limit: int = Field(default=50, ge=1, le=1000)\n    order: Literal["ASC", "DESC"] = "DESC"\n    page: DocumentPageRequest | None = None\n    sender_inn: str | None = None\n''',
+          '''    document_id: str | None = Field(default=None, min_length=1, max_length=256)\n    did: str | None = Field(default=None, min_length=1, max_length=512)\n    number: str | None = Field(default=None, min_length=1, max_length=512)\n    document_type_code: str | list[str] | None = None\n    document_status_code: str | None = Field(default=None, min_length=1, max_length=128)\n    document_format: Literal["MANUAL", "UPD", "XML", "CSV"] | None = None\n    date_from: str | None = None\n    date_to: str | None = None\n    limit: int = Field(default=50, ge=1, le=1000)\n    order: Literal["ASC", "DESC"] = "DESC"\n    ordered_column_value: str | None = Field(default=None, min_length=1, max_length=512)\n    page_dir: Literal["PREV", "NEXT"] | None = None\n    sender_inn: str | None = None\n''')
+
+          p = "tests/test_m4_document_lifecycle.py"
+          replace_once(p, 'import pytest\n\nfrom wbcz.document_lifecycle import (\n', 'import pytest\n\nimport wbcz.document_lifecycle as lifecycle_module\nfrom wbcz.document_lifecycle import (\n')
+          replace_once(p,
+          '''    assert "ADDOPTION" not in {item.value for item in DocumentFormat}\n''',
+          '''    assert "ADDOPTION" not in {item.value for item in DocumentFormat}\n    assert not hasattr(lifecycle_module, "LocalDocumentCategory")\n    assert not hasattr(lifecycle_module, "LocalProcessingErrorCode")\n    source = Path("src/wbcz/document_lifecycle.py").read_text(encoding="utf-8")\n    assert all(value not in source for value in ("ADDOPTION", "AGENCY", "OTHER", "INVALID_DOCUMENT_ID", "INVALID_DOCUMENT_STATUS", "DOCUMENT_ALREADY_PROCESSED", "CONTRACT_ERROR"))\n''')
+          old_test = '''def test_document_list_typed_wire_filters_and_local_aliases():\n    payload = {\n        "document_id": "doc-1",\n        "did": "search-fragment",\n        "document_type_code": ["LK_RECEIPT", "LP_RETURN"],\n        "operation": "CHECKED_OK",\n        "date_from": "2026-09-01T00:00:00+03:00",\n        "date_to": "2026-09-17T23:59:59+03:00",\n        "page": {"ordered_column_value": "2026-09-17T12:00:00Z", "direction": "NEXT"},\n        "limit": 1000,\n        "order": "DESC",\n        "sender_inn": INN,\n    }\n    canonical = validate_m4_job_payload("DOCUMENT_LIST", payload)\n    assert canonical["document_status_code"] == "CHECKED_OK"\n    assert "operation" not in canonical\n    spec = build_document_read_spec("DOCUMENT_LIST", payload)\n    assert spec.method == "GET"\n    assert spec.target.startswith("/api/v4/true-api/doc/list?")\n    assert "pg=lp" in spec.target\n    assert "number=doc-1" in spec.target\n    assert "did=search-fragment" in spec.target\n    assert "documentStatus=CHECKED_OK" in spec.target\n    assert spec.target.count("documentType=") == 2\n    assert "orderedColumnValue=" in spec.target and "pageDir=NEXT" in spec.target\n    assert "senderInn=1234567890" in spec.target\n    assert "operation=" not in spec.target\n    assert "page=" not in spec.target\n\n\ndef test_document_list_rejects_conflicting_aliases_and_invented_filters():\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"operation": "CHECKED_OK", "document_status_code": "FAILED"})\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"sender_inn": INN, "receiver_inn": INN})\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"cancel": True})\n'''
+          new_test = '''def test_document_list_typed_wire_filters_and_only_document_id_alias():\n    payload = {\n        "document_id": "doc-1",\n        "number": "official-number",\n        "document_type_code": ["LK_RECEIPT", "LP_RETURN"],\n        "document_status_code": "CHECKED_OK",\n        "date_from": "2026-09-01T00:00:00+03:00",\n        "date_to": "2026-09-17T23:59:59+03:00",\n        "ordered_column_value": "2026-09-17T12:00:00Z",\n        "page_dir": "NEXT",\n        "limit": 1000,\n        "order": "DESC",\n        "sender_inn": INN,\n    }\n    canonical = validate_m4_job_payload("DOCUMENT_LIST", payload)\n    assert canonical["did"] == "doc-1"\n    assert "document_id" not in canonical\n    assert canonical["number"] == "official-number"\n    spec = build_document_read_spec("DOCUMENT_LIST", payload)\n    assert spec.method == "GET"\n    assert spec.target.startswith("/api/v4/true-api/doc/list?")\n    assert "pg=lp" in spec.target\n    assert "did=doc-1" in spec.target\n    assert "number=official-number" in spec.target\n    assert "documentStatus=CHECKED_OK" in spec.target\n    assert spec.target.count("documentType=") == 2\n    assert "orderedColumnValue=" in spec.target and "pageDir=NEXT" in spec.target\n    assert "senderInn=1234567890" in spec.target\n    assert "operation=" not in spec.target and "page=" not in spec.target\n\n\ndef test_document_list_rejects_removed_aliases_and_invented_filters():\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"operation": "CHECKED_OK"})\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"page": {"ordered_column_value": "x", "direction": "NEXT"}})\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"document_id": "doc-1", "did": "doc-1"})\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"sender_inn": INN, "receiver_inn": INN})\n    with pytest.raises(DocumentLifecycleContractError):\n        validate_m4_job_payload("DOCUMENT_LIST", {"cancel": True})\n'''
+          replace_once(p, old_test, new_test)
+          replace_once(p,
+          '''def test_document_info_expanded_metadata_errors_and_explicit_generic_stubs():\n''',
+          '''def test_document_info_expanded_metadata_errors_without_edo_placeholders():\n''')
+          replace_once(p,
+          '''    assert parsed["commonErrors"][0]["raw_code"] == "INTRO_ERROR"\n    assert parsed["commonErrors"][0]["local_code"] is None\n    assert parsed["commonErrors"][1]["raw_code"] == "ERROR_777"\n    assert parsed["operations"] == [] and parsed["attachments"] == [] and parsed["receipts"] == []\n    assert parsed["generic_capabilities"]["receipts"] == "EDO_SPECIFIC_OPTIONAL_LATER"\n''',
+          '''    assert parsed["commonErrors"][0]["raw_code"] == "INTRO_ERROR"\n    assert "local_code" not in parsed["commonErrors"][0]\n    assert parsed["commonErrors"][1]["raw_code"] == "ERROR_777"\n    assert all(key not in parsed for key in ("operations", "attachments", "receipts", "generic_capabilities"))\n''')
+
+          p = "docs/M4_DOCUMENT_LIFECYCLE_CONTRACT.md"
+          replace_once(p,
+          '''Local API aliases such as `document_id`, `document_type_code`, `document_status_code`, `operation`, and `page` are local normalization only. They are never forwarded as invented True API wire fields.\n''',
+          '''Local `document_id` is the only document-list identifier alias and maps only to official `did`. `operation` and `page` aliases are rejected. Official `number`, `orderedColumnValue`, and `pageDir` remain distinct documented filters and are never synthesized from those removed aliases.\n''')
+          replace_once(p,
+          '''M4 can request `body` and `content` and preserves documented metadata, raw status, `errors[]`, and `commonErrors[]`. Generic operations history, attachments, detached-signature download, and generic receipts are not documented by the generic API and are therefore exposed only as explicit local capability stubs, never as authoritative remote data.\n''',
+          '''M4 can request `body` and `content` and preserves documented metadata, raw status, `errors[]`, and `commonErrors[]`. Generic operations history, attachments, detached-signature download, and generic receipts are not documented by the generic API and are not emitted by the generic document-info parser.\n''')
+          replace_once(p,
+          '''`errors[]` are preserved as raw strings. `commonErrors[]` preserves `errorCode`, `errorMessage`, and `errorObject`. `commonErrors.errorCode` is an arbitrary raw string because v726.0 is internally inconsistent (`ERROR_<number>` vs `INTRO_ERROR`). Sellari-local categories such as `INVALID_DOCUMENT_ID` are UI/backend aliases only and never replace the CRPT raw code.\n''',
+          '''`errors[]` are preserved as raw strings. `commonErrors[]` preserves `errorCode`, `errorMessage`, and `errorObject`. `commonErrors.errorCode` is an arbitrary raw string because v726.0 is internally inconsistent (`ERROR_<number>` vs `INTRO_ERROR`). M4 introduces no local processing-error normalization enum.\n''')
+
+          p = ".github/workflows/m4-document-lifecycle-validation.yml"
+          s = Path(p).read_text(encoding="utf-8")
+          marker = "          grep -F 'commonErrors.errorCode is raw' src/wbcz_web/services/document_lifecycle.py\n"
+          if marker not in s:
+              raise SystemExit("validation marker missing")
+          s = s.replace(marker, marker + "          ! grep -E 'class Local(DocumentCategory|ProcessingErrorCode)' src/wbcz/document_lifecycle.py\n", 1)
+          Path(p).write_text(s, encoding="utf-8")
+          PY
+      - name: Compile
+        run: python -m compileall -q src tests
+      - name: Commit fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src tests docs .github/workflows/m4-document-lifecycle-validation.yml
+          git diff --cached --check
+          git commit -m 'fix: align M4 with architect resolution'
+          git push origin HEAD:m4/document-lifecycle-001
