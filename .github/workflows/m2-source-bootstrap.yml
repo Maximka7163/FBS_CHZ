@@ -1,0 +1,123 @@
+name: M2 source bootstrap
+
+on:
+  push:
+    branches:
+      - m2/reference-products-readonly-001
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m2/reference-products-readonly-001
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply M2 integration patches
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              if old not in s:
+                  raise SystemExit(f'pattern missing in {path}: {old[:80]!r}')
+              p.write_text(s.replace(old,new,1),encoding='utf-8')
+
+          # Windows agent: typed M2 contracts only, shared transport/limiter.
+          p=Path('src/wbcz/windows_agent.py'); s=p.read_text(encoding='utf-8')
+          marker='from wbcz.models import Decision, KiState, canonical_json, utc_now\n'
+          insert='from wbcz.reference_products import (\n    M2_READ_JOB_TYPES,\n    build_reference_read_spec,\n    is_allowed_reference_target,\n    parse_reference_success_payload,\n    validate_m2_job_payload,\n)\n'
+          if insert not in s:
+              s=s.replace(marker,insert+marker,1)
+          s=s.replace('    CIS_TO_PRODUCT = "CIS_TO_PRODUCT"\n','    CIS_TO_PRODUCT = "CIS_TO_PRODUCT"\n    PARTICIPANTS = "PARTICIPANTS"\n    MODS_LIST = "MODS_LIST"\n    TN_VED_SEARCH = "TN_VED_SEARCH"\n    PRODUCT_GTIN_LIST = "PRODUCT_GTIN_LIST"\n    RD_LIST = "RD_LIST"\n',1)
+          old='''        elif self.job_type.value in M1_READ_JOB_TYPES:\n            if self.read_payload is None:\n                raise AgentSecurityError("M1 read job misses read_payload")\n            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):\n                raise AgentSecurityError("M1 read job contains P0/write fields")\n            try:\n                normalized = validate_m1_job_payload(self.job_type.value, self.read_payload)\n            except ValueError as exc:\n                raise AgentSecurityError(str(exc)) from exc\n            if normalized != self.read_payload:\n                raise AgentSecurityError("M1 read_payload must already be canonical")\n        else:\n'''
+          new='''        elif self.job_type.value in M1_READ_JOB_TYPES:\n            if self.read_payload is None:\n                raise AgentSecurityError("M1 read job misses read_payload")\n            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):\n                raise AgentSecurityError("M1 read job contains P0/write fields")\n            try:\n                normalized = validate_m1_job_payload(self.job_type.value, self.read_payload)\n            except ValueError as exc:\n                raise AgentSecurityError(str(exc)) from exc\n            if normalized != self.read_payload:\n                raise AgentSecurityError("M1 read_payload must already be canonical")\n        elif self.job_type.value in M2_READ_JOB_TYPES:\n            if self.read_payload is None:\n                raise AgentSecurityError("M2 read job misses read_payload")\n            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):\n                raise AgentSecurityError("M2 read job contains P0/write fields")\n            try:\n                normalized = validate_m2_job_payload(self.job_type.value, self.read_payload)\n            except ValueError as exc:\n                raise AgentSecurityError(str(exc)) from exc\n            if normalized != self.read_payload:\n                raise AgentSecurityError("M2 read_payload must already be canonical")\n        else:\n'''
+          if old in s: s=s.replace(old,new,1)
+          else: raise SystemExit('M1 validation block missing')
+          marker='''    def create_document(\n'''
+          method='''    def m2_read(self, job_type: str, payload: dict[str, Any], *, bearer_token: str) -> AgentHttpResponse:\n        spec = build_reference_read_spec(job_type, payload)\n        if not is_allowed_reference_target(spec):\n            raise AgentSecurityError("arbitrary M2 True API read target denied")\n        if not bearer_token:\n            raise AgentSecurityError("True API bearer token is required")\n        headers = {\n            "Accept": "application/json, application/xml, text/xml",\n            "Host": PRODUCTION_HOST,\n            "Connection": "close",\n            "Authorization": "Bearer " + bearer_token,\n        }\n        data: bytes | None = None\n        if spec.body is not None:\n            headers["Content-Type"] = "application/json; charset=UTF-8"\n            data = json.dumps(spec.body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")\n            headers["Content-Length"] = str(len(data))\n        connection: http.client.HTTPConnection | None = None\n        self.rate_limiter.acquire()\n        try:\n            marker = self.tunnel.session_marker()\n            connection = self._connection_factory("127.0.0.1", self.tunnel.local_port, timeout=self.timeout)\n            connection.putrequest(spec.method, spec.target, skip_host=True)\n            for name, value in headers.items():\n                connection.putheader(name, value)\n            connection.endheaders(data)\n            response = connection.getresponse()\n            status = int(response.status)\n            raw = response.read()\n            self.tunnel.assert_gost_session(marker)\n            self.audit.record(\n                method=spec.method, endpoint=spec.audit_endpoint, cis_count=0,\n                http_status=status, request_id=ReadOnlyTrueApiTransport._request_id(response.headers),\n            )\n            return AgentHttpResponse(status=status, body=raw, headers={str(k): str(v) for k, v in response.headers.items()})\n        except GostTlsUnavailable:\n            raise\n        except (OSError, http.client.HTTPException) as exc:\n            self.audit.record(method=spec.method, endpoint=spec.audit_endpoint, cis_count=0, http_status=None, error=type(exc).__name__)\n            raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc\n        finally:\n            if connection is not None:\n                connection.close()\n\n'''
+          if method not in s:
+              s=s.replace(marker,method+marker,1)
+          s=s.replace('''        if job.job_type.value in M1_READ_JOB_TYPES:\n            return self._m1_read(job)\n        if job.job_type is AgentJobType.POLL_DOCUMENT:\n''','''        if job.job_type.value in M1_READ_JOB_TYPES:\n            return self._m1_read(job)\n        if job.job_type.value in M2_READ_JOB_TYPES:\n            return self._m2_read(job)\n        if job.job_type is AgentJobType.POLL_DOCUMENT:\n''',1)
+          s=s.replace('''            parsed = parse_success_payload(job_type, request_payload, payload)\n''','''            parsed = (\n                parse_reference_success_payload(job_type, request_payload, payload)\n                if job_type in M2_READ_JOB_TYPES\n                else parse_success_payload(job_type, request_payload, payload)\n            )\n''',1)
+          marker='''    def _cis_check(self, job: AgentJob) -> AgentResult:\n'''
+          method='''    def _m2_read(self, job: AgentJob) -> AgentResult:\n        assert job.read_payload is not None\n        bearer = self.session_manager.bearer_token()\n        response = self.transport.m2_read(job.job_type.value, job.read_payload, bearer_token=bearer)\n        return self._read_response(job, response, job_type=job.job_type.value, request_payload=job.read_payload)\n\n'''
+          if method not in s:
+              s=s.replace(marker,method+marker,1)
+          p.write_text(s,encoding='utf-8')
+
+          # ORM constraint mirrors migration head.
+          replace('src/wbcz_web/models/agent.py',
+              "CheckConstraint(\"job_type IN ('CIS_CHECK','LK_RECEIPT','LP_RETURN','POLL_DOCUMENT','CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY','PRODUCT_INFO','CIS_TO_PRODUCT')\", name=\"ck_agent_jobs_type\")",
+              "CheckConstraint(\"job_type IN ('CIS_CHECK','LK_RECEIPT','LP_RETURN','POLL_DOCUMENT','CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY','PRODUCT_INFO','CIS_TO_PRODUCT','PARTICIPANTS','MODS_LIST','TN_VED_SEARCH','PRODUCT_GTIN_LIST','RD_LIST')\", name=\"ck_agent_jobs_type\")")
+
+          # Broker accepts sanitized read results without touching P0 state.
+          replace('src/wbcz_web/services/agent_orchestration.py',
+              '''        elif metadata.purpose == "CIS_INVENTORY":\n            # M1 read results are already sanitized/typed on Windows and durably\n            # stored by the job store. No P0 control/write state is touched.\n            pass\n        else:\n''',
+              '''        elif metadata.purpose == "CIS_INVENTORY":\n            # M1 read results are already sanitized/typed on Windows and durably\n            # stored by the job store. No P0 control/write state is touched.\n            pass\n        elif metadata.purpose == "REFERENCE_PRODUCTS":\n            # M2 is read-only; typed/sanitized results are already durable.\n            pass\n        else:\n''')
+
+          # Product/info transport remains M1; extend only its source-specific optional DTO.
+          p=Path('src/wbcz/cis_inventory.py'); s=p.read_text(encoding='utf-8')
+          marker='''    goodTurnFlag: bool | None = None\n'''
+          fields='''    goodTurnFlag: bool | None = None\n    subBrand: Any = None\n    privateBrand: Any = None\n    packageType: Any = None\n    innerUnitCount: Any = None\n    model: Any = None\n    inn: Any = None\n    permittedInns: Any = None\n    productGroupId: Any = None\n    goodSignedFlag: Any = None\n    goodStatus: Any = None\n    isKit: Any = None\n    isTechGtin: Any = None\n    isSet: Any = None\n    setGtin: Any = None\n    setDescription: Any = None\n    level: Any = None\n    mainGtin: Any = None\n    multiplier: Any = None\n    foreignProducer: Any = None\n    exporter: Any = None\n    standardNumber: Any = None\n    tnVedCode: Any = None\n    tnVedCode10: Any = None\n    fullName: Any = None\n    basicUnit: Any = None\n    quantityInPack: Any = None\n    quantityInPackType: Any = None\n    reasonCertMissing: Any = None\n    reasonCertMissingDetails: Any = None\n    certDocList: Any = None\n'''
+          if '    certDocList: Any = None\n' not in s:
+              s=s.replace(marker,fields,1)
+          old='''                goodTurnFlag=raw.get("goodTurnFlag") if type(raw.get("goodTurnFlag")) is bool else None,\n            )\n'''
+          args='''                goodTurnFlag=raw.get("goodTurnFlag") if type(raw.get("goodTurnFlag")) is bool else None,\n                subBrand=raw.get("subBrand"), privateBrand=raw.get("privateBrand"),\n                packageType=raw.get("packageType"), innerUnitCount=raw.get("innerUnitCount"),\n                model=raw.get("model"), inn=raw.get("inn"), permittedInns=raw.get("permittedInns"),\n                productGroupId=raw.get("productGroupId"), goodSignedFlag=raw.get("goodSignedFlag"),\n                goodStatus=raw.get("goodStatus"), isKit=raw.get("isKit"), isTechGtin=raw.get("isTechGtin"),\n                isSet=raw.get("isSet"), setGtin=raw.get("setGtin"), setDescription=raw.get("setDescription"),\n                level=raw.get("level"), mainGtin=raw.get("mainGtin"), multiplier=raw.get("multiplier"),\n                foreignProducer=raw.get("foreignProducer"), exporter=raw.get("exporter"),\n                standardNumber=raw.get("standardNumber"), tnVedCode=raw.get("tnVedCode"),\n                tnVedCode10=raw.get("tnVedCode10"), fullName=raw.get("fullName"), basicUnit=raw.get("basicUnit"),\n                quantityInPack=raw.get("quantityInPack"), quantityInPackType=raw.get("quantityInPackType"),\n                reasonCertMissing=raw.get("reasonCertMissing"), reasonCertMissingDetails=raw.get("reasonCertMissingDetails"),\n                certDocList=raw.get("certDocList"),\n            )\n'''
+          if 'certDocList=raw.get("certDocList")' not in s:
+              if old not in s: raise SystemExit('product parser marker missing')
+              s=s.replace(old,args,1)
+          p.write_text(s,encoding='utf-8')
+
+          # Strict application schemas.
+          p=Path('src/wbcz_web/api/schemas.py'); s=p.read_text(encoding='utf-8')
+          add='''\n\nclass ReferenceParticipantsRequest(StrictModel):\n    inns: list[str] = Field(min_length=1, max_length=100)\n\n\nclass ReferenceModsRequest(StrictModel):\n    productGroups: list[str] = Field(default_factory=lambda: ["lp"], min_length=1)\n    kpp: str | None = None\n    fiasId: str | None = None\n    inns: list[str] | None = Field(default=None, max_length=10)\n    limit: int = Field(default=100, ge=1, le=1000)\n    page: int = Field(default=0, ge=0)\n\n\nclass ReferenceModValidateRequest(StrictModel):\n    inn: str\n    kpp: str | None = None\n    fiasId: str | None = None\n\n\nclass ReferenceTnVedRequest(StrictModel):\n    pg: str | None = None\n    tnveds: list[str] | None = None\n    page: int | None = Field(default=None, ge=0)\n    limit: int | None = Field(default=None, ge=1, le=1000)\n    sort: str | None = None\n    direction: str | None = None\n\n\nclass ReferenceProductGtinRequest(StrictModel):\n    includeSubaccount: bool = False\n    limit: int = Field(default=10, ge=1, le=10000)\n    page: int = Field(default=0, ge=0)\n\n\nclass ReferenceRdDocument(StrictModel):\n    type: str\n    number: str\n    dateFrom: str | None = None\n\n\nclass ReferenceRdListRequest(StrictModel):\n    documents: list[ReferenceRdDocument] = Field(min_length=1, max_length=25)\n'''
+          if 'class ReferenceParticipantsRequest' not in s:
+              s += add
+          p.write_text(s,encoding='utf-8')
+
+          # Application routes use existing auth/session/CSRF and async job lifecycle.
+          p=Path('src/wbcz_web/api/routes.py'); s=p.read_text(encoding='utf-8')
+          s=s.replace('from wbcz.windows_agent import AgentJobType\n',
+              'from wbcz.reference_products import lookup_reference_value, reference_categories, reference_entries\nfrom wbcz.windows_agent import AgentJobType\n',1)
+          s=s.replace('from wbcz_web.services.cis_inventory import CisInventoryService, CisInventoryUnavailable\n',
+              'from wbcz_web.services.cis_inventory import CisInventoryService, CisInventoryUnavailable\nfrom wbcz_web.services.reference_products import ReferenceProductsService, ReferenceProductsUnavailable\n',1)
+          s=s.replace('''    PreviewRequest,\n)\n''','''    PreviewRequest,\n    ReferenceModValidateRequest,\n    ReferenceModsRequest,\n    ReferenceParticipantsRequest,\n    ReferenceProductGtinRequest,\n    ReferenceRdListRequest,\n    ReferenceTnVedRequest,\n)\n''',1)
+          add='''\n\ndef _reference_products_service(request: Request, db: Session) -> ReferenceProductsService:\n    try:\n        return ReferenceProductsService(db, request.app.state.config)\n    except ReferenceProductsUnavailable as exc:\n        raise HTTPException(status_code=409, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/participants")\ndef reference_participants(payload: ReferenceParticipantsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).queue(AgentJobType.PARTICIPANTS, {"inns": payload.inns})\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/participants/self")\ndef reference_self_participant(request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).self_participant()\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/mods/list")\ndef reference_mods(payload: ReferenceModsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).queue(AgentJobType.MODS_LIST, payload.model_dump(exclude_none=True))\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/mods/validate-lp")\ndef reference_validate_lp_mod(payload: ReferenceModValidateRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    body = {"productGroups": ["lp"], "inns": [payload.inn], "limit": 1000, "page": 0}\n    if payload.kpp is not None: body["kpp"] = payload.kpp\n    if payload.fiasId is not None: body["fiasId"] = payload.fiasId\n    try:\n        return _reference_products_service(request, db).queue(AgentJobType.MODS_LIST, body)\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/tn-ved/search")\ndef reference_tnved(payload: ReferenceTnVedRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).queue(AgentJobType.TN_VED_SEARCH, payload.model_dump(exclude_none=True))\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/product-info")\ndef reference_product_info(payload: CisInventoryProductRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).queue(AgentJobType.PRODUCT_INFO, {"gtins": payload.gtins, "rdInfo": payload.rdInfo})\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/product-gtins")\ndef reference_product_gtins(payload: ReferenceProductGtinRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).queue(AgentJobType.PRODUCT_GTIN_LIST, {"pg": "lp", **payload.model_dump()})\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.post("/reference-products/regulatory-documents")\ndef reference_regulatory_documents(payload: ReferenceRdListRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).queue(AgentJobType.RD_LIST, payload.model_dump(exclude_none=True))\n    except ValueError as exc:\n        raise HTTPException(status_code=400, detail=str(exc)) from exc\n\n\n@router.get("/reference-products/requests/{request_id}")\ndef reference_request_status(request_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:\n    try:\n        return _reference_products_service(request, db).status(request_id)\n    except KeyError as exc:\n        raise HTTPException(status_code=404, detail="M2 request not found") from exc\n\n\n@router.get("/reference-products/references")\ndef reference_registry_categories(identity: AuthenticatedIdentity = Depends(require_user)) -> list[dict]:\n    return reference_categories()\n\n\n@router.get("/reference-products/references/{category}")\ndef reference_registry_entries(category: str, identity: AuthenticatedIdentity = Depends(require_user)) -> dict:\n    try:\n        return reference_entries(category)\n    except KeyError as exc:\n        raise HTTPException(status_code=404, detail="reference category not found") from exc\n\n\n@router.get("/reference-products/references/{category}/{value}")\ndef reference_registry_lookup(category: str, value: str, identity: AuthenticatedIdentity = Depends(require_user)) -> dict:\n    try:\n        return lookup_reference_value(category, value)\n    except KeyError as exc:\n        raise HTTPException(status_code=404, detail="reference category not found") from exc\n'''
+          if '@router.post("/reference-products/participants")' not in s:
+              s += add
+          p.write_text(s,encoding='utf-8')
+
+          # Compile modified/new Python before committing.
+          import py_compile
+          for path in [
+              'src/wbcz/reference_products.py','src/wbcz/cis_inventory.py','src/wbcz/windows_agent.py',
+              'src/wbcz_web/services/reference_products.py','src/wbcz_web/models/agent.py',
+              'src/wbcz_web/services/agent_orchestration.py','src/wbcz_web/api/schemas.py','src/wbcz_web/api/routes.py',
+              'migrations/versions/0004_m2_reference_products_read_jobs.py',
+          ]:
+              py_compile.compile(path,doraise=True)
+          PY
+      - name: Commit source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src migrations
+          if git diff --cached --quiet; then
+            echo 'No source changes required'
+            exit 0
+          fi
+          git commit -m 'feat: integrate M2 reference products backend'
+          git push origin HEAD:m2/reference-products-readonly-001
