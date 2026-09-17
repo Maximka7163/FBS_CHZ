@@ -42,7 +42,7 @@ Authorization is constructed internally as:
 
 There is no Bearer prefix.
 
-Runtime token secret is supplied by an injected secret provider. PostgreSQL stores only `secret_ref`, token type/categories, expiry metadata and connection metadata. Token repr/str is redacted. Raw WB token is never persisted.
+Runtime token secret is supplied by an injected secret provider. PostgreSQL stores only `secret_ref`, token type/categories/scopes, expiry metadata and connection metadata. Token repr/str is redacted. Raw WB token is never persisted.
 
 Production self-integration defaults to `PERSONAL`. `TEST` is sandbox-only. `SERVICE`, `BASE` and `BASE_WITH_SECRET` are modeled but not silently substituted for `PERSONAL`.
 
@@ -367,3 +367,28 @@ Tables:
 Historical migrations are not modified.
 
 M7 full XML write remains independently blocked on pinned official XSD artifacts. M8 full SUZ wire remains independently blocked on official core SUZ artifacts.
+
+
+## First-run backfill policy
+
+First-run history depth is explicit project configuration, not a claim of infinite WB retention.
+
+The foundation models configurable horizons and splits current-FBS history into request windows of at most 30 days. Order Feed first-run horizon is capped at its current 31-day source domain. Supplier Sales compatibility backfill does not assume more than the currently guaranteed ~90-day storage window. Archive backfill is configured by explicit year/month and uses its own pagination/overlap policy.
+
+Goods Return uses independent date windows of at most 31 days. A larger project horizon is represented as multiple bounded windows; this does not upgrade any undocumented remote retention guarantee.
+
+The sync-feed registry is source-specific:
+- FBS_CURRENT
+- FBS_ARCHIVE
+- ORDER_FEED
+- METADATA
+- GOODS_RETURN
+- SUPPLIER_SALES_COMPAT
+
+Each feed keeps independent durable cursor/cycle evidence.
+
+## Local M5 decision handoff
+
+M9 defines a typed local M5 decision request containing only local order identity and evidence fingerprints. It has no URL, HTTP transport, WB/True API token, document serialization or signing operation.
+
+Only M9 decisions already in `DISTANCE_READY` or `REMOTE_SALE_RETURN_READY` can be converted into that local handoff. Since the paid-source gate is currently false, normal automatic DISTANCE cannot reach the former state.
