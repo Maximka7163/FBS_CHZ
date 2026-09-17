@@ -577,3 +577,260 @@ def test_persistence_generic_json_surfaces_are_explicitly_sanitized_or_redacted(
     assert "evidence_redacted" in WbReconciliationRecord.__table__.columns
     assert "evidence" not in WbReconciliationRecord.__table__.columns
     assert "token_scopes" in WbConnectionRecord.__table__.columns
+
+
+class FakeMonotonicClock:
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class SequencedStatusAdapter(FakeAdapter):
+    def __init__(self, statuses: list[int]) -> None:
+        super().__init__()
+        self.statuses = list(statuses)
+
+    def send(self, *, method, url, headers, params, json_body):
+        self.calls.append((method, url, dict(headers), dict(params or {}), json_body))
+        status = self.statuses.pop(0) if self.statuses else 200
+        return WbHttpResponse(status, "application/json", b"{}", {})
+
+
+def typed_runtime_token(
+    token_type: WbTokenType,
+    category: WbTokenCategory,
+    secret_ref: str,
+) -> WbRuntimeToken:
+    return WbRuntimeToken(
+        "WB-RATE-TOKEN-CANARY",
+        secret_ref=secret_ref,
+        token_type=token_type,
+        categories=(category,),
+    )
+
+
+def test_transport_enforces_order_feed_personal_rate_limit_without_adapter_bypass() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = FakeAdapter()
+    clock = FakeMonotonicClock()
+    transport = WbReadTransport(fake, WbEnvironment.PRODUCTION, StatefulWbRateLimiter(), clock)
+    token = typed_runtime_token(WbTokenType.PERSONAL, WbTokenCategory.ANALYTICS, "secret://rate/order-feed-personal")
+    q = OrderFeedQuery(NOW, NOW + timedelta(days=1))
+
+    transport.order_feed(q, token)
+    with pytest.raises(WbRateLimitExceeded) as exc:
+        transport.order_feed(q, token)
+    assert exc.value.retry_after_seconds == pytest.approx(60.0)
+    assert "WB-RATE-TOKEN-CANARY" not in str(exc.value)
+    assert len(fake.calls) == 1
+
+    clock.advance(60)
+    transport.order_feed(q, token)
+    assert len(fake.calls) == 2
+
+
+def test_transport_enforces_order_feed_base_three_hour_policy() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = FakeAdapter()
+    clock = FakeMonotonicClock()
+    transport = WbReadTransport(fake, WbEnvironment.PRODUCTION, StatefulWbRateLimiter(), clock)
+    token = typed_runtime_token(WbTokenType.BASE, WbTokenCategory.ANALYTICS, "secret://rate/order-feed-base")
+    q = OrderFeedQuery(NOW, NOW + timedelta(days=1))
+
+    transport.order_feed(q, token)
+    with pytest.raises(WbRateLimitExceeded) as exc:
+        transport.order_feed(q, token)
+    assert exc.value.retry_after_seconds == pytest.approx(10800.0)
+    assert len(fake.calls) == 1
+    clock.advance(10800)
+    transport.order_feed(q, token)
+    assert len(fake.calls) == 2
+
+
+def test_transport_enforces_supplier_sales_base_two_hour_policy() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = FakeAdapter()
+    clock = FakeMonotonicClock()
+    transport = WbReadTransport(fake, WbEnvironment.PRODUCTION, StatefulWbRateLimiter(), clock)
+    token = typed_runtime_token(WbTokenType.BASE, WbTokenCategory.STATISTICS, "secret://rate/sales-base")
+    q = SupplierSalesQuery("2026-09-18T00:00:00+03:00")
+
+    transport.supplier_sales(q, token)
+    with pytest.raises(WbRateLimitExceeded) as exc:
+        transport.supplier_sales(q, token)
+    assert exc.value.retry_after_seconds == pytest.approx(7200.0)
+    assert len(fake.calls) == 1
+    clock.advance(7200)
+    transport.supplier_sales(q, token)
+    assert len(fake.calls) == 2
+
+
+def test_transport_enforces_goods_return_base_half_hour_interval() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = FakeAdapter()
+    clock = FakeMonotonicClock()
+    transport = WbReadTransport(fake, WbEnvironment.PRODUCTION, StatefulWbRateLimiter(), clock)
+    token = typed_runtime_token(WbTokenType.BASE, WbTokenCategory.ANALYTICS, "secret://rate/goods-return-base")
+    q = GoodsReturnQuery(NOW, NOW + timedelta(days=1))
+
+    transport.goods_return(q, token)
+    with pytest.raises(WbRateLimitExceeded):
+        transport.goods_return(q, token)
+    assert len(fake.calls) == 1
+    clock.advance(1799)
+    with pytest.raises(WbRateLimitExceeded):
+        transport.goods_return(q, token)
+    assert len(fake.calls) == 1
+    clock.advance(1)
+    transport.goods_return(q, token)
+    assert len(fake.calls) == 2
+
+
+def test_transport_enforces_marketplace_burst_interval_and_shared_family_bucket() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = FakeAdapter()
+    clock = FakeMonotonicClock()
+    limiter = StatefulWbRateLimiter()
+    transport = WbReadTransport(fake, WbEnvironment.PRODUCTION, limiter, clock)
+    token = typed_runtime_token(WbTokenType.PERSONAL, WbTokenCategory.MARKETPLACE, "secret://rate/marketplace-shared")
+
+    for _ in range(19):
+        transport.fbs_new(token)
+    transport.supplies(token)
+    assert len(fake.calls) == 20
+
+    with pytest.raises(WbRateLimitExceeded) as exc:
+        transport.fbs_current(FbsCurrentQuery(100), token)
+    assert exc.value.retry_after_seconds == pytest.approx(0.2)
+    assert len(fake.calls) == 20
+
+    clock.advance(0.2)
+    transport.fbs_current(FbsCurrentQuery(100), token)
+    assert len(fake.calls) == 21
+
+
+def test_transport_marketplace_4xx_charges_documented_weight_ten() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = SequencedStatusAdapter([400] + [200] * 20)
+    clock = FakeMonotonicClock()
+    transport = WbReadTransport(fake, WbEnvironment.PRODUCTION, StatefulWbRateLimiter(), clock)
+    token = typed_runtime_token(WbTokenType.PERSONAL, WbTokenCategory.MARKETPLACE, "secret://rate/marketplace-4xx")
+
+    assert transport.fbs_new(token).status_code == 400
+    for _ in range(10):
+        transport.fbs_new(token)
+    assert len(fake.calls) == 11
+
+    with pytest.raises(WbRateLimitExceeded):
+        transport.fbs_new(token)
+    assert len(fake.calls) == 11
+
+
+def test_transport_rate_buckets_are_independent_by_secret_ref() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = FakeAdapter()
+    clock = FakeMonotonicClock()
+    limiter = StatefulWbRateLimiter()
+    transport = WbReadTransport(fake, WbEnvironment.PRODUCTION, limiter, clock)
+    q = OrderFeedQuery(NOW, NOW + timedelta(days=1))
+    a = typed_runtime_token(WbTokenType.PERSONAL, WbTokenCategory.ANALYTICS, "secret://rate/a")
+    b = typed_runtime_token(WbTokenType.PERSONAL, WbTokenCategory.ANALYTICS, "secret://rate/b")
+
+    transport.order_feed(q, a)
+    transport.order_feed(q, b)
+    assert len(fake.calls) == 2
+    with pytest.raises(WbRateLimitExceeded):
+        transport.order_feed(q, a)
+    with pytest.raises(WbRateLimitExceeded):
+        transport.order_feed(q, b)
+    assert len(fake.calls) == 2
+
+
+def test_sandbox_marketplace_rate_bucket_is_shared_across_typed_methods() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter, WbRateLimitExceeded
+    fake = FakeAdapter()
+    clock = FakeMonotonicClock()
+    transport = WbReadTransport(fake, WbEnvironment.SANDBOX, StatefulWbRateLimiter(), clock)
+    token = typed_runtime_token(WbTokenType.TEST, WbTokenCategory.MARKETPLACE, "secret://rate/sandbox-marketplace")
+
+    transport.fbs_new(token)
+    with pytest.raises(WbRateLimitExceeded):
+        transport.supplies(token)
+    assert len(fake.calls) == 1
+    clock.advance(1)
+    transport.supplies(token)
+    assert len(fake.calls) == 2
+
+
+def test_fbs_archive_production_enabled_but_sandbox_not_documented_and_rejected() -> None:
+    from wbcz.wb_fbs import StatefulWbRateLimiter
+    assert WB_READ_CAPABILITIES[WbCapabilityName.FBS_ARCHIVE].production is True
+    assert WB_READ_CAPABILITIES[WbCapabilityName.FBS_ARCHIVE].sandbox is False
+
+    prod_fake = FakeAdapter()
+    prod_transport = WbReadTransport(prod_fake, WbEnvironment.PRODUCTION, StatefulWbRateLimiter(), FakeMonotonicClock())
+    prod_transport.fbs_archive(
+        FbsArchiveQuery(2026, 9, 100),
+        typed_runtime_token(WbTokenType.PERSONAL, WbTokenCategory.MARKETPLACE, "secret://archive/prod"),
+    )
+    assert len(prod_fake.calls) == 1
+
+    sandbox_fake = FakeAdapter()
+    sandbox_transport = WbReadTransport(sandbox_fake, WbEnvironment.SANDBOX, StatefulWbRateLimiter(), FakeMonotonicClock())
+    with pytest.raises(WbSecurityError):
+        sandbox_transport.fbs_archive(
+            FbsArchiveQuery(2026, 9, 100),
+            typed_runtime_token(WbTokenType.TEST, WbTokenCategory.MARKETPLACE, "secret://archive/sandbox"),
+        )
+    assert sandbox_fake.calls == []
+
+
+def test_meta_details_list_and_discriminator_marking_values_are_recursively_sanitized() -> None:
+    canary = "CIS-SECRET-CANARY"
+    a = parse_meta_details({"metaDetails": [{"key": "sgtin", "value": canary}]})
+    assert canary not in repr(a.raw_sanitized)
+    assert isinstance(a.raw_sanitized, list)
+    assert a.raw_sanitized[0]["key"] == "sgtin"
+    assert a.raw_sanitized[0]["value"] == "REDACTED"
+
+    b = parse_meta_details({"metaDetails": [{"key": "sgtin", "values": ["CIS-A", "CIS-B"]}]})
+    assert "CIS-A" not in repr(b.raw_sanitized)
+    assert "CIS-B" not in repr(b.raw_sanitized)
+    assert b.raw_sanitized[0]["values"] == "REDACTED"
+
+    c = parse_meta_details({"metaDetails": {"future": [{"type": "sgtin", "data": {"value": "CIS-SECRET"}}]}})
+    assert "CIS-SECRET" not in repr(c.raw_sanitized)
+    assert c.raw_sanitized["future"][0]["data"] == "REDACTED"
+
+
+def test_meta_details_preserves_non_sensitive_unknowns_and_redacts_direct_marking_keys() -> None:
+    parsed = parse_meta_details({
+        "metaDetails": {
+            "future": [{"type": "newFeature", "data": {"value": "keep-me", "flag": True}}],
+            "sgtin": "SECRET-1",
+            "cis": "SECRET-2",
+            "kiz": "SECRET-3",
+            "markingCode": "SECRET-4",
+        }
+    })
+    rendered = repr(parsed.raw_sanitized)
+    for canary in ("SECRET-1", "SECRET-2", "SECRET-3", "SECRET-4"):
+        assert canary not in rendered
+    assert parsed.raw_sanitized["future"][0]["data"] == {"value": "keep-me", "flag": True}
+    assert parsed.raw_sanitized["sgtin"] == "REDACTED"
+    assert parsed.raw_sanitized["cis"] == "REDACTED"
+    assert parsed.raw_sanitized["kiz"] == "REDACTED"
+    assert parsed.raw_sanitized["markingCode"] == "REDACTED"
+
+
+def test_wb_error_recursive_sanitizer_blocks_discriminator_marking_canary() -> None:
+    body = b'{"title":"future","metaDetails":[{"key":"sgtin","value":"CIS-ERROR-CANARY"}],"future":{"ok":true}}'
+    evidence = parse_wb_error(WbHttpResponse(400, "application/problem+json", body))
+    assert "CIS-ERROR-CANARY" not in repr(evidence.raw_sanitized)
+    assert evidence.raw_sanitized["metaDetails"][0]["value"] == "REDACTED"
+    assert evidence.raw_sanitized["future"] == {"ok": True}
