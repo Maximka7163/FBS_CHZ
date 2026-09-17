@@ -1,0 +1,80 @@
+name: M5 source patch
+
+on:
+  push:
+    branches:
+      - m5/turnover-operations-001
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m5/turnover-operations-001
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Patch accepted P0/M3 Windows path without rewrite
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def once(path, old, new):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              if s.count(old) != 1:
+                  raise SystemExit(f'{path}: expected exactly one match for {old[:80]!r}, got {s.count(old)}')
+              p.write_text(s.replace(old,new,1), encoding='utf-8')
+
+          p='src/wbcz/windows_agent.py'
+          once(p,
+          '''from wbcz.document_lifecycle import (\n    M4_READ_JOB_TYPES,\n    build_document_read_spec,\n    capture_create_response,\n    is_allowed_document_target,\n    parse_m4_success_payload,\n    validate_m4_job_payload,\n)\n''',
+          '''from wbcz.document_lifecycle import (\n    M4_READ_JOB_TYPES,\n    build_document_read_spec,\n    capture_create_response,\n    is_allowed_document_target,\n    parse_m4_success_payload,\n    validate_m4_job_payload,\n)\nfrom wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES\n''')
+          once(p, '    ALLOWED_DOCUMENT_TYPES,\n', '')
+          once(p,
+          '''    LK_RECEIPT = "LK_RECEIPT"\n    LP_RETURN = "LP_RETURN"\n    POLL_DOCUMENT = "POLL_DOCUMENT"\n''',
+          '''    LK_RECEIPT = "LK_RECEIPT"\n    LP_RETURN = "LP_RETURN"\n    LP_INTRODUCE_GOODS = "LP_INTRODUCE_GOODS"\n    LK_INDI_COMMISSIONING = "LK_INDI_COMMISSIONING"\n    LP_GOODS_IMPORT = "LP_GOODS_IMPORT"\n    CROSSBORDER = "CROSSBORDER"\n    LP_INTRODUCE_OST = "LP_INTRODUCE_OST"\n    LK_CONTRACT_COMMISSIONING = "LK_CONTRACT_COMMISSIONING"\n    LP_FTS_INTRODUCE = "LP_FTS_INTRODUCE"\n    LK_REMARK = "LK_REMARK"\n    WRITE_OFF = "WRITE_OFF"\n    LK_RECEIPT_CANCEL = "LK_RECEIPT_CANCEL"\n    POLL_DOCUMENT = "POLL_DOCUMENT"\n''')
+          once(p, '        if self.job_type in {AgentJobType.LK_RECEIPT, AgentJobType.LP_RETURN}:\n', '        if self.job_type.value in M5_AGENT_WRITE_JOB_TYPES:\n')
+          s=Path(p).read_text(encoding='utf-8')
+          count=s.count('if self.document_type not in ALLOWED_DOCUMENT_TYPES:')
+          if count != 1:
+              raise SystemExit(f'AgentJob ALLOWED count expected 1 got {count}')
+          s=s.replace('if self.document_type not in ALLOWED_DOCUMENT_TYPES:', 'if self.document_type not in M5_DOCUMENT_TYPES:', 1)
+          count=s.count('if document_type not in ALLOWED_DOCUMENT_TYPES:')
+          if count != 2:
+              raise SystemExit(f'transport/signer ALLOWED count expected 2 got {count}')
+          s=s.replace('if document_type not in ALLOWED_DOCUMENT_TYPES:', 'if document_type not in M5_DOCUMENT_TYPES:')
+          Path(p).write_text(s, encoding='utf-8')
+
+          p='src/wbcz/document_assembler.py'
+          once(p,
+          '''    def fields(self) -> dict[str, Any]:\n        document_type = self.document_type.strip().upper() if isinstance(self.document_type, str) else ""\n''',
+          '''    def fields(self) -> dict[str, Any]:\n        document_type = self.document_type.strip().upper() if isinstance(self.document_type, str) else ""\n''')
+          # Insert source-specific LK_RECEIPT primary-document serializer after ReturnPrimaryDocument.fields().
+          marker='''        return result\n\n\nPrimaryDocumentProvider = Callable[[Event], ReturnPrimaryDocument | None]\n'''
+          replacement='''        return result\n\n    def withdrawal_fields(self) -> dict[str, Any]:\n        document_type = self.document_type.strip().upper() if isinstance(self.document_type, str) else ""\n        if document_type not in _ALLOWED_PRIMARY_TYPES:\n            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_TYPE_INVALID")\n        number = self.number.strip() if isinstance(self.number, str) else ""\n        if not 1 <= len(number) <= 255:\n            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_NUMBER_INVALID")\n        value = self.document_date\n        if isinstance(value, datetime):\n            day = value.date()\n        elif isinstance(value, date):\n            day = value\n        else:\n            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_DATE_INVALID")\n        result: dict[str, Any] = {\n            "document_type": document_type,\n            "document_number": number,\n            "document_date": day.isoformat(),\n        }\n        if document_type == "OTHER":\n            custom = self.custom_name.strip() if isinstance(self.custom_name, str) else ""\n            if not 1 <= len(custom) <= 255:\n                raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_CUSTOM_NAME_REQUIRED")\n            result["primary_document_custom_name"] = custom\n        elif self.custom_name not in (None, ""):\n            raise DocumentAssemblyManualReview("WITHDRAW_PRIMARY_DOCUMENT_CUSTOM_NAME_FORBIDDEN")\n        return result\n\n\nPrimaryDocumentProvider = Callable[[Event], ReturnPrimaryDocument | None]\n'''
+          once(p, marker, replacement)
+          once(p,
+          '''        primary_document_provider: PrimaryDocumentProvider | None = None,\n    ) -> None:\n        self.organisation = organisation\n        self.primary_document_provider = primary_document_provider\n''',
+          '''        primary_document_provider: PrimaryDocumentProvider | None = None,\n        withdrawal_primary_document_provider: PrimaryDocumentProvider | None = None,\n    ) -> None:\n        self.organisation = organisation\n        self.primary_document_provider = primary_document_provider\n        self.withdrawal_primary_document_provider = withdrawal_primary_document_provider\n''')
+          once(p,
+          '''        if organisation.organisation_type is OrganisationType.LEGAL_ENTITY:\n            assert organisation.kpp is not None\n            payload["kpp"] = organisation.kpp\n        # buyer_inn and optional primary-document/fiscal fields are intentionally absent.\n        return ExactDocumentBuilder.from_json_value(payload)\n''',
+          '''        if organisation.organisation_type is OrganisationType.LEGAL_ENTITY:\n            assert organisation.kpp is not None\n            payload["kpp"] = organisation.kpp\n        if self.withdrawal_primary_document_provider is not None:\n            primary = self.withdrawal_primary_document_provider(event)\n            if primary is not None:\n                payload.update(primary.withdrawal_fields())\n        # buyer_inn, withdrawal_type_other, state_contract_id, fiscal drive, currency,\n        # synthetic paid/VAT and WB-only identifiers are intentionally absent.\n        return ExactDocumentBuilder.from_json_value(payload)\n''')
+          PY
+          python -m compileall -q src
+      - name: Commit source hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/wbcz/windows_agent.py src/wbcz/document_assembler.py
+          git diff --cached --check
+          git commit -m 'feat: harden P0 and extend typed M5 Windows submission'
+          git push origin HEAD:m5/turnover-operations-001
