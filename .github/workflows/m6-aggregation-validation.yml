@@ -129,6 +129,7 @@ jobs:
           from wbcz.aggregation import (
               M6_DOCUMENT_TYPES, M6_OPERATION_REGISTRY, AggregationOperationKind,
               M5_AGGREGATION_HARDENING, reconcile_m5_aggregation_side_effect,
+              AGGREGATE_IDENTIFIER_ALLOWED_CHARS, validate_aggregate_identifier,
           )
           assert M6_DOCUMENT_TYPES == {'AGGREGATION_DOCUMENT','SETS_AGGREGATION','REAGGREGATION_DOCUMENT','DISAGGREGATION_DOCUMENT','ATK_AGGREGATION','ATK_TRANSFORMATION','ATK_DISAGGREGATION'}
           assert M6_OPERATION_REGISTRY[AggregationOperationKind.FORM_SET].document_type == 'SETS_AGGREGATION'
@@ -136,6 +137,9 @@ jobs:
           assert not M6_OPERATION_REGISTRY[AggregationOperationKind.AUTO_DISAGGREGATION].executable
           assert M5_AGGREGATION_HARDENING['LK_RECEIPT_CANCEL'].startswith('REREAD_RELATION')
           assert callable(reconcile_m5_aggregation_side_effect)
+          assert '@' not in AGGREGATE_IDENTIFIER_ALLOWED_CHARS
+          assert 'Ж' not in AGGREGATE_IDENTIFIER_ALLOWED_CHARS
+          assert validate_aggregate_identifier('A' * 18) == 'A' * 18
           PY
           python -m pytest -q \
             tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent \
