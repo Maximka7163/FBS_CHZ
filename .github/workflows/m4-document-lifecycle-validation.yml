@@ -68,7 +68,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(alembic heads | tr -d '\r')" = '0005_m4_document_lifecycle_read_jobs (head)'
+          test "$(alembic heads | tr -d '\r')" = '0005_m4_documents (head)'
           python - <<'PY'
           import os
           from sqlalchemy import create_engine
@@ -79,7 +79,7 @@ jobs:
           engine.dispose()
           PY
           alembic upgrade head
-          test "$(alembic current | tr -d '\r')" = '0005_m4_document_lifecycle_read_jobs (head)'
+          test "$(alembic current | tr -d '\r')" = '0005_m4_documents (head)'
       - name: Focused M4 tests
         run: python -m pytest -q tests/test_m4_document_lifecycle.py
       - name: M3 M2 M1 regressions
