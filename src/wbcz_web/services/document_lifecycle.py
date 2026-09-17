@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from wbcz.document_lifecycle import (
@@ -22,7 +23,7 @@ from wbcz.document_lifecycle import (
 from wbcz.models import canonical_json
 from wbcz.windows_agent import AgentJob, AgentJobState, AgentJobType, AgentReplayConflict, P0_PG
 from wbcz_web.config import WebConfig
-from wbcz_web.models import AgentJobRecord, AuditLog, WriteOperationRecord
+from wbcz_web.models import AgentJobRecord, AuditLog, DocumentLifecycleLedgerRecord, WriteOperationRecord
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
 
 
@@ -51,17 +52,11 @@ class DocumentLifecycleService:
     def _request_hash(cls, job_type: AgentJobType, payload: dict[str, Any]) -> str:
         return hashlib.sha256(cls._request_body(job_type, payload)).hexdigest()
 
-    def _existing_for_operation(self, operation_id: str) -> AgentJobRecord | None:
-        return self.db.scalar(
-            select(AgentJobRecord)
-            .where(
-                AgentJobRecord.purpose == DOCUMENT_LIFECYCLE_PURPOSE,
-                AgentJobRecord.operation_id == operation_id,
-            )
-            .order_by(AgentJobRecord.created_at)
-            .with_for_update()
-            .limit(1)
-        )
+    def _ledger_row(self, operation_id: str, *, lock: bool = False) -> DocumentLifecycleLedgerRecord | None:
+        stmt = select(DocumentLifecycleLedgerRecord).where(DocumentLifecycleLedgerRecord.operation_id == operation_id)
+        if lock:
+            stmt = stmt.with_for_update()
+        return self.db.scalar(stmt)
 
     def _audit(self, *, user_id: int | None, operation_id: str, action: str, metadata: dict[str, Any]) -> None:
         self.db.add(
@@ -73,6 +68,39 @@ class DocumentLifecycleService:
                 metadata_json=metadata,
             )
         )
+
+    def _replay_response(
+        self,
+        ledger: DocumentLifecycleLedgerRecord,
+        *,
+        user_id: int | None,
+        expected_job_type: AgentJobType,
+        request_hash: str,
+        idem_key: str,
+    ) -> dict[str, Any]:
+        if ledger.job_type != expected_job_type.value or ledger.request_sha256 != request_hash:
+            raise AgentReplayConflict("duplicate operation_id has different request body")
+        self._audit(
+            user_id=user_id,
+            operation_id=ledger.operation_id,
+            action="DOCUMENT_LIFECYCLE_IDEMPOTENT_REPLAY",
+            metadata={
+                "request_id": ledger.request_id,
+                "job_type": ledger.job_type,
+                "request_sha256": request_hash,
+                "idempotency_key": idem_key,
+            },
+        )
+        self.db.flush()
+        return {
+            "request_id": ledger.request_id,
+            "operation_id": ledger.operation_id,
+            "status": "deduplicated",
+            "job_type": ledger.job_type,
+            "source": "windows-agent-true-api",
+            "request_sha256": request_hash,
+            "idempotency_key": idem_key,
+        }
 
     def queue(
         self,
@@ -88,42 +116,49 @@ class DocumentLifecycleService:
         operation_id = operation_id or f"m4read:{uuid4().hex}"
         if not operation_id or len(operation_id) > 128:
             raise ValueError("operation_id must be 1..128 characters")
+
         body = self._request_body(job_type, canonical)
         request_hash = hashlib.sha256(body).hexdigest()
         idem_key = local_idempotency_key(operation_id, body)
-
-        existing = self._existing_for_operation(operation_id)
+        existing = self._ledger_row(operation_id, lock=True)
         if existing is not None:
-            existing_payload = dict(existing.payload_json.get("read_payload") or {})
-            existing_job_type = AgentJobType(existing.job_type)
-            existing_hash = self._request_hash(existing_job_type, existing_payload)
-            if existing_job_type is not job_type or existing_hash != request_hash:
-                raise AgentReplayConflict("duplicate operation_id has different request body")
-            self._audit(
+            return self._replay_response(
+                existing,
                 user_id=user_id,
-                operation_id=operation_id,
-                action="DOCUMENT_LIFECYCLE_IDEMPOTENT_REPLAY",
-                metadata={
-                    "request_id": existing.job_id,
-                    "job_type": job_type.value,
-                    "request_sha256": request_hash,
-                    "idempotency_key": idem_key,
-                },
+                expected_job_type=job_type,
+                request_hash=request_hash,
+                idem_key=idem_key,
             )
-            self.db.flush()
-            return {
-                "request_id": existing.job_id,
-                "operation_id": operation_id,
-                "status": "deduplicated",
-                "job_type": job_type.value,
-                "source": "windows-agent-true-api",
-                "request_sha256": request_hash,
-                "idempotency_key": idem_key,
-            }
 
-        request_uuid = uuid4().hex
+        request_id = f"job_m4_{uuid4().hex}"
+        ledger = DocumentLifecycleLedgerRecord(
+            operation_id=operation_id,
+            request_id=request_id,
+            job_type=job_type.value,
+            request_sha256=request_hash,
+            idempotency_key=idem_key,
+            request_json=canonical,
+        )
+        self.db.add(ledger)
+        try:
+            self.db.flush()
+        except IntegrityError as exc:
+            # A concurrent request may have won the primary-key race. Roll only
+            # this nested unit and compare the persisted immutable request.
+            self.db.rollback()
+            concurrent = self._ledger_row(operation_id, lock=True)
+            if concurrent is None:
+                raise
+            return self._replay_response(
+                concurrent,
+                user_id=user_id,
+                expected_job_type=job_type,
+                request_hash=request_hash,
+                idem_key=idem_key,
+            )
+
         job = AgentJob(
-            job_id=f"job_m4_{request_uuid}",
+            job_id=request_id,
             job_type=job_type,
             operation_id=operation_id,
             pg=P0_PG,
@@ -136,7 +171,7 @@ class DocumentLifecycleService:
             operation_id=operation_id,
             action="DOCUMENT_LIFECYCLE_QUEUED",
             metadata={
-                "request_id": job.job_id,
+                "request_id": request_id,
                 "job_type": job_type.value,
                 "request_sha256": request_hash,
                 "idempotency_key": idem_key,
@@ -144,7 +179,7 @@ class DocumentLifecycleService:
         )
         self.db.flush()
         return {
-            "request_id": job.job_id,
+            "request_id": request_id,
             "operation_id": operation_id,
             "status": "pending",
             "job_type": job_type.value,
@@ -182,6 +217,9 @@ class DocumentLifecycleService:
         row = self.db.get(AgentJobRecord, request_id)
         if row is None or row.purpose != DOCUMENT_LIFECYCLE_PURPOSE:
             raise KeyError(request_id)
+        ledger = self.db.scalar(select(DocumentLifecycleLedgerRecord).where(DocumentLifecycleLedgerRecord.request_id == request_id))
+        if ledger is None:
+            raise KeyError(request_id)
         state = AgentJobState(row.state)
         result = dict(row.result_json) if isinstance(row.result_json, dict) else None
         if state is AgentJobState.PENDING:
@@ -192,19 +230,15 @@ class DocumentLifecycleService:
             public_state = "completed"
         else:
             public_state = "failed"
-        read_payload = dict(row.payload_json.get("read_payload") or {})
-        job_type = AgentJobType(row.job_type)
-        request_hash = self._request_hash(job_type, read_payload)
-        idem_key = local_idempotency_key(row.operation_id, self._request_body(job_type, read_payload))
         return {
             "request_id": row.job_id,
-            "operation_id": row.operation_id,
+            "operation_id": ledger.operation_id,
             "job_type": row.job_type,
             "status": public_state,
             "source": "windows-agent-true-api",
-            "request": read_payload,
-            "request_sha256": request_hash,
-            "idempotency_key": idem_key,
+            "request": dict(ledger.request_json or {}),
+            "request_sha256": ledger.request_sha256,
+            "idempotency_key": ledger.idempotency_key,
             "result": result.get("read_result") if result else None,
             "transport": (
                 {
@@ -224,12 +258,10 @@ class DocumentLifecycleService:
         }
 
     def ledger(self, operation_id: str) -> dict[str, Any]:
-        row = self._existing_for_operation(operation_id)
-        if row is None:
+        ledger = self._ledger_row(operation_id)
+        if ledger is None:
             raise KeyError(operation_id)
-        read_payload = dict(row.payload_json.get("read_payload") or {})
-        job_type = AgentJobType(row.job_type)
-        body = self._request_body(job_type, read_payload)
+        row = self.db.get(AgentJobRecord, ledger.request_id)
         audits = list(
             self.db.scalars(
                 select(AuditLog)
@@ -242,15 +274,15 @@ class DocumentLifecycleService:
         )
         return {
             "operation_id": operation_id,
-            "request_id": row.job_id,
-            "job_type": row.job_type,
-            "request_sha256": hashlib.sha256(body).hexdigest(),
-            "idempotency_key": local_idempotency_key(operation_id, body),
-            "request": read_payload,
-            "state": row.state,
-            "result": dict(row.result_json) if isinstance(row.result_json, dict) else None,
-            "created_at": row.created_at.astimezone(timezone.utc).isoformat() if row.created_at else None,
-            "updated_at": row.updated_at.astimezone(timezone.utc).isoformat() if row.updated_at else None,
+            "request_id": ledger.request_id,
+            "job_type": ledger.job_type,
+            "request_sha256": ledger.request_sha256,
+            "idempotency_key": ledger.idempotency_key,
+            "request": dict(ledger.request_json or {}),
+            "state": row.state if row else "LEDGER_ONLY",
+            "result": dict(row.result_json) if row and isinstance(row.result_json, dict) else None,
+            "created_at": ledger.created_at.astimezone(timezone.utc).isoformat() if ledger.created_at else None,
+            "updated_at": ledger.updated_at.astimezone(timezone.utc).isoformat() if ledger.updated_at else None,
             "audit": [
                 {
                     "id": item.id,
@@ -279,11 +311,7 @@ class DocumentLifecycleService:
                 for item in DOCUMENT_TYPE_REGISTRY.values()
             ],
             "document_statuses": [
-                {
-                    "raw": item.raw,
-                    "display": item.display,
-                    "scope": item.scope.value,
-                }
+                {"raw": item.raw, "display": item.display, "scope": item.scope.value}
                 for item in DOCUMENT_STATUS_REGISTRY.values()
             ],
             "notes": {
