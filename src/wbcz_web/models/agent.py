@@ -90,7 +90,20 @@ class AgentJobRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        CheckConstraint("job_type IN ('CIS_CHECK','LK_RECEIPT','LP_RETURN','POLL_DOCUMENT','CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY','PRODUCT_INFO','CIS_TO_PRODUCT','PARTICIPANTS','MODS_LIST','TN_VED_SEARCH','PRODUCT_GTIN_LIST','RD_LIST')", name="ck_agent_jobs_type"),
+        CheckConstraint("job_type IN ('CIS_CHECK','LK_RECEIPT','LP_RETURN','POLL_DOCUMENT','CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY','PRODUCT_INFO','CIS_TO_PRODUCT','PARTICIPANTS','MODS_LIST','TN_VED_SEARCH','PRODUCT_GTIN_LIST','RD_LIST','DOCUMENT_LIST','DOCUMENT_INFO','DOCUMENT_CISES')", name="ck_agent_jobs_type"),
         CheckConstraint("state IN ('PENDING','LEASED','COMPLETED')", name="ck_agent_jobs_state"),
         UniqueConstraint("job_id", "payload_sha256", name="uq_agent_jobs_payload"),
     )
+
+
+class DocumentLifecycleLedgerRecord(Base):
+    __tablename__ = "document_lifecycle_ledger"
+
+    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    job_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
