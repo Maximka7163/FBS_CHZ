@@ -112,7 +112,7 @@ def _code(value: Any, label: str) -> str:
 
 
 AGGREGATE_IDENTIFIER_ALLOWED_CHARS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789%&'\"()*+,_./:;<?!"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789%&'\"()*+,-_./:;<=>?!"
 )
 
 

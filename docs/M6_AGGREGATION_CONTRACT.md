@@ -8,7 +8,7 @@ Source: True API v726.0 dated 2026-09-04 and accepted `M6-AGGREGATION-RESEARCH-0
 
 For `lp`, `GROUP` is not exposed as a formable parent. `SET` accepts only direct `UNIT` or `BUNDLE`. `BOX` accepts `UNIT`, `BUNDLE`, `SET`, and nested `BOX`; `GROUP` can only appear as a legitimate non-lp child in a mixed-PG KITU. Nested `SET` is fail-closed. ATK is a separate customs aggregate domain.
 
-KIGU/KITU/KIN aggregate identifiers use a dedicated official validator and are not conflated with generic child CIS/KI validation. The aggregate identifier is 18..74 characters and only permits `A-Z`, `a-z`, `0-9`, `%`, `&`, `'`, `"`, `(`, `)`, `*`, `+`, `,`, `_`, `.`, `/`, `:`, `;`, `<`, `?`, `!`. Whitespace, Cyrillic, `@`, and every other character outside that set are rejected. This rule is applied to aggregate parent/set identifier wire positions; it is not blindly applied to child KI/KIK values whose representation contract differs.
+KIGU/KITU/KIN aggregate identifiers use a dedicated official validator and are not conflated with generic child CIS/KI validation. The aggregate identifier is 18..74 characters and only permits `A-Z`, `a-z`, `0-9`, `%`, `&`, `'`, `"`, `(`, `)`, `*`, `+`, `,`, `-`, `_`, `.`, `/`, `:`, `;`, `<`, `=`, `>`, `?`, `!`. Whitespace, Cyrillic, `@`, and every other character outside that set are rejected. This rule is applied to aggregate parent/set identifier wire positions; it is not blindly applied to child KI/KIK values whose representation contract differs.
 
 ## Typed operations
 

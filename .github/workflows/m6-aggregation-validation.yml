@@ -139,7 +139,10 @@ jobs:
           assert callable(reconcile_m5_aggregation_side_effect)
           assert '@' not in AGGREGATE_IDENTIFIER_ALLOWED_CHARS
           assert 'Ж' not in AGGREGATE_IDENTIFIER_ALLOWED_CHARS
+          for ch in '-=>':
+              assert ch in AGGREGATE_IDENTIFIER_ALLOWED_CHARS
           assert validate_aggregate_identifier('A' * 18) == 'A' * 18
+          assert validate_aggregate_identifier("A" * 15 + "-=>") == "A" * 15 + "-=>"
           PY
           python -m pytest -q \
             tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent \

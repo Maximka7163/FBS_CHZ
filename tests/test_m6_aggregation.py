@@ -228,8 +228,8 @@ def test_reaggregation_preconditions_set_box_remove_and_leading_pg() -> None:
 
 
 def test_aggregate_identifier_exact_charset_boundaries_and_generic_child_validator_separate() -> None:
-    allowed_specials = "A%&'\"()*+,_./:;<?!"
-    assert len(allowed_specials) == 18
+    allowed_specials = "A%&'\"()*+,-_./:;<=>?!"
+    assert len(allowed_specials) == 21
     assert validate_aggregate_identifier(allowed_specials) == allowed_specials
     assert validate_aggregate_identifier("A" * 18) == "A" * 18
     assert validate_aggregate_identifier("Z" * 74) == "Z" * 74
