@@ -406,7 +406,7 @@ def test_set_owner_parent_relation_and_product_group_fail_closed() -> None:
 def test_kitu_parent_uniqueness_and_mixed_pg_requires_actual_pg() -> None:
     with pytest.raises(AggregationManualReview, match="ALREADY_PRESENT"):
         validate_box_preconditions(parent=snap(PARENT,PackageType.BOX),children=(snap(C1),),participant_inn=INN)
-    missing_pg=snap(C1,pg=None)
+    missing_pg=snap(C1,pg=None,status="INTRODUCED")
     with pytest.raises(AggregationManualReview, match="PRODUCT_GROUP_REQUIRED"):
         validate_box_preconditions(parent=None,children=(missing_pg,),participant_inn=INN,mixed_pg=True,leading_pg="lp")
 
