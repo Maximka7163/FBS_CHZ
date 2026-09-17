@@ -116,7 +116,8 @@ jobs:
         run: |
           set -euo pipefail
           ! grep -R -F 'markirovka.crpt.ru' src/wbcz_web
-          ! grep -R -E 'GENERIC_AGGREGATION_WRITE|GENERIC_DOCUMENT_SUBMIT|ARBITRARY_DOCUMENT_SUBMIT|RAW_URL|RAW_PATH|RAW_METHOD|MOVE_CHILD|CANCEL_AGGREGATION' src
+          ! grep -R -E 'GENERIC_AGGREGATION_WRITE|GENERIC_DOCUMENT_SUBMIT|ARBITRARY_DOCUMENT_SUBMIT|RAW_URL|RAW_PATH|RAW_METHOD|CANCEL_AGGREGATION' src
+          ! grep -R -E '(^|[^A-Z_])MOVE_CHILD([^A-Z_]|$)' src
           ! grep -R -E -- '-----BEGIN .*PRIVATE KEY-----' src frontend migrations
           ! grep -R -E 'WBCZ_AGENT_MACHINE_TOKEN=[A-Za-z0-9._~-]{16,}' src frontend migrations
           grep -F 'WBCZ_TRUE_API_WRITE_ENABLED=false' .env.production.example
@@ -125,10 +126,16 @@ jobs:
           grep -F 'AUTODISAGGREGATED' src/wbcz/aggregation.py
           grep -F 'AUTODISAGGREGATION' src/wbcz/aggregation.py
           python - <<'PY'
-          from wbcz.aggregation import M6_DOCUMENT_TYPES, M6_OPERATION_REGISTRY, AggregationOperationKind
+          from wbcz.aggregation import (
+              M6_DOCUMENT_TYPES, M6_OPERATION_REGISTRY, AggregationOperationKind,
+              M5_AGGREGATION_HARDENING, reconcile_m5_aggregation_side_effect,
+          )
           assert M6_DOCUMENT_TYPES == {'AGGREGATION_DOCUMENT','SETS_AGGREGATION','REAGGREGATION_DOCUMENT','DISAGGREGATION_DOCUMENT','ATK_AGGREGATION','ATK_TRANSFORMATION','ATK_DISAGGREGATION'}
           assert M6_OPERATION_REGISTRY[AggregationOperationKind.FORM_SET].document_type == 'SETS_AGGREGATION'
+          assert M6_OPERATION_REGISTRY[AggregationOperationKind.FORM_SET_GENERIC_COMPATIBILITY].document_type == 'AGGREGATION_DOCUMENT'
           assert not M6_OPERATION_REGISTRY[AggregationOperationKind.AUTO_DISAGGREGATION].executable
+          assert M5_AGGREGATION_HARDENING['LK_RECEIPT_CANCEL'].startswith('REREAD_RELATION')
+          assert callable(reconcile_m5_aggregation_side_effect)
           PY
           python -m pytest -q \
             tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent \
