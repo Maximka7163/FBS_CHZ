@@ -4,11 +4,12 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -48,6 +49,13 @@ class WbSecurityError(WbError):
 
 class WbCapabilityDisabled(WbError):
     pass
+
+
+class WbRateLimitExceeded(WbError):
+    def __init__(self, rate_family: str, retry_after_seconds: float) -> None:
+        self.rate_family = rate_family
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
+        super().__init__(f"WB read rate limit blocked locally for {rate_family}; retry_after_seconds={self.retry_after_seconds:.6f}")
 
 
 def _opaque(value: str, field: str) -> str:
@@ -204,7 +212,7 @@ class WbReadCapability:
 WB_READ_CAPABILITIES: Mapping[WbCapabilityName, WbReadCapability] = {
     WbCapabilityName.FBS_NEW: WbReadCapability(WbCapabilityName.FBS_NEW, "MARKETPLACE", MARKETPLACE_PROD_HOST, "GET", "/api/v3/orders/new", WbTokenCategory.MARKETPLACE, True, True, "MARKETPLACE_FBS"),
     WbCapabilityName.FBS_CURRENT: WbReadCapability(WbCapabilityName.FBS_CURRENT, "MARKETPLACE", MARKETPLACE_PROD_HOST, "GET", "/api/v3/orders", WbTokenCategory.MARKETPLACE, True, True, "MARKETPLACE_FBS"),
-    WbCapabilityName.FBS_ARCHIVE: WbReadCapability(WbCapabilityName.FBS_ARCHIVE, "MARKETPLACE", MARKETPLACE_PROD_HOST, "GET", "/api/marketplace/v3/fbs/orders/archive", WbTokenCategory.MARKETPLACE, True, True, "MARKETPLACE_FBS"),
+    WbCapabilityName.FBS_ARCHIVE: WbReadCapability(WbCapabilityName.FBS_ARCHIVE, "MARKETPLACE", MARKETPLACE_PROD_HOST, "GET", "/api/marketplace/v3/fbs/orders/archive", WbTokenCategory.MARKETPLACE, True, False, "MARKETPLACE_FBS"),
     WbCapabilityName.ORDER_STATUS: WbReadCapability(WbCapabilityName.ORDER_STATUS, "MARKETPLACE", MARKETPLACE_PROD_HOST, "POST", "/api/v3/orders/status", WbTokenCategory.MARKETPLACE, True, True, "MARKETPLACE_FBS"),
     WbCapabilityName.ORDER_META: WbReadCapability(WbCapabilityName.ORDER_META, "MARKETPLACE", MARKETPLACE_PROD_HOST, "POST", "/api/marketplace/v3/orders/meta", WbTokenCategory.MARKETPLACE, True, True, "MARKETPLACE_FBS"),
     WbCapabilityName.SUPPLIES: WbReadCapability(WbCapabilityName.SUPPLIES, "MARKETPLACE", MARKETPLACE_PROD_HOST, "GET", "/api/v3/supplies", WbTokenCategory.MARKETPLACE, True, True, "MARKETPLACE_FBS"),
@@ -341,9 +349,17 @@ class WbHttpAdapter(Protocol):
 
 
 class WbReadTransport:
-    def __init__(self, adapter: WbHttpAdapter, environment: WbEnvironment) -> None:
+    def __init__(
+        self,
+        adapter: WbHttpAdapter,
+        environment: WbEnvironment,
+        rate_limiter: "StatefulWbRateLimiter | None" = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._adapter = adapter
         self._environment = environment
+        self._rate_limiter = rate_limiter if rate_limiter is not None else StatefulWbRateLimiter()
+        self._monotonic_clock = monotonic_clock
 
     def _dispatch(self, cap_name: WbCapabilityName, token: WbRuntimeToken, *, path_values: Mapping[str, str] | None = None, params: Mapping[str, object] | None = None, json_body: object | None = None) -> WbHttpResponse:
         cap = WB_READ_CAPABILITIES[cap_name]
@@ -367,10 +383,30 @@ class WbReadTransport:
             path = path.replace("{" + key + "}", safe)
         if "{" in path:
             raise WbContractError("unresolved typed path")
+
+        admission = self._rate_limiter.consume(
+            family=cap.rate_family,
+            token_type=token.token_type,
+            environment=self._environment,
+            token_secret_ref=token.secret_ref,
+            now_monotonic=float(self._monotonic_clock()),
+        )
+        if not admission.allowed:
+            raise WbRateLimitExceeded(cap.rate_family, admission.retry_after_seconds)
+
         headers = {"Authorization": token._auth(), "Accept": "application/json"}
         if json_body is not None:
             headers["Content-Type"] = "application/json"
-        return self._adapter.send(method=cap.method, url=f"https://{host}{path}", headers=headers, params=params or {}, json_body=json_body)
+        response = self._adapter.send(method=cap.method, url=f"https://{host}{path}", headers=headers, params=params or {}, json_body=json_body)
+        self._rate_limiter.charge_response(
+            family=cap.rate_family,
+            token_type=token.token_type,
+            environment=self._environment,
+            token_secret_ref=token.secret_ref,
+            now_monotonic=float(self._monotonic_clock()),
+            status_code=response.status_code,
+        )
+        return response
 
     def fbs_new(self, token: WbRuntimeToken) -> WbHttpResponse:
         return self._dispatch(WbCapabilityName.FBS_NEW, token)
@@ -452,10 +488,16 @@ class WbRateLimiter:
 
 
 SENSITIVE_KEYS = frozenset({"authorization", "token", "apitoken", "clienttoken", "rawtoken", "secret", "sgtin", "cis", "kiz", "marking", "markingcode", "signature", "pin", "privatekey", "fullmarking"})
+SENSITIVE_DISCRIMINATOR_FIELDS = frozenset({"key", "type", "name", "field", "kind"})
+SENSITIVE_ASSOCIATED_FIELDS = frozenset({"value", "values", "data", "code", "codes", "sgtin", "sgtins", "cis", "cises", "kiz", "kizes", "marking", "markingcode", "markings", "items"})
+
+
+def _compact_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
 def _sensitive_key(key: str) -> bool:
-    compact = re.sub(r"[^a-z0-9]", "", key.lower())
+    compact = _compact_key(key)
     return (
         compact in SENSITIVE_KEYS
         or compact.startswith("sgtin")
@@ -467,18 +509,37 @@ def _sensitive_key(key: str) -> bool:
     )
 
 
+def _sensitive_discriminator(mapping: Mapping[str, object]) -> bool:
+    for key, item in mapping.items():
+        if _compact_key(str(key)) in SENSITIVE_DISCRIMINATOR_FIELDS and isinstance(item, str) and _sensitive_key(item):
+            return True
+    return False
+
+
+def sanitize_wb_evidence(value: object, *, sensitive_context: bool = False) -> object:
+    if isinstance(value, Mapping):
+        discriminator_sensitive = sensitive_context or _sensitive_discriminator(value)
+        out: dict[str, object] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            compact = _compact_key(key)
+            if _sensitive_key(key):
+                out[key] = "REDACTED"
+            elif discriminator_sensitive and compact in SENSITIVE_ASSOCIATED_FIELDS:
+                out[key] = "REDACTED"
+            else:
+                out[key] = sanitize_wb_evidence(item, sensitive_context=discriminator_sensitive)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [sanitize_wb_evidence(item, sensitive_context=sensitive_context) for item in value]
+    return value
+
+
 def redact_mapping(value: Mapping[str, object]) -> dict[str, object]:
-    out: dict[str, object] = {}
-    for key, item in value.items():
-        if _sensitive_key(key):
-            out[key] = "REDACTED"
-        elif isinstance(item, Mapping):
-            out[key] = redact_mapping(item)
-        elif isinstance(item, list):
-            out[key] = [redact_mapping(v) if isinstance(v, Mapping) else v for v in item]
-        else:
-            out[key] = item
-    return out
+    safe = sanitize_wb_evidence(value)
+    if not isinstance(safe, dict):
+        raise WbContractError("mapping sanitizer returned non-mapping")
+    return safe
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,14 +566,16 @@ def parse_wb_error(response: WbHttpResponse, *, secret_canaries: Sequence[str] =
     ctype = response.content_type.split(";", 1)[0].lower().strip()
     known = ctype in {"application/json", "application/problem+json"}
     try:
-        payload = json.loads(text) if known else {"raw": text[:8192]}
+        payload = json.loads(text)
     except json.JSONDecodeError:
-        payload, known = {"raw": text[:8192]}, False
-    safe = redact_mapping(payload) if isinstance(payload, Mapping) else {"raw": str(payload)[:8192]}
+        payload = {"raw": text[:8192]}
+        known = False
+    safe = sanitize_wb_evidence(payload)
+    safe_mapping = safe if isinstance(safe, Mapping) else {}
     def pick(*keys: str) -> str | None:
         for key in keys:
-            if safe.get(key) is not None:
-                return str(safe[key])
+            if safe_mapping.get(key) is not None:
+                return str(safe_mapping[key])
         return None
     return WbErrorEvidence(response.status_code, response.content_type, pick("code"), pick("message"), pick("title"), pick("detail"), pick("requestId", "request_id"), pick("origin"), pick("statusText", "status"), pick("timestamp"), safe, known)
 
@@ -649,14 +712,13 @@ class PaidAmountEvidence:
 
 @dataclass(frozen=True, slots=True)
 class MetaDetailsEvidence:
-    raw_sanitized: Mapping[str, object]
+    raw_sanitized: object
     legacy_meta_present: bool
 
 
 def parse_meta_details(payload: Mapping[str, object]) -> MetaDetailsEvidence:
     details = payload.get("metaDetails")
-    safe = redact_mapping(details) if isinstance(details, Mapping) else {"value": details}
-    return MetaDetailsEvidence(safe, "meta" in payload)
+    return MetaDetailsEvidence(sanitize_wb_evidence(details), "meta" in payload)
 
 
 def mask_marking(value: str) -> str:
@@ -978,16 +1040,23 @@ class StatefulWbRateLimiter:
         status_code: int,
     ) -> RateLimitDecision:
         total_weight = WbRateLimiter.response_weight(family, status_code, environment)
-        if total_weight <= 1:
+        extra_weight = total_weight - 1
+        if extra_weight <= 0:
             return RateLimitDecision(True, 0.0)
-        return self.consume(
-            family=family,
-            token_type=token_type,
-            environment=environment,
-            token_secret_ref=token_secret_ref,
-            now_monotonic=now_monotonic,
-            weight=total_weight - 1,
-        )
+        rule = WbRateLimiter().rule(family, token_type, environment)
+        key = self._bucket_key(family, token_type, environment, token_secret_ref)
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = _TokenBucket(float(rule.burst), float(now_monotonic))
+            self._buckets[key] = bucket
+        elapsed = max(0.0, float(now_monotonic) - bucket.updated_at)
+        refill_per_second = rule.limit / rule.period_seconds
+        bucket.tokens = min(float(rule.burst), bucket.tokens + elapsed * refill_per_second)
+        bucket.updated_at = float(now_monotonic)
+        bucket.tokens -= extra_weight
+        if bucket.tokens >= 0:
+            return RateLimitDecision(True, 0.0)
+        return RateLimitDecision(False, (-bucket.tokens) / refill_per_second)
 
 
 @dataclass(frozen=True, slots=True)
