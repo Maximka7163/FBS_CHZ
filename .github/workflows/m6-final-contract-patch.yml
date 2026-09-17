@@ -1,0 +1,106 @@
+name: M6 final contract safeguards
+on:
+  push:
+    branches: [m6/aggregation-001]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m6/aggregation-001
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply remaining accepted M6 safeguards
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def rep(path, old, new):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              n=s.count(old)
+              if n != 1:
+                  raise SystemExit(f'{path}: expected one match, got {n}: {old[:100]!r}')
+              p.write_text(s.replace(old,new,1),encoding='utf-8')
+
+          p='src/wbcz/aggregation.py'
+
+          # A child cannot be assigned to two parents inside one formation document.
+          rep(p,
+          '''        wires = [x.to_wire() for x in self.aggregation_units]\n        lengths = {len(x["unitSerialNumber"]) for x in wires}\n        types = {x["unitSerialNumberType"] for x in wires}\n        if len(lengths) != 1 or len(types) != 1:\n            raise AggregationContractError("parents in one document must share code length and package type")\n        return {"participantId": _inn(self.participant_id, "participantId"), "aggregationUnits": wires}\n''',
+          '''        wires = [x.to_wire() for x in self.aggregation_units]\n        lengths = {len(x["unitSerialNumber"]) for x in wires}\n        types = {x["unitSerialNumberType"] for x in wires}\n        if len(lengths) != 1 or len(types) != 1:\n            raise AggregationContractError("parents in one document must share code length and package type")\n        all_children = [child for unit in wires for child in unit["sntins"]]\n        if len(set(all_children)) != len(all_children):\n            raise AggregationContractError("a direct child may occur only once in an aggregation document")\n        return {"participantId": _inn(self.participant_id, "participantId"), "aggregationUnits": wires}\n''')
+
+          # Dedicated KIN formation enforces the safe owner/current-parent policy directly.
+          rep(p,
+          '''def validate_set_preconditions(*, parent: CisAggregationSnapshot, children: Sequence[CisAggregationSnapshot], composition: SetCompositionRequirement) -> None:\n    if parent.package_type is not PackageType.SET:\n        raise AggregationContractError("FORM_SET requires SET parent")\n    if not composition.published:\n        raise AggregationManualReview("SET_PRODUCT_CARD_NOT_PUBLISHED")\n    if not children:\n        raise AggregationContractError("set children required")\n    for child in children:\n        if child.package_type not in {PackageType.UNIT, PackageType.BUNDLE}:\n            raise AggregationContractError("KIN accepts only UNIT/BUNDLE")\n''',
+          '''def validate_set_preconditions(*, parent: CisAggregationSnapshot, children: Sequence[CisAggregationSnapshot], composition: SetCompositionRequirement, participant_inn: str) -> None:\n    owner = _inn(participant_inn, "participant_inn")\n    if parent.package_type is not PackageType.SET:\n        raise AggregationContractError("FORM_SET requires SET parent")\n    if parent.product_group != M6_PG:\n        raise AggregationManualReview("KIN_PARENT_PRODUCT_GROUP_MUST_BE_LP")\n    if parent.owner_inn != owner:\n        raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")\n    if parent.status_ex_raw not in (None, ""):\n        raise AggregationManualReview("KIN_PARENT_SPECIAL_STATE_NOT_ALLOWED")\n    if not composition.published:\n        raise AggregationManualReview("SET_PRODUCT_CARD_NOT_PUBLISHED")\n    if not children:\n        raise AggregationContractError("set children required")\n    for child in children:\n        if child.package_type not in {PackageType.UNIT, PackageType.BUNDLE}:\n            raise AggregationContractError("KIN accepts only UNIT/BUNDLE")\n        if child.product_group != M6_PG:\n            raise AggregationManualReview("KIN_CHILD_PRODUCT_GROUP_MUST_BE_LP")\n        if child.owner_inn != owner:\n            raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")\n        if child.parent not in (None, ""):\n            raise AggregationManualReview("KIN_CHILD_ALREADY_AGGREGATED")\n''')
+
+          # KITU global uniqueness evidence and mixed-PG child PG must be explicit.
+          rep(p,
+          '''    owner = _inn(participant_inn, "participant_inn")\n    if not children:\n        raise AggregationContractError("KITU children required")\n''',
+          '''    owner = _inn(participant_inn, "participant_inn")\n    if parent is not None:\n        raise AggregationManualReview("KITU_PARENT_IDENTIFIER_ALREADY_PRESENT_IN_CRPT")\n    if not children:\n        raise AggregationContractError("KITU children required")\n''')
+          rep(p,
+          '''        if child.package_type is None:\n            raise AggregationManualReview("UNKNOWN_RAW_PACKAGE_TYPE")\n        validate_lp_relation(PackageType.BOX, child.package_type, child_pg=child.product_group or M6_PG, mixed_pg=mixed_pg)\n''',
+          '''        if child.package_type is None:\n            raise AggregationManualReview("UNKNOWN_RAW_PACKAGE_TYPE")\n        if mixed_pg and not child.product_group:\n            raise AggregationManualReview("KITU_CHILD_PRODUCT_GROUP_REQUIRED")\n        validate_lp_relation(PackageType.BOX, child.package_type, child_pg=child.product_group or M6_PG, mixed_pg=mixed_pg)\n''')
+
+          # ATK requires known single PG and transformation compatibility with the parent.
+          rep(p,
+          '''    pgs = {x.product_group for x in children}\n    if len(pgs) != 1:\n        raise AggregationManualReview("ATK_SINGLE_PRODUCT_GROUP_REQUIRED")\n''',
+          '''    pgs = {x.product_group for x in children}\n    if len(pgs) != 1 or None in pgs or "" in pgs:\n        raise AggregationManualReview("ATK_SINGLE_PRODUCT_GROUP_REQUIRED")\n''')
+          rep(p,
+          '''    if parent.package_type is not PackageType.ATK or parent.owner_inn != owner or parent.status_raw != "APPLIED":\n        raise AggregationManualReview("ATK_PARENT_PRECONDITION_FAILED")\n    if parent.status_ex_raw not in (None, "", "FTS_RESPOND_NOT_OK"):\n        raise AggregationManualReview("ATK_PARENT_STATUS_EX_NOT_ALLOWED")\n''',
+          '''    if parent.package_type is not PackageType.ATK or parent.owner_inn != owner or parent.status_raw != "APPLIED":\n        raise AggregationManualReview("ATK_PARENT_PRECONDITION_FAILED")\n    if parent.emission_type != "FOREIGN" or not parent.product_group or not parent.tnved or len(parent.tnved) < 4:\n        raise AggregationManualReview("ATK_PARENT_FOREIGN_PG_TNVED_REQUIRED")\n    if parent.status_ex_raw not in (None, "", "FTS_RESPOND_NOT_OK"):\n        raise AggregationManualReview("ATK_PARENT_STATUS_EX_NOT_ALLOWED")\n''')
+          rep(p,
+          '''    if len(pgs) != 1 or len(prefixes) != 1:\n        raise AggregationManualReview("ATK_SINGLE_PG_TNVED_REQUIRED")\n''',
+          '''    if len(pgs) != 1 or None in pgs or "" in pgs or len(prefixes) != 1:\n        raise AggregationManualReview("ATK_SINGLE_PG_TNVED_REQUIRED")\n    if next(iter(pgs)) != parent.product_group or next(iter(prefixes)) != parent.tnved[:4]:\n        raise AggregationManualReview("ATK_CHILDREN_MUST_MATCH_PARENT_PG_TNVED")\n''')
+          rep(p,
+          '''        if parent.status_ex_raw not in (None, "", "FTS_RESPOND_NOT_OK", "FTS_CONTROL"):\n            raise AggregationManualReview("ATK_DISAGGREGATION_STATUS_EX_NOT_ALLOWED")\n        pgs.add(parent.product_group)\n    if len(pgs) != 1:\n        raise AggregationManualReview("ATK_DISAGGREGATION_SINGLE_PG_REQUIRED")\n''',
+          '''        if parent.status_ex_raw not in (None, "", "FTS_RESPOND_NOT_OK", "FTS_CONTROL"):\n            raise AggregationManualReview("ATK_DISAGGREGATION_STATUS_EX_NOT_ALLOWED")\n        if not parent.product_group:\n            raise AggregationManualReview("ATK_DISAGGREGATION_PRODUCT_GROUP_REQUIRED")\n        pgs.add(parent.product_group)\n    if len(pgs) != 1:\n        raise AggregationManualReview("ATK_DISAGGREGATION_SINGLE_PG_REQUIRED")\n''')
+
+          # Removing the last child is an expected automatic-disaggregation path, not ordinary REMOVE success.
+          rep(p,
+          '''        elif operation is AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE:\n            remaining_ok = child_parents is not None and all(child_parents.get(c) == expected_parent for c in expected)\n            removed_ok = child_parents is not None and all(child_parents.get(c) != expected_parent for c in removed)\n            if actual == expected and not (removed & actual) and remaining_ok and removed_ok:\n                return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "REMOVE_RELATION_CONFIRMED", expected_parent)\n''',
+          '''        elif operation is AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE:\n            remaining_ok = child_parents is not None and all(child_parents.get(c) == expected_parent for c in expected)\n            removed_ok = child_parents is not None and all(child_parents.get(c) != expected_parent for c in removed)\n            if not expected:\n                history_ok = any(x.semantic is AggregationHistorySemantic.AUTO_DISAGGREGATION for x in history_events)\n                if not actual and removed_ok and history_ok and parent_status_raw_observed is not None:\n                    return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "REMOVE_ALL_AUTO_DISAGGREGATION_CONFIRMED", expected_parent)\n            elif actual == expected and not (removed & actual) and remaining_ok and removed_ok:\n                return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "REMOVE_RELATION_CONFIRMED", expected_parent)\n''')
+
+          # Explicit reusable auto-disaggregation reconciliation for M6 event-only capability.
+          insertion='''    def reconcile_atk_formation(self, *, document_status_raw: str | None, submitted_children: Sequence[str], child_parents: Mapping[str, str | None], parent_package_types: Mapping[str, str | None], parent_children: Mapping[str, Sequence[str]]) -> AggregationReconciliationResult:\n'''
+          auto='''    def reconcile_auto_disaggregation(self, *, parent: str, former_children: Sequence[str], actual_children: Sequence[str], child_parents: Mapping[str, str | None], history_events: Sequence[AggregationHistoryEvent]) -> AggregationReconciliationResult:\n        history_ok = any(x.semantic is AggregationHistorySemantic.AUTO_DISAGGREGATION for x in history_events)\n        relations_clear = not actual_children and all(child_parents.get(c) != parent for c in former_children)\n        if relations_clear and history_ok:\n            return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "AUTO_DISAGGREGATION_GRAPH_AND_HISTORY_CONFIRMED", parent)\n        if not history_events:\n            return AggregationReconciliationResult(AggregationReconciliationState.RECONCILIATION_PENDING, "AUTO_DISAGGREGATION_HISTORY_PENDING", parent)\n        return AggregationReconciliationResult(AggregationReconciliationState.MANUAL_REVIEW, "AUTO_DISAGGREGATION_MISMATCH", parent)\n\n'''
+          rep(p,insertion,auto+insertion)
+
+          # Update existing focused tests for now-required participant in KIN validation.
+          p='tests/test_m6_aggregation.py'
+          path=Path(p); s=path.read_text(encoding='utf-8')
+          s=s.replace('composition=SetCompositionRequirement(gtin_quantities={"04601234567890": 2}))', 'composition=SetCompositionRequirement(gtin_quantities={"04601234567890": 2}), participant_inn=INN)')
+          s=s.replace('composition=SetCompositionRequirement(marked_products_quantity_in_set=2))', 'composition=SetCompositionRequirement(marked_products_quantity_in_set=2), participant_inn=INN)')
+          s=s.replace('composition=SetCompositionRequirement(marked_products_quantity_in_set=1))', 'composition=SetCompositionRequirement(marked_products_quantity_in_set=1), participant_inn=INN)')
+          # One quantity-mismatch call also uses =2 and was covered by replacement above.
+          s += '''\n\ndef test_aggregation_document_rejects_same_child_under_two_parents() -> None:\n    parent2 = "010123456789012321PARENT2"\n    doc=AggregationDocument(INN,(AggregationUnit(PARENT,UnitSerialNumberType.BOX,(C1,)),AggregationUnit(parent2,UnitSerialNumberType.BOX,(C1,))))\n    with pytest.raises(AggregationContractError, match="only once"):\n        doc.to_wire()\n\n\ndef test_set_owner_parent_relation_and_product_group_fail_closed() -> None:\n    composition=SetCompositionRequirement(marked_products_quantity_in_set=1)\n    parent=snap(PARENT,PackageType.SET,status="APPLIED",emission="LOCAL")\n    with pytest.raises(AggregationManualReview, match="NON_OWNER"):\n        validate_set_preconditions(parent=parent,children=(snap(C1,owner="9999999999"),),composition=composition,participant_inn=INN)\n    with pytest.raises(AggregationManualReview, match="ALREADY_AGGREGATED"):\n        validate_set_preconditions(parent=parent,children=(snap(C1,parent=C2),),composition=composition,participant_inn=INN)\n    with pytest.raises(AggregationManualReview, match="PRODUCT_GROUP"):\n        validate_set_preconditions(parent=parent,children=(snap(C1,pg="milk"),),composition=composition,participant_inn=INN)\n\n\ndef test_kitu_parent_uniqueness_and_mixed_pg_requires_actual_pg() -> None:\n    with pytest.raises(AggregationManualReview, match="ALREADY_PRESENT"):\n        validate_box_preconditions(parent=snap(PARENT,PackageType.BOX),children=(snap(C1),),participant_inn=INN)\n    missing_pg=snap(C1,pg=None)\n    with pytest.raises(AggregationManualReview, match="PRODUCT_GROUP_REQUIRED"):\n        validate_box_preconditions(parent=None,children=(missing_pg,),participant_inn=INN,mixed_pg=True,leading_pg="lp")\n\n\ndef test_atk_transformation_matches_parent_pg_tnved_and_foreign() -> None:\n    parent=snap(PARENT,PackageType.ATK,status="APPLIED",emission="FOREIGN",tnved="6204430000")\n    child=snap(C1,PackageType.UNIT,status="APPLIED",emission="FOREIGN",parent=PARENT,tnved="6204990000")\n    validate_atk_transformation_preconditions(role="IMPORTER",participant_inn=INN,parent=parent,children=(child,),transformation_type="REMOVING")\n    with pytest.raises(AggregationManualReview, match="MATCH_PARENT"):\n        validate_atk_transformation_preconditions(role="IMPORTER",participant_inn=INN,parent=parent,children=(snap(C1,PackageType.UNIT,status="APPLIED",emission="FOREIGN",parent=PARENT,pg="milk",tnved="0401000000"),),transformation_type="REMOVING")\n    with pytest.raises(AggregationManualReview, match="FOREIGN_PG_TNVED"):\n        validate_atk_transformation_preconditions(role="IMPORTER",participant_inn=INN,parent=snap(PARENT,PackageType.ATK,status="APPLIED",emission="LOCAL"),children=(child,),transformation_type="REMOVING")\n\n\ndef test_remove_all_requires_auto_disaggregation_history_and_parent_state_readback() -> None:\n    svc=AggregationReconciliationService()\n    no_history=svc.reconcile_relation(operation=AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE,document_status_raw="CHECKED_OK",expected_parent=PARENT,expected_children=(),actual_children=(),removed_children=(C1,),child_parents={C1:None},parent_status_raw_observed="RUNTIME_STATE")\n    assert no_history.state is AggregationReconciliationState.MANUAL_REVIEW\n    event=normalize_aggregation_history_event({"operationType":"AUTODISAGGREGATED","operationDate":"2021-08-10T10:11:01Z"})\n    no_state=svc.reconcile_relation(operation=AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE,document_status_raw="CHECKED_OK",expected_parent=PARENT,expected_children=(),actual_children=(),removed_children=(C1,),child_parents={C1:None},history_events=(event,))\n    assert no_state.state is AggregationReconciliationState.MANUAL_REVIEW\n    ok=svc.reconcile_relation(operation=AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE,document_status_raw="CHECKED_OK",expected_parent=PARENT,expected_children=(),actual_children=(),removed_children=(C1,),child_parents={C1:None},history_events=(event,),parent_status_raw_observed="RUNTIME_STATE")\n    assert ok.state is AggregationReconciliationState.RECONCILED\n\n\ndef test_auto_disaggregation_event_reconciliation_never_synthesizes_success() -> None:\n    svc=AggregationReconciliationService()\n    pending=svc.reconcile_auto_disaggregation(parent=PARENT,former_children=(C1,),actual_children=(),child_parents={C1:None},history_events=())\n    assert pending.state is AggregationReconciliationState.RECONCILIATION_PENDING\n    event=normalize_aggregation_history_event({"operationType":"AUTODISAGGREGATION","operationDate":"2021-08-10 10:11:01"})\n    ok=svc.reconcile_auto_disaggregation(parent=PARENT,former_children=(C1,),actual_children=(),child_parents={C1:None},history_events=(event,))\n    assert ok.state is AggregationReconciliationState.RECONCILED\n'''
+          path.write_text(s,encoding='utf-8')
+
+          p='docs/M6_AGGREGATION_CONTRACT.md'
+          path=Path(p); s=path.read_text(encoding='utf-8')
+          s += '''\n## Final fail-closed safeguards\n\nFormation rejects a child repeated under multiple parents in one document. Dedicated lp KIN validation enforces participant ownership, lp product group, an un-nested child relation and a plain APPLIED parent before mutation. KITU formation treats a discovered pre-existing parent identifier as a uniqueness conflict and mixed-PG validation requires the actual child product group rather than defaulting unknown data. ATK transformation validates the parent as FOREIGN/APPLIED and requires child product group and TN VED prefix compatibility with that parent. Removing the last child is reconciled as automatic disaggregation and requires the current graph, an auto-disaggregation history event and parent state readback. AUTO_DISAGGREGATION remains event/reconciliation-only and never submits a second mutation.\n'''
+          path.write_text(s,encoding='utf-8')
+
+          for f in ('src/wbcz/aggregation.py','tests/test_m6_aggregation.py'):
+              compile(Path(f).read_text(encoding='utf-8'),f,'exec')
+          PY
+          git diff --check
+          python -m pip install -e '.[ui,test,web]'
+          python -m pytest -q tests/test_m6_aggregation.py tests/test_m5_turnover.py
+      - name: Commit final safeguards
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/wbcz/aggregation.py tests/test_m6_aggregation.py docs/M6_AGGREGATION_CONTRACT.md
+          git diff --cached --check
+          git commit -m 'fix: complete M6 fail-closed aggregation safeguards'
+          git push origin HEAD:m6/aggregation-001
