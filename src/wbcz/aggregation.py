@@ -104,9 +104,25 @@ def _inn(value: Any, label: str) -> str:
 
 
 def _code(value: Any, label: str) -> str:
+    # Generic CIS/KI validation intentionally remains separate from aggregate-id rules.
     text = _text(value, label, max_len=74)
     if not 18 <= len(text) <= 74 or any(ch.isspace() for ch in text):
         raise AggregationContractError(f"{label} must be 18..74 non-whitespace chars")
+    return text
+
+
+AGGREGATE_IDENTIFIER_ALLOWED_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789%&'\"()*+,_./:;<?!"
+)
+
+
+def validate_aggregate_identifier(value: Any, label: str = "aggregate_identifier") -> str:
+    """Validate official 18..74-char KIGU/KITU/KIN aggregate identifiers."""
+    text = _text(value, label, max_len=74)
+    if not 18 <= len(text) <= 74:
+        raise AggregationContractError(f"{label} must be 18..74 chars")
+    if any(ch not in AGGREGATE_IDENTIFIER_ALLOWED_CHARS for ch in text):
+        raise AggregationContractError(f"{label} contains a character outside the official aggregate identifier set")
     return text
 
 
@@ -179,7 +195,7 @@ class AggregationUnit:
     part_number: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        parent = _code(self.unit_serial_number, "unitSerialNumber")
+        parent = validate_aggregate_identifier(self.unit_serial_number, "unitSerialNumber")
         if not self.sntins:
             raise AggregationContractError("sntins must be non-empty")
         children = tuple(_code(v, "sntins[]") for v in self.sntins)
@@ -227,7 +243,7 @@ class SetAggregationUnit:
         children = tuple(_code(v, "sntins[]") for v in self.sntins)
         if len(set(children)) != len(children):
             raise AggregationContractError("sntins must be unique")
-        return {"unitSerialNumber": _code(self.unit_serial_number, "unitSerialNumber"), "sntins": list(children)}
+        return {"unitSerialNumber": validate_aggregate_identifier(self.unit_serial_number, "unitSerialNumber"), "sntins": list(children)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +266,7 @@ class ReaggregationItem:
     def to_wire(self) -> dict[str, Any]:
         if (self.uit_uitu is None) == (self.kitu is None):
             raise AggregationContractError("reaggregation item requires exactly one of uit_uitu or kitu")
-        return {"uit_uitu": _code(self.uit_uitu, "uit_uitu")} if self.uit_uitu is not None else {"kitu": _code(self.kitu, "kitu")}
+        return {"uit_uitu": _code(self.uit_uitu, "uit_uitu")} if self.uit_uitu is not None else {"kitu": validate_aggregate_identifier(self.kitu, "kitu")}
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +287,7 @@ class ReaggregationDocument:
         keys = [next(iter(x.values())) for x in items]
         if len(set(keys)) != len(keys):
             raise AggregationContractError("uit_uitu_list must be unique")
-        return {"participant_inn": _inn(self.participant_inn, "participant_inn"), "reaggregation_type": kind, "uitu": _code(self.uitu, "uitu"), "uit_uitu_list": items}
+        return {"participant_inn": _inn(self.participant_inn, "participant_inn"), "reaggregation_type": kind, "uitu": validate_aggregate_identifier(self.uitu, "uitu"), "uit_uitu_list": items}
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,7 +299,7 @@ class DisaggregationDocument:
     def to_wire(self) -> dict[str, Any]:
         if not self.products_list:
             raise AggregationContractError("products_list must be non-empty")
-        codes = tuple(_code(x, "products_list[].uitu") for x in self.products_list)
+        codes = tuple(validate_aggregate_identifier(x, "products_list[].uitu") for x in self.products_list)
         if len(set(codes)) != len(codes):
             raise AggregationContractError("products_list[].uitu must be unique")
         return {"participant_inn": _inn(self.participant_inn, "participant_inn"), "products_list": [{"uitu": x} for x in codes]}
@@ -400,20 +416,37 @@ def validate_set_preconditions(*, parent: CisAggregationSnapshot, children: Sequ
         raise AggregationManualReview("KIN_COMPOSITION_REFERENCE_REQUIRED")
 
 
-def validate_box_preconditions(*, parent: CisAggregationSnapshot | None, children: Sequence[CisAggregationSnapshot], participant_inn: str, leading_pg: str = M6_PG, mixed_pg: bool = False) -> None:
+def validate_box_preconditions(
+    *,
+    parent: CisAggregationSnapshot | None,
+    children: Sequence[CisAggregationSnapshot],
+    participant_inn: str,
+    leading_pg: str = M6_PG,
+    mixed_pg: bool = False,
+    runtime_formed_status_values: frozenset[str] = frozenset(),
+) -> None:
     owner = _inn(participant_inn, "participant_inn")
     if parent is not None:
         raise AggregationManualReview("KITU_PARENT_IDENTIFIER_ALREADY_PRESENT_IN_CRPT")
     if not children:
         raise AggregationContractError("KITU children required")
-    statuses = {x.status_raw for x in children}
-    if len(statuses) != 1:
-        raise AggregationManualReview("KITU_CHILD_STATUSES_MUST_MATCH")
-    status = next(iter(statuses))
-    if status not in {"APPLIED", "INTRODUCED"}:
-        raise AggregationManualReview("KITU_CHILD_STATUS_NOT_SUPPORTED")
-    if any(x.status_ex_raw not in (None, "", "WAIT_TRANSFER_TO_OWNER") for x in children):
-        raise AggregationManualReview("KITU_CHILD_STATUS_EX_NOT_SUPPORTED")
+
+    if mixed_pg:
+        for child in children:
+            if child.status_raw != "INTRODUCED" and child.status_raw not in runtime_formed_status_values:
+                raise AggregationManualReview("MULTIPRODUCT_KITU_CHILD_STATUS_NOT_CONFIRMED")
+            if child.status_ex_raw not in (None, "", "WAIT_TRANSFER_TO_OWNER"):
+                raise AggregationManualReview("MULTIPRODUCT_KITU_CHILD_STATUS_EX_NOT_SUPPORTED")
+    else:
+        statuses = {x.status_raw for x in children}
+        if len(statuses) != 1:
+            raise AggregationManualReview("KITU_CHILD_STATUSES_MUST_MATCH")
+        status = next(iter(statuses))
+        if status not in {"APPLIED", "INTRODUCED"}:
+            raise AggregationManualReview("KITU_CHILD_STATUS_NOT_SUPPORTED")
+        if any(x.status_ex_raw not in (None, "", "WAIT_TRANSFER_TO_OWNER") for x in children):
+            raise AggregationManualReview("KITU_CHILD_STATUS_EX_NOT_SUPPORTED")
+
     for child in children:
         if child.owner_inn != owner:
             raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")
@@ -424,7 +457,8 @@ def validate_box_preconditions(*, parent: CisAggregationSnapshot | None, childre
         if mixed_pg and not child.product_group:
             raise AggregationManualReview("KITU_CHILD_PRODUCT_GROUP_REQUIRED")
         validate_lp_relation(PackageType.BOX, child.package_type, child_pg=child.product_group or M6_PG, mixed_pg=mixed_pg)
-    if status == "APPLIED" and len({x.emission_type for x in children}) != 1:
+
+    if not mixed_pg and status == "APPLIED" and len({x.emission_type for x in children}) != 1:
         raise AggregationManualReview("KITU_APPLIED_EMISSION_MISMATCH")
     if mixed_pg and not any(x.product_group == leading_pg for x in children):
         raise AggregationManualReview("KITU_LEADING_PG_CHILD_REQUIRED")
@@ -440,20 +474,31 @@ def validate_reaggregation_preconditions(
     remaining_children: Sequence[CisAggregationSnapshot] = (),
     leading_pg: str = M6_PG,
     mixed_pg: bool = False,
+    runtime_formed_status_values: frozenset[str] = frozenset(),
 ) -> None:
     owner = _inn(participant_inn, "participant_inn")
     if parent.package_type not in {PackageType.BOX, PackageType.SET}:
         raise AggregationManualReview("REAGGREGATION_PARENT_NOT_SUPPORTED_FOR_LP")
     if parent.owner_inn != owner:
         raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")
-    if parent.status_raw not in {"APPLIED", "INTRODUCED"}:
-        raise AggregationManualReview("REAGGREGATION_PARENT_STATUS_NOT_SUPPORTED")
-    if parent.status_ex_raw not in (None, ""):
-        raise AggregationManualReview("REAGGREGATION_PARENT_STATUS_EX_NOT_SUPPORTED")
     if reaggregation_type not in {"ADDING", "REMOVING"}:
         raise AggregationContractError("reaggregation_type must be ADDING or REMOVING")
     if not children:
         raise AggregationContractError("reaggregation children required")
+
+    if mixed_pg:
+        if parent.package_type is not PackageType.BOX:
+            raise AggregationManualReview("MULTIPRODUCT_REAGGREGATION_REQUIRES_BOX_PARENT")
+        if parent.status_raw not in runtime_formed_status_values:
+            raise AggregationManualReview("MULTIPRODUCT_KITU_PARENT_STATUS_RUNTIME_CONFIRMATION_REQUIRED")
+        if parent.status_ex_raw not in (None, ""):
+            raise AggregationManualReview("MULTIPRODUCT_KITU_PARENT_STATUS_EX_NOT_SUPPORTED")
+    else:
+        if parent.status_raw not in {"APPLIED", "INTRODUCED"}:
+            raise AggregationManualReview("REAGGREGATION_PARENT_STATUS_NOT_SUPPORTED")
+        if parent.status_ex_raw not in (None, ""):
+            raise AggregationManualReview("REAGGREGATION_PARENT_STATUS_EX_NOT_SUPPORTED")
+
     seen: set[str] = set()
     for child in children:
         if child.cis in seen:
@@ -461,17 +506,26 @@ def validate_reaggregation_preconditions(
         seen.add(child.cis)
         if child.owner_inn != owner:
             raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")
-        if child.status_raw != parent.status_raw:
-            raise AggregationManualReview("REAGGREGATION_STATUS_MISMATCH")
-        allowed_status_ex = {None, ""}
+        if mixed_pg:
+            if child.status_raw != "INTRODUCED" and child.status_raw not in runtime_formed_status_values:
+                raise AggregationManualReview("MULTIPRODUCT_KITU_CHILD_STATUS_NOT_CONFIRMED")
+            if child.status_ex_raw not in (None, "", "WAIT_TRANSFER_TO_OWNER"):
+                raise AggregationManualReview("MULTIPRODUCT_KITU_CHILD_STATUS_EX_NOT_SUPPORTED")
+            if not child.product_group:
+                raise AggregationManualReview("KITU_CHILD_PRODUCT_GROUP_REQUIRED")
+        else:
+            if child.status_raw != parent.status_raw:
+                raise AggregationManualReview("REAGGREGATION_STATUS_MISMATCH")
+            allowed_status_ex = {None, ""}
+            if child.cis in nested_box_codes:
+                allowed_status_ex.add("WAIT_TRANSFER_TO_OWNER")
+            if child.status_ex_raw not in allowed_status_ex:
+                raise AggregationManualReview("REAGGREGATION_STATUS_EX_NOT_SUPPORTED")
+            if parent.status_raw == "APPLIED" and child.emission_type in {"REMARK", "REAPPLY"}:
+                raise AggregationManualReview("REAGGREGATION_APPLIED_REMARK_REAPPLY_FORBIDDEN")
         if child.cis in nested_box_codes:
-            allowed_status_ex.add("WAIT_TRANSFER_TO_OWNER")
             if child.package_type is not PackageType.BOX or parent.package_type is not PackageType.BOX:
                 raise AggregationContractError("kitu item is only valid for BOX inside BOX")
-        if child.status_ex_raw not in allowed_status_ex:
-            raise AggregationManualReview("REAGGREGATION_STATUS_EX_NOT_SUPPORTED")
-        if parent.status_raw == "APPLIED" and child.emission_type in {"REMARK", "REAPPLY"}:
-            raise AggregationManualReview("REAGGREGATION_APPLIED_REMARK_REAPPLY_FORBIDDEN")
         if child.package_type is None:
             raise AggregationManualReview("UNKNOWN_RAW_PACKAGE_TYPE")
         validate_lp_relation(parent.package_type, child.package_type, child_pg=child.product_group or M6_PG, mixed_pg=mixed_pg)
@@ -479,9 +533,19 @@ def validate_reaggregation_preconditions(
             raise AggregationManualReview("ADDING_CHILD_ALREADY_AGGREGATED")
         if reaggregation_type == "REMOVING" and child.parent != parent.cis:
             raise AggregationManualReview("REMOVING_CHILD_NOT_IN_PARENT")
+
     if parent.package_type is PackageType.SET and any(x.package_type not in {PackageType.UNIT, PackageType.BUNDLE} for x in children):
         raise AggregationContractError("SET transformation permits only UNIT/BUNDLE")
     if parent.package_type is PackageType.BOX and mixed_pg and remaining_children:
+        for child in remaining_children:
+            if child.owner_inn != owner:
+                raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")
+            if child.status_raw != "INTRODUCED" and child.status_raw not in runtime_formed_status_values:
+                raise AggregationManualReview("MULTIPRODUCT_KITU_REMAINING_CHILD_STATUS_NOT_CONFIRMED")
+            if child.status_ex_raw not in (None, "", "WAIT_TRANSFER_TO_OWNER"):
+                raise AggregationManualReview("MULTIPRODUCT_KITU_REMAINING_STATUS_EX_NOT_SUPPORTED")
+            if not child.product_group:
+                raise AggregationManualReview("KITU_CHILD_PRODUCT_GROUP_REQUIRED")
         if not any(x.product_group == leading_pg for x in remaining_children):
             raise AggregationManualReview("KITU_LEADING_PG_CHILD_REQUIRED_AFTER_REMOVAL")
 

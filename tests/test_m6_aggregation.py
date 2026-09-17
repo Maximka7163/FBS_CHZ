@@ -11,7 +11,7 @@ from wbcz.aggregation import (
     ReaggregationDocument, ReaggregationItem, SetAggregationUnit, SetCompositionRequirement,
     SetsAggregationDocument, UnitSerialNumberType, build_aggregate_tree, normalize_aggregation_history_event,
     prepare_aggregation_document, validate_atk_preconditions, validate_box_preconditions,
-    validate_lp_relation, validate_set_preconditions,
+    validate_aggregate_identifier, validate_lp_relation, validate_set_preconditions,
 )
 
 
@@ -90,10 +90,13 @@ def test_set_rejects_invalid_children_remark_reapply_and_composition_mismatch() 
 
 def test_box_preconditions_nested_box_mixed_pg_leading_rule_owner_status_ex() -> None:
     validate_box_preconditions(parent=None, children=(snap(C1), snap(C2, PackageType.BOX)), participant_inn=INN)
-    mixed = (snap(C1, pg="lp"), snap(C2, PackageType.GROUP, pg="milk"))
+    mixed = (
+        snap(C1, pg="lp", status="INTRODUCED", status_ex=None),
+        snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED", status_ex="WAIT_TRANSFER_TO_OWNER"),
+    )
     validate_box_preconditions(parent=None, children=mixed, participant_inn=INN, mixed_pg=True, leading_pg="lp")
     with pytest.raises(AggregationManualReview, match="LEADING_PG"):
-        validate_box_preconditions(parent=None, children=(snap(C2, PackageType.GROUP, pg="milk"),), participant_inn=INN, mixed_pg=True, leading_pg="lp")
+        validate_box_preconditions(parent=None, children=(snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED"),), participant_inn=INN, mixed_pg=True, leading_pg="lp")
     with pytest.raises(AggregationManualReview, match="NON_OWNER"):
         validate_box_preconditions(parent=None, children=(snap(C1, owner="9999999999"),), participant_inn=INN)
     with pytest.raises(AggregationManualReview, match="STATUS_EX"):
@@ -213,11 +216,105 @@ def test_reaggregation_preconditions_set_box_remove_and_leading_pg() -> None:
     validate_reaggregation_preconditions(parent=set_parent, children=(child,), reaggregation_type="REMOVING", participant_inn=INN)
     with pytest.raises(AggregationContractError):
         validate_reaggregation_preconditions(parent=set_parent, children=(snap(C2, PackageType.BOX, status="INTRODUCED", parent=PARENT),), reaggregation_type="REMOVING", participant_inn=INN)
-    box_parent=snap(PARENT, PackageType.BOX, status="INTRODUCED")
+    box_parent=snap(PARENT, PackageType.BOX, status="RUNTIME_FORMED_VALUE")
     removed=snap(C1, PackageType.UNIT, status="INTRODUCED", parent=PARENT)
     with pytest.raises(AggregationManualReview, match="LEADING_PG"):
-        validate_reaggregation_preconditions(parent=box_parent, children=(removed,), reaggregation_type="REMOVING", participant_inn=INN, remaining_children=(snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED", parent=PARENT),), mixed_pg=True, leading_pg="lp")
+        validate_reaggregation_preconditions(
+            parent=box_parent, children=(removed,), reaggregation_type="REMOVING", participant_inn=INN,
+            remaining_children=(snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED", parent=PARENT),),
+            mixed_pg=True, leading_pg="lp", runtime_formed_status_values=frozenset({"RUNTIME_FORMED_VALUE"}),
+        )
 
+
+
+def test_aggregate_identifier_exact_charset_boundaries_and_generic_child_validator_separate() -> None:
+    allowed_specials = "A%&'\"()*+,_./:;<?!"
+    assert len(allowed_specials) == 18
+    assert validate_aggregate_identifier(allowed_specials) == allowed_specials
+    assert validate_aggregate_identifier("A" * 18) == "A" * 18
+    assert validate_aggregate_identifier("Z" * 74) == "Z" * 74
+    for invalid in ("A" * 17, "A" * 75, "A" * 17 + "@", "A" * 17 + "Ж", "A" * 17 + " "):
+        with pytest.raises(AggregationContractError):
+            validate_aggregate_identifier(invalid)
+    child_with_at = "010123456789012321@CHILD"
+    wire = AggregationUnit(PARENT, UnitSerialNumberType.BOX, (child_with_at,)).to_wire()
+    assert wire["sntins"] == [child_with_at]
+
+
+def test_aggregate_identifier_validator_is_used_on_parent_wire_positions() -> None:
+    bad = "A" * 17 + "@"
+    with pytest.raises(AggregationContractError):
+        AggregationUnit(bad, UnitSerialNumberType.BOX, (C1,)).to_wire()
+    with pytest.raises(AggregationContractError):
+        SetAggregationUnit(bad, (C1,)).to_wire()
+    with pytest.raises(AggregationContractError):
+        ReaggregationDocument(INN, "ADDING", bad, (ReaggregationItem(uit_uitu=C1),)).to_wire()
+    with pytest.raises(AggregationContractError):
+        ReaggregationItem(kitu=bad).to_wire()
+    with pytest.raises(AggregationContractError):
+        DisaggregationDocument(INN, (bad,)).to_wire()
+
+
+def test_multiproduct_kitu_formation_uses_current_status_semantics_and_runtime_gate() -> None:
+    introduced = (
+        snap(C1, pg="lp", status="INTRODUCED", status_ex=None),
+        snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED", status_ex="WAIT_TRANSFER_TO_OWNER"),
+    )
+    validate_box_preconditions(parent=None, children=introduced, participant_inn=INN, mixed_pg=True, leading_pg="lp")
+    with pytest.raises(AggregationManualReview, match="STATUS_NOT_CONFIRMED"):
+        validate_box_preconditions(
+            parent=None,
+            children=(snap(C1, pg="lp", status="APPLIED"), snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED")),
+            participant_inn=INN, mixed_pg=True, leading_pg="lp",
+        )
+    unknown_formed = (
+        snap(C1, pg="lp", status="RUNTIME_FORMED_VALUE"),
+        snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED", status_ex="WAIT_TRANSFER_TO_OWNER"),
+    )
+    with pytest.raises(AggregationManualReview, match="STATUS_NOT_CONFIRMED"):
+        validate_box_preconditions(parent=None, children=unknown_formed, participant_inn=INN, mixed_pg=True, leading_pg="lp")
+    validate_box_preconditions(
+        parent=None, children=unknown_formed, participant_inn=INN, mixed_pg=True, leading_pg="lp",
+        runtime_formed_status_values=frozenset({"RUNTIME_FORMED_VALUE"}),
+    )
+    import wbcz.aggregation as a
+    assert not hasattr(a, "FORMED")
+
+
+def test_multiproduct_kitu_transformation_removes_old_status_equality_and_runtime_gates_parent() -> None:
+    parent = snap(PARENT, PackageType.BOX, pg="lp", status="RUNTIME_FORMED_VALUE", status_ex=None)
+    introduced = snap(C1, PackageType.UNIT, pg="lp", status="INTRODUCED", status_ex=None, parent=PARENT)
+    formed = snap(C2, PackageType.GROUP, pg="milk", status="RUNTIME_FORMED_VALUE", status_ex="WAIT_TRANSFER_TO_OWNER", parent=PARENT)
+    remaining = (snap(C3, PackageType.UNIT, pg="lp", status="INTRODUCED", status_ex="WAIT_TRANSFER_TO_OWNER", parent=PARENT),)
+    with pytest.raises(AggregationManualReview, match="PARENT_STATUS_RUNTIME_CONFIRMATION_REQUIRED"):
+        validate_reaggregation_preconditions(
+            parent=parent, children=(introduced,), reaggregation_type="REMOVING", participant_inn=INN,
+            mixed_pg=True, leading_pg="lp", remaining_children=remaining,
+        )
+    runtime = frozenset({"RUNTIME_FORMED_VALUE"})
+    validate_reaggregation_preconditions(
+        parent=parent, children=(introduced,), reaggregation_type="REMOVING", participant_inn=INN,
+        mixed_pg=True, leading_pg="lp", remaining_children=remaining, runtime_formed_status_values=runtime,
+    )
+    validate_reaggregation_preconditions(
+        parent=parent, children=(formed,), reaggregation_type="REMOVING", participant_inn=INN,
+        mixed_pg=True, leading_pg="lp", remaining_children=remaining, runtime_formed_status_values=runtime,
+    )
+    with pytest.raises(AggregationManualReview, match="STATUS_NOT_CONFIRMED"):
+        validate_reaggregation_preconditions(
+            parent=parent,
+            children=(snap(C2, PackageType.GROUP, pg="milk", status="UNKNOWN_FORMED_RAW", parent=PARENT),),
+            reaggregation_type="REMOVING", participant_inn=INN, mixed_pg=True, leading_pg="lp",
+            remaining_children=remaining, runtime_formed_status_values=runtime,
+        )
+
+
+def test_ordinary_kitu_retains_identical_applied_or_introduced_rules() -> None:
+    validate_box_preconditions(parent=None, children=(snap(C1), snap(C2)), participant_inn=INN)
+    with pytest.raises(AggregationManualReview, match="STATUSES_MUST_MATCH"):
+        validate_box_preconditions(
+            parent=None, children=(snap(C1, status="APPLIED"), snap(C2, status="INTRODUCED")), participant_inn=INN
+        )
 
 def test_disaggregation_preconditions_no_formed_enum_and_runtime_formed_value_is_explicit() -> None:
     validate_disaggregation_preconditions(parents=(snap(PARENT, PackageType.BOX, status="INTRODUCED"),), participant_inn=INN)

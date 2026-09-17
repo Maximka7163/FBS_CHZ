@@ -8,6 +8,8 @@ Source: True API v726.0 dated 2026-09-04 and accepted `M6-AGGREGATION-RESEARCH-0
 
 For `lp`, `GROUP` is not exposed as a formable parent. `SET` accepts only direct `UNIT` or `BUNDLE`. `BOX` accepts `UNIT`, `BUNDLE`, `SET`, and nested `BOX`; `GROUP` can only appear as a legitimate non-lp child in a mixed-PG KITU. Nested `SET` is fail-closed. ATK is a separate customs aggregate domain.
 
+KIGU/KITU/KIN aggregate identifiers use a dedicated official validator and are not conflated with generic child CIS/KI validation. The aggregate identifier is 18..74 characters and only permits `A-Z`, `a-z`, `0-9`, `%`, `&`, `'`, `"`, `(`, `)`, `*`, `+`, `,`, `_`, `.`, `/`, `:`, `;`, `<`, `?`, `!`. Whitespace, Cyrillic, `@`, and every other character outside that set are rejected. This rule is applied to aggregate parent/set identifier wire positions; it is not blindly applied to child KI/KIK values whose representation contract differs.
+
 ## Typed operations
 
 M6 exposes only typed domain operations mapped to exact document types: `FORM_TRANSPORT_PACKAGE` and `FORM_MULTIPRODUCT_TRANSPORT_PACKAGE` -> `AGGREGATION_DOCUMENT`; normal `FORM_SET` -> `SETS_AGGREGATION`; `FORM_SET_GENERIC_COMPATIBILITY` -> `AGGREGATION_DOCUMENT` only when explicitly selected; package add/remove -> `REAGGREGATION_DOCUMENT`; package disaggregation -> `DISAGGREGATION_DOCUMENT`; ATK form/transform/disaggregate -> `ATK_AGGREGATION`, `ATK_TRANSFORMATION`, `ATK_DISAGGREGATION`.
@@ -28,7 +30,9 @@ ATK DTOs preserve `trade_participant_inn`, `atk`, `transformation_type`, and `pr
 
 ## Multiproduct KITU
 
-Mixed-PG KITU is supported as the current v726 contract, not downgraded to an old single-PG model. The leading PG is explicit in precondition evidence; at least one child must match it. Child compatibility is evaluated using each child's real PG/package type. Nested BOX is supported. The implementation does not invent a nesting-depth contract. Official non-owner/legacy traceability exceptions are not silently enabled.
+Mixed-PG KITU uses the current v664 rules included in v726, not the ordinary single-PG status logic. Ordinary KITU retains its source-confirmed identical-child-status rule with `APPLIED`/`INTRODUCED`; `APPLIED` children also require matching emission semantics. Multiproduct KITU instead accepts each child only when raw status is `INTRODUCED` or belongs to an explicitly supplied runtime-confirmed set corresponding to textual «Сформирован». `APPLIED` is not accepted merely because ordinary KITU allows it. Different child raw statuses are allowed across INTRODUCED/runtime-confirmed-formed branches, and `statusEx` may independently be absent or `WAIT_TRANSFER_TO_OWNER`.
+
+The exact raw enum behind textual «Сформирован» is still unresolved, so no `FORMED` enum is invented. `runtime_formed_status_values` defaults empty and the formed-state path therefore fails closed until explicitly confirmed. Capability honesty: `MULTIPRODUCT_KITU_INTRODUCED_PATH=IMPLEMENTED`; `MULTIPRODUCT_KITU_FORMED_PATH=RUNTIME_GATED`. Multiproduct transformation removes the old child-status-equals-parent assumption. Because the authoritative source does not establish an exact raw parent status for that branch, mixed-PG transformation also requires an explicitly runtime-confirmed parent formed-state raw value instead of inventing one. Leading-PG requirements, removal validity, owner policy, nested BOX rules, and actual child PG compatibility remain enforced.
 
 ## Reads and reconciliation
 
