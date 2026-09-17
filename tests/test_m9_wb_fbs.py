@@ -505,3 +505,75 @@ def test_current_archive_same_identity_conflict_never_overwrites() -> None:
     assert compare_assembly_evidence(current, replay) is AssemblyEvidenceMergeState.DUPLICATE
     assert compare_assembly_evidence(current, conflict) is AssemblyEvidenceMergeState.EVIDENCE_CONFLICT
     assert compare_assembly_evidence(current, other) is AssemblyEvidenceMergeState.NEW
+
+
+def test_meta_details_redacts_unknown_sgtin_shaped_keys() -> None:
+    parsed = parse_meta_details({
+        "metaDetails": {
+            "sgtinList": ["FULL-MARKING-CANARY"],
+            "futureDecision": "keep",
+        }
+    })
+    rendered = repr(parsed.raw_sanitized)
+    assert "FULL-MARKING-CANARY" not in rendered
+    assert parsed.raw_sanitized["sgtinList"] == "REDACTED"
+    assert parsed.raw_sanitized["futureDecision"] == "keep"
+
+
+def test_backfill_policy_is_configurable_bounded_and_windows_current_requests() -> None:
+    from wbcz.wb_fbs import FirstRunBackfillPolicy
+    policy = FirstRunBackfillPolicy(
+        current_horizon_days=75,
+        order_feed_horizon_days=31,
+        goods_return_horizon_days=62,
+        supplier_sales_horizon_days=90,
+        archive_start_year=2025,
+        archive_start_month=1,
+    )
+    policy.validate()
+    windows = policy.current_windows(end=NOW)
+    assert len(windows) == 3
+    assert all((end - start) <= timedelta(days=30) for start, end in windows)
+    with pytest.raises(WbContractError):
+        replace(policy, order_feed_horizon_days=32).validate()
+    with pytest.raises(WbContractError):
+        replace(policy, supplier_sales_horizon_days=91).validate()
+
+
+def test_sync_feed_registry_contains_all_minimum_feeds() -> None:
+    from wbcz.wb_fbs import WbSyncFeed
+    assert {x.value for x in WbSyncFeed} == {
+        "FBS_CURRENT", "FBS_ARCHIVE", "ORDER_FEED", "METADATA",
+        "GOODS_RETURN", "SUPPLIER_SALES_COMPAT",
+    }
+
+
+def test_m5_adapter_request_is_local_typed_evidence_only() -> None:
+    from wbcz.wb_fbs import M5LocalOperation, prepare_m5_local_decision
+    fp = "a" * 64
+    request = prepare_m5_local_decision(
+        M9Decision.REMOTE_SALE_RETURN_READY,
+        connection_id=1,
+        assembly_order_id=123,
+        marking_fingerprint=fp,
+        evidence_fingerprint="b" * 64,
+    )
+    assert request.operation is M5LocalOperation.REMOTE_SALE_RETURN
+    assert not hasattr(request, "url")
+    assert not hasattr(request, "token")
+    with pytest.raises(WbContractError):
+        prepare_m5_local_decision(
+            M9Decision.WAIT_FOR_EVIDENCE,
+            connection_id=1,
+            assembly_order_id=123,
+            marking_fingerprint=fp,
+            evidence_fingerprint="b" * 64,
+        )
+
+
+def test_persistence_generic_json_surfaces_are_explicitly_sanitized_or_redacted() -> None:
+    assert "raw_evidence_sanitized" in WbEventRecord.__table__.columns
+    assert "raw_evidence" not in WbEventRecord.__table__.columns
+    assert "evidence_redacted" in WbReconciliationRecord.__table__.columns
+    assert "evidence" not in WbReconciliationRecord.__table__.columns
+    assert "token_scopes" in WbConnectionRecord.__table__.columns
