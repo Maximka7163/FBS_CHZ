@@ -58,7 +58,7 @@ Remote draft/content bytes may be captured with exact SHA-256, document family, 
 
 Registry granularity is exact: one production row represents one official type code, never a slash-separated local group. Current disabled rows preserve established UPD/UPDi/UKD/UKDi code, title-role and function metadata. Seller-only types `522`, `602`, `702`, `822` have no synthetic buyer rows. Service rows remain fail-closed without invented type codes.
 
-Registry rows describe family/type/title/function metadata only where known. All production entries have `enabled_for_lp=false`. Missing official order, artifact/XSD filename, checksum, root, target namespace, encoding, filename grammar, parent-link rule and marking capability remain explicit NULL/unknown values; no `latest` alias or fake schema metadata exists.
+Registry rows describe family/type/title/function metadata only where known and store the True-API-declared format order where source-confirmed. UPD/UPDi rows carry `ЕД-7-26/970@`; UKD/UKDi rows carry the current True API endpoint-contract order `ЕД-7-26/736@`. Recording `736@` identifies the True API contract only and does not resolve or override the current FNS repeal/replacement conflict with `ЕД-1-26/29@`; UKD/UKDi writers remain disabled. Service rows keep `official_order=NULL` where accepted research has not established a finalized exact order identity. All production entries have `enabled_for_lp=false`. Missing artifact/XSD filename, checksum, root, target namespace, encoding, filename grammar, parent-link rule and marking capability remain explicit NULL/unknown values; no `latest` alias or fake schema metadata exists.
 
 The UKD conflict is represented explicitly:
 

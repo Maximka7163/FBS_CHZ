@@ -601,31 +601,40 @@ class SchemaDefinition:
     disabled_reason: str | None = "OFFICIAL_SCHEMA_NOT_PINNED"
 
 
-def _schema(identity: str, family: str, type_code: str | None, role: str | None = None, function: str | None = None, *, reason: str = "OFFICIAL_SCHEMA_NOT_PINNED") -> SchemaDefinition:
-    return SchemaDefinition(identity, family, type_code, role, function, None, None, None, None, None, None, None, None, None, None, None, False, True, reason)
+def _schema(
+    identity: str,
+    family: str,
+    type_code: str | None,
+    role: str | None = None,
+    function: str | None = None,
+    *,
+    official_order: str | None = None,
+    reason: str = "OFFICIAL_SCHEMA_NOT_PINNED",
+) -> SchemaDefinition:
+    return SchemaDefinition(identity, family, type_code, role, function, official_order, None, None, None, None, None, None, None, None, None, None, False, True, reason)
 
 
 PRODUCTION_SCHEMA_REGISTRY: Mapping[str, SchemaDefinition] = {
-    "UPD_970_520_SELLER": _schema("UPD_970_520_SELLER", "UPD", "520", "SELLER", "ДОП"),
-    "UPD_970_521_BUYER": _schema("UPD_970_521_BUYER", "UPD", "521", "BUYER", "ДОП"),
-    "UPD_970_522_SELLER": _schema("UPD_970_522_SELLER", "UPD", "522", "SELLER", "СЧФ"),
-    "UPD_970_524_SELLER": _schema("UPD_970_524_SELLER", "UPD", "524", "SELLER", "СЧФДОП"),
-    "UPD_970_525_BUYER": _schema("UPD_970_525_BUYER", "UPD", "525", "BUYER", "СЧФДОП"),
-    "UPDI_970_820_SELLER": _schema("UPDI_970_820_SELLER", "UPDI", "820", "SELLER", "ДОП"),
-    "UPDI_970_821_BUYER": _schema("UPDI_970_821_BUYER", "UPDI", "821", "BUYER", "ДОП"),
-    "UPDI_970_822_SELLER": _schema("UPDI_970_822_SELLER", "UPDI", "822", "SELLER", "СЧФ"),
-    "UPDI_970_824_SELLER": _schema("UPDI_970_824_SELLER", "UPDI", "824", "SELLER", "СЧФДОП"),
-    "UPDI_970_825_BUYER": _schema("UPDI_970_825_BUYER", "UPDI", "825", "BUYER", "СЧФДОП"),
-    "UKD_736_600_SELLER": _schema("UKD_736_600_SELLER", "UKD", "600", "SELLER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKD_736_601_BUYER": _schema("UKD_736_601_BUYER", "UKD", "601", "BUYER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKD_736_602_SELLER": _schema("UKD_736_602_SELLER", "UKD", "602", "SELLER", "КСЧФ", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKD_736_604_SELLER": _schema("UKD_736_604_SELLER", "UKD", "604", "SELLER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKD_736_605_BUYER": _schema("UKD_736_605_BUYER", "UKD", "605", "BUYER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKDI_736_700_SELLER": _schema("UKDI_736_700_SELLER", "UKDI", "700", "SELLER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKDI_736_701_BUYER": _schema("UKDI_736_701_BUYER", "UKDI", "701", "BUYER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKDI_736_702_SELLER": _schema("UKDI_736_702_SELLER", "UKDI", "702", "SELLER", "КСЧФ", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKDI_736_704_SELLER": _schema("UKDI_736_704_SELLER", "UKDI", "704", "SELLER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKDI_736_705_BUYER": _schema("UKDI_736_705_BUYER", "UKDI", "705", "BUYER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UPD_970_520_SELLER": _schema("UPD_970_520_SELLER", "UPD", "520", "SELLER", "ДОП", official_order="ЕД-7-26/970@"),
+    "UPD_970_521_BUYER": _schema("UPD_970_521_BUYER", "UPD", "521", "BUYER", "ДОП", official_order="ЕД-7-26/970@"),
+    "UPD_970_522_SELLER": _schema("UPD_970_522_SELLER", "UPD", "522", "SELLER", "СЧФ", official_order="ЕД-7-26/970@"),
+    "UPD_970_524_SELLER": _schema("UPD_970_524_SELLER", "UPD", "524", "SELLER", "СЧФДОП", official_order="ЕД-7-26/970@"),
+    "UPD_970_525_BUYER": _schema("UPD_970_525_BUYER", "UPD", "525", "BUYER", "СЧФДОП", official_order="ЕД-7-26/970@"),
+    "UPDI_970_820_SELLER": _schema("UPDI_970_820_SELLER", "UPDI", "820", "SELLER", "ДОП", official_order="ЕД-7-26/970@"),
+    "UPDI_970_821_BUYER": _schema("UPDI_970_821_BUYER", "UPDI", "821", "BUYER", "ДОП", official_order="ЕД-7-26/970@"),
+    "UPDI_970_822_SELLER": _schema("UPDI_970_822_SELLER", "UPDI", "822", "SELLER", "СЧФ", official_order="ЕД-7-26/970@"),
+    "UPDI_970_824_SELLER": _schema("UPDI_970_824_SELLER", "UPDI", "824", "SELLER", "СЧФДОП", official_order="ЕД-7-26/970@"),
+    "UPDI_970_825_BUYER": _schema("UPDI_970_825_BUYER", "UPDI", "825", "BUYER", "СЧФДОП", official_order="ЕД-7-26/970@"),
+    "UKD_736_600_SELLER": _schema("UKD_736_600_SELLER", "UKD", "600", "SELLER", "ДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_601_BUYER": _schema("UKD_736_601_BUYER", "UKD", "601", "BUYER", "ДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_602_SELLER": _schema("UKD_736_602_SELLER", "UKD", "602", "SELLER", "КСЧФ", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_604_SELLER": _schema("UKD_736_604_SELLER", "UKD", "604", "SELLER", "КСФДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_605_BUYER": _schema("UKD_736_605_BUYER", "UKD", "605", "BUYER", "КСФДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_700_SELLER": _schema("UKDI_736_700_SELLER", "UKDI", "700", "SELLER", "ДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_701_BUYER": _schema("UKDI_736_701_BUYER", "UKDI", "701", "BUYER", "ДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_702_SELLER": _schema("UKDI_736_702_SELLER", "UKDI", "702", "SELLER", "КСЧФ", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_704_SELLER": _schema("UKDI_736_704_SELLER", "UKDI", "704", "SELLER", "КСФДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_705_BUYER": _schema("UKDI_736_705_BUYER", "UKDI", "705", "BUYER", "КСФДИС", official_order="ЕД-7-26/736@", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
     "DP_UVUTOCH": _schema("DP_UVUTOCH", "SERVICE", None, function="UVTOCH"),
     "DP_PRANNUL": _schema("DP_PRANNUL", "SERVICE", None, function="PRANNUL"),
     "DP_UNISOOBSCH": _schema("DP_UNISOOBSCH", "SERVICE", None, function="UNISOOBSCH"),

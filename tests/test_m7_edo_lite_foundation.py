@@ -396,6 +396,9 @@ def test_schema_registry_has_one_exact_official_type_per_disabled_row() -> None:
     assert all(not x.enabled_for_lp for x in PRODUCTION_SCHEMA_REGISTRY.values())
     assert all(x.disabled_reason == "TRUE_API_FNS_FORMAT_CONFLICT" for x in rows if x.family in {"UKD","UKDI"})
     assert all(x.disabled_reason == "OFFICIAL_SCHEMA_NOT_PINNED" for x in rows if x.family in {"UPD","UPDI"})
+    assert all(x.official_order == "ЕД-7-26/970@" for x in rows if x.family in {"UPD","UPDI"})
+    assert all(x.official_order == "ЕД-7-26/736@" for x in rows if x.family in {"UKD","UKDI"})
+    assert all(x.official_order is None for x in PRODUCTION_SCHEMA_REGISTRY.values() if x.family == "SERVICE")
     for x in PRODUCTION_SCHEMA_REGISTRY.values():
         assert x.artifact_filename is None and x.artifact_sha256 is None and x.xsd_filename is None and x.xsd_sha256 is None
         assert x.root is None and x.target_namespace is None
