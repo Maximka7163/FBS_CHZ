@@ -20,6 +20,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install backend dependencies
+        run: python -m pip install -e ".[ui,test,web]"
       - name: Apply focused charset fix only
         shell: bash
         run: |
@@ -61,13 +63,14 @@ jobs:
           python -m compileall -q src tests/test_m6_aggregation.py
           git diff --check
           python -m pytest -q tests/test_m6_aggregation.py
-      - name: Commit focused fix
+      - name: Commit focused fix and remove bootstrap workflow
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/wbcz/aggregation.py tests/test_m6_aggregation.py docs/M6_AGGREGATION_CONTRACT.md .github/workflows/m6-aggregation-validation.yml
+          git rm .github/workflows/m6-fix02-patch.yml
           git diff --cached --check
           git commit -m 'fix: include official aggregate identifier characters'
           git push origin HEAD:m6/aggregation-001
