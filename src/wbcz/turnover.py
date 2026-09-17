@@ -972,6 +972,9 @@ class CisSnapshot:
     emission_type: str | None = None
     commission_from_individual_confirmed: bool | None = None
     fetched_at: datetime | None = None
+    parent: str | None = None
+    package_type: str | None = None
+    direct_children: tuple[str, ...] = ()
 
     def validated(self) -> "CisSnapshot":
         _cis(self.cis)
@@ -1085,6 +1088,9 @@ class OperationPreconditionService:
                     "ownerInn": item.owner_inn,
                     "withdrawReason": item.withdraw_reason,
                     "emissionType": item.emission_type,
+                    "parent": item.parent,
+                    "packageType": item.package_type,
+                    "directChildren": list(item.direct_children),
                 }
                 for item in snapshots
             ),
@@ -1251,6 +1257,7 @@ class OperationPreconditionService:
         original_document_status: str | None,
         original_sender_inn: str | None,
         latest_operation_is_original: bool,
+        target_snapshots: Sequence[CisSnapshot] = (),
     ) -> PreconditionEvidence:
         if original_document_status != "CHECKED_OK":
             raise TurnoverManualReview("CANCEL_REQUIRES_CHECKED_OK_SOURCE")
@@ -1258,10 +1265,14 @@ class OperationPreconditionService:
             raise TurnoverManualReview("CANCEL_SOURCE_SENDER_MISMATCH")
         if not latest_operation_is_original:
             raise TurnoverManualReview("CANCEL_SOURCE_NOT_LATEST_ELIGIBLE_OPERATION")
+        for snapshot in target_snapshots:
+            self._fresh(snapshot)
+        observed = [{"sourceDocumentStatus": original_document_status, "sourceSenderInn": original_sender_inn}]
+        observed.extend({"cis": item.cis, "status": item.status, "statusEx": item.status_ex, "ownerInn": item.owner_inn, "withdrawReason": item.withdraw_reason, "parent": item.parent, "packageType": item.package_type, "directChildren": list(item.direct_children)} for item in target_snapshots)
         return PreconditionEvidence(
             TurnoverOperationKind.CANCEL_WITHDRAWAL,
-            (),
-            ({"sourceDocumentStatus": original_document_status, "sourceSenderInn": original_sender_inn},),
+            tuple(item.cis for item in target_snapshots),
+            tuple(observed),
             self._now().astimezone(timezone.utc).isoformat(),
         )
 
@@ -1282,6 +1293,8 @@ class OperationReconciliationService:
         document_status_raw: str | None,
         snapshots: Sequence[CisSnapshot],
         expected_restore: Mapping[str, tuple[str | None, str | None]] | None = None,
+        pre_parent_map: Mapping[str, str | None] | None = None,
+        aggregation_observations: Sequence[Any] = (),
     ) -> ReconciliationResult:
         try:
             kind = operation_kind if isinstance(operation_kind, TurnoverOperationKind) else TurnoverOperationKind(operation_kind)
@@ -1294,6 +1307,8 @@ class OperationReconciliationService:
                 "statusEx": item.status_ex,
                 "ownerInn": item.owner_inn,
                 "withdrawReason": item.withdraw_reason,
+                "parent": item.parent,
+                "packageType": item.package_type,
             }
             for item in snapshots
         )
@@ -1333,6 +1348,22 @@ class OperationReconciliationService:
             )
         else:
             ok = False
+        aggregation_relevant = {
+            TurnoverOperationKind.WITHDRAW_DISTANCE, TurnoverOperationKind.RETURN_TO_CIRCULATION,
+            TurnoverOperationKind.RETURN_REMOTE_SALE, TurnoverOperationKind.REMARK, TurnoverOperationKind.WRITE_OFF,
+            TurnoverOperationKind.CANCEL_WITHDRAWAL, TurnoverOperationKind.INTRODUCE_DOMESTIC,
+            TurnoverOperationKind.INTRODUCE_FROM_INDIVIDUAL, TurnoverOperationKind.INTRODUCE_IMPORT_PRE_MANDATORY,
+            TurnoverOperationKind.INTRODUCE_EAEU, TurnoverOperationKind.INTRODUCE_REMAINS,
+            TurnoverOperationKind.INTRODUCE_CONTRACT, TurnoverOperationKind.INTRODUCE_FTS,
+        }
+        if ok and kind in aggregation_relevant and pre_parent_map and any(pre_parent_map.values()):
+            if not aggregation_observations:
+                return ReconciliationResult(ReconciliationState.PENDING, document_status_raw, "AGGREGATION_RECONCILIATION_REQUIRED", observed)
+            from wbcz.aggregation import AggregationReconciliationState, reconcile_m5_aggregation_side_effect
+            aggregate = reconcile_m5_aggregation_side_effect(operation_kind=kind.value, observations=aggregation_observations)
+            if aggregate.state is not AggregationReconciliationState.RECONCILED:
+                state = ReconciliationState.PENDING if aggregate.state is AggregationReconciliationState.RECONCILIATION_PENDING else ReconciliationState.MANUAL_REVIEW
+                return ReconciliationResult(state, document_status_raw, aggregate.reason, observed)
         return ReconciliationResult(
             ReconciliationState.RECONCILED if ok else ReconciliationState.PENDING,
             document_status_raw,

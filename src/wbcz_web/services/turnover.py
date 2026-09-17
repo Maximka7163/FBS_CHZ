@@ -224,15 +224,20 @@ class TurnoverApplicationService:
         document_status_raw: str | None,
         cis_snapshots: Sequence[CisSnapshot],
         expected_restore: Mapping[str, tuple[str | None, str | None]] | None = None,
+        aggregation_observations: Sequence[Any] = (),
     ) -> dict[str, Any]:
         ledger = self._ledger(operation_id, lock=True)
         if ledger is None:
             raise KeyError(operation_id)
+        observed_pre = ledger.precondition_snapshot.get("observed", []) if isinstance(ledger.precondition_snapshot, dict) else []
+        pre_parent_map = {str(item.get("cis")): item.get("parent") for item in observed_pre if isinstance(item, dict) and item.get("cis")}
         result = self.reconciler.reconcile(
             operation_kind=ledger.operation_kind,
             document_status_raw=document_status_raw,
             snapshots=cis_snapshots,
             expected_restore=expected_restore,
+            pre_parent_map=pre_parent_map,
+            aggregation_observations=aggregation_observations,
         )
         ledger.reconciliation_state = result.state.value
         ledger.reconciliation_json = {

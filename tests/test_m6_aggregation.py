@@ -14,6 +14,14 @@ from wbcz.aggregation import (
     validate_lp_relation, validate_set_preconditions,
 )
 
+
+from wbcz.aggregation import (
+    M5AggregationObservation, validate_atk_disaggregation_preconditions,
+    validate_atk_transformation_preconditions, validate_disaggregation_preconditions,
+    validate_reaggregation_preconditions, reconcile_m5_aggregation_side_effect,
+)
+from wbcz.turnover import CisSnapshot as TurnoverCisSnapshot, OperationReconciliationService, ReconciliationState, TurnoverOperationKind
+
 INN = "1234567890"
 C1 = "010123456789012321ABCDEF"
 C2 = "010123456789012321ABCDEG"
@@ -181,3 +189,100 @@ def test_no_generic_move_cancel_or_generic_write_symbols() -> None:
     import wbcz.aggregation as a
     forbidden = {"MOVE_CHILD", "CANCEL_AGGREGATION", "GENERIC_AGGREGATION_WRITE", "GENERIC_DOCUMENT_SUBMIT", "RAW_URL", "RAW_PATH", "RAW_METHOD"}
     assert forbidden.isdisjoint(set(dir(a)))
+
+
+def test_generic_set_compatibility_requires_product_set_and_transport_requires_box() -> None:
+    generic = AggregationDocument(INN, (AggregationUnit(PARENT, UnitSerialNumberType.PRODUCT_SET, (C1,)),))
+    prepare_aggregation_document(AggregationOperationKind.FORM_SET_GENERIC_COMPATIBILITY, generic)
+    with pytest.raises(AggregationContractError):
+        prepare_aggregation_document(AggregationOperationKind.FORM_SET_GENERIC_COMPATIBILITY, AggregationDocument(INN, (AggregationUnit(PARENT, UnitSerialNumberType.BOX, (C1,)),)))
+    with pytest.raises(AggregationContractError):
+        prepare_aggregation_document(AggregationOperationKind.FORM_TRANSPORT_PACKAGE, generic)
+
+
+def test_bundle_is_lp_only_and_tree_unknown_package_is_incomplete() -> None:
+    with pytest.raises(AggregationContractError, match="only for lp"):
+        validate_lp_relation(PackageType.BOX, PackageType.BUNDLE, child_pg="milk", mixed_pg=True)
+    result=build_aggregate_tree(PARENT, direct_children=lambda _: (), package_type_of=lambda _: "FUTURE_PACKAGE")
+    assert not result.complete and any(x.startswith("UNKNOWN_RAW_PACKAGE_TYPE") for x in result.warnings)
+
+
+def test_reaggregation_preconditions_set_box_remove_and_leading_pg() -> None:
+    set_parent=snap(PARENT, PackageType.SET, status="INTRODUCED")
+    child=snap(C1, PackageType.UNIT, status="INTRODUCED", parent=PARENT)
+    validate_reaggregation_preconditions(parent=set_parent, children=(child,), reaggregation_type="REMOVING", participant_inn=INN)
+    with pytest.raises(AggregationContractError):
+        validate_reaggregation_preconditions(parent=set_parent, children=(snap(C2, PackageType.BOX, status="INTRODUCED", parent=PARENT),), reaggregation_type="REMOVING", participant_inn=INN)
+    box_parent=snap(PARENT, PackageType.BOX, status="INTRODUCED")
+    removed=snap(C1, PackageType.UNIT, status="INTRODUCED", parent=PARENT)
+    with pytest.raises(AggregationManualReview, match="LEADING_PG"):
+        validate_reaggregation_preconditions(parent=box_parent, children=(removed,), reaggregation_type="REMOVING", participant_inn=INN, remaining_children=(snap(C2, PackageType.GROUP, pg="milk", status="INTRODUCED", parent=PARENT),), mixed_pg=True, leading_pg="lp")
+
+
+def test_disaggregation_preconditions_no_formed_enum_and_runtime_formed_value_is_explicit() -> None:
+    validate_disaggregation_preconditions(parents=(snap(PARENT, PackageType.BOX, status="INTRODUCED"),), participant_inn=INN)
+    formed=snap(PARENT, PackageType.BOX, status="RUNTIME_FORMED_VALUE")
+    with pytest.raises(AggregationManualReview):
+        validate_disaggregation_preconditions(parents=(formed,), participant_inn=INN)
+    validate_disaggregation_preconditions(parents=(formed,), participant_inn=INN, runtime_formed_status_values=frozenset({"RUNTIME_FORMED_VALUE"}))
+    with pytest.raises(AggregationManualReview, match="GROUP"):
+        validate_disaggregation_preconditions(parents=(snap(PARENT, PackageType.GROUP, status="INTRODUCED"),), participant_inn=INN)
+
+
+def test_atk_transformation_and_disaggregation_status_ex_are_operation_specific() -> None:
+    atk_parent=snap(PARENT, PackageType.ATK, status="APPLIED", emission="FOREIGN", status_ex="FTS_RESPOND_NOT_OK", children=(C1,))
+    child=snap(C1, PackageType.UNIT, status="APPLIED", emission="FOREIGN", parent=PARENT)
+    validate_atk_transformation_preconditions(role="IMPORTER", participant_inn=INN, parent=atk_parent, children=(child,), transformation_type="REMOVING")
+    with pytest.raises(AggregationManualReview, match="STATUS_EX"):
+        validate_atk_transformation_preconditions(role="IMPORTER", participant_inn=INN, parent=snap(PARENT, PackageType.ATK, status="APPLIED", emission="FOREIGN", status_ex="FTS_CONTROL"), children=(child,), transformation_type="REMOVING")
+    validate_atk_disaggregation_preconditions(role="IMPORTER", participant_inn=INN, parents=(snap(PARENT, PackageType.ATK, status="APPLIED", emission="FOREIGN", status_ex="FTS_CONTROL"),))
+
+
+def test_reconciliation_requires_exact_add_parents_and_disaggregation_state_readback() -> None:
+    svc=AggregationReconciliationService()
+    bad_add=svc.reconcile_relation(operation=AggregationOperationKind.TRANSFORM_PACKAGE_ADD, document_status_raw="CHECKED_OK", expected_parent=PARENT, expected_children=(C1,C2), actual_children=(C1,C2,C3), child_parents={C1:PARENT,C2:PARENT,C3:PARENT})
+    assert bad_add.state is AggregationReconciliationState.MANUAL_REVIEW
+    event=normalize_aggregation_history_event({"operationType":"DISAGGREGATION","operationDate":"2021-08-10 10:11:01"})
+    pending=svc.reconcile_relation(operation=AggregationOperationKind.DISAGGREGATE_PACKAGE, document_status_raw="CHECKED_OK", expected_parent=PARENT, expected_children=(C1,), actual_children=(), child_parents={C1:None}, history_events=(event,))
+    assert pending.state is AggregationReconciliationState.MANUAL_REVIEW
+    ok=svc.reconcile_relation(operation=AggregationOperationKind.DISAGGREGATE_PACKAGE, document_status_raw="CHECKED_OK", expected_parent=PARENT, expected_children=(C1,), actual_children=(), child_parents={C1:None}, history_events=(event,), parent_status_raw_observed="SOME_RUNTIME_STATUS")
+    assert ok.state is AggregationReconciliationState.RECONCILED
+
+
+def test_atk_transform_and_disaggregation_reconciliation() -> None:
+    svc=AggregationReconciliationService()
+    add=svc.reconcile_atk_transformation(document_status_raw="CHECKED_OK", parent=PARENT, expected_children=(C1,C2), actual_children=(C1,C2), changed_children=(C2,), transformation_type="ADDING", child_parents={C1:PARENT,C2:PARENT})
+    assert add.state is AggregationReconciliationState.RECONCILED
+    event=normalize_aggregation_history_event({"operationType":"DISAGGREGATION","operationDate":"2021-08-10T10:11:01Z"})
+    dis=svc.reconcile_atk_disaggregation(document_status_raw="CHECKED_OK", parent=PARENT, actual_children=(), former_children=(C1,), child_parents={C1:None}, history_events=(event,))
+    assert dis.state is AggregationReconciliationState.RECONCILED
+
+
+def test_m5_aggregation_hardening_requires_relation_readback_and_models_known_effects() -> None:
+    obs=M5AggregationObservation(C1,PARENT,PackageType.BOX,None,relation_read_complete=True,history_semantics=(AggregationHistorySemantic.AUTO_DISAGGREGATION,))
+    result=reconcile_m5_aggregation_side_effect(operation_kind="WITHDRAW_DISTANCE", observations=(obs,))
+    assert result.state is AggregationReconciliationState.RECONCILED
+    missing=M5AggregationObservation(C1,PARENT,PackageType.BOX,PARENT,relation_read_complete=False)
+    assert reconcile_m5_aggregation_side_effect(operation_kind="WITHDRAW_DISTANCE", observations=(missing,)).state is AggregationReconciliationState.RECONCILIATION_PENDING
+    kin=M5AggregationObservation(C1,PARENT,PackageType.SET,PARENT,relation_read_complete=True)
+    assert reconcile_m5_aggregation_side_effect(operation_kind="WRITE_OFF", observations=(kin,)).state is AggregationReconciliationState.MANUAL_REVIEW
+
+
+def test_m5_reconciliation_does_not_accept_checked_ok_when_parent_effect_unreconciled() -> None:
+    svc=OperationReconciliationService()
+    post=TurnoverCisSnapshot(C1,"RETIRED",None,INN,"DISTANCE",fetched_at=NOW,parent=None,package_type="UNIT")
+    pending=svc.reconcile(operation_kind=TurnoverOperationKind.WITHDRAW_DISTANCE, document_status_raw="CHECKED_OK", snapshots=(post,), pre_parent_map={C1:PARENT})
+    assert pending.state is ReconciliationState.PENDING and pending.reason == "AGGREGATION_RECONCILIATION_REQUIRED"
+    obs=M5AggregationObservation(C1,PARENT,PackageType.BOX,None,relation_read_complete=True,history_semantics=(AggregationHistorySemantic.AUTO_DISAGGREGATION,))
+    ok=svc.reconcile(operation_kind=TurnoverOperationKind.WITHDRAW_DISTANCE, document_status_raw="CHECKED_OK", snapshots=(post,), pre_parent_map={C1:PARENT}, aggregation_observations=(obs,))
+    assert ok.state is ReconciliationState.RECONCILED
+
+
+def test_cancel_withdrawal_requires_relation_reread_when_pre_parent_exists() -> None:
+    svc=OperationReconciliationService()
+    restored=TurnoverCisSnapshot(C1,"INTRODUCED",None,INN,None,fetched_at=NOW,parent=PARENT,package_type="UNIT")
+    pending=svc.reconcile(operation_kind=TurnoverOperationKind.CANCEL_WITHDRAWAL, document_status_raw="CHECKED_OK", snapshots=(restored,), expected_restore={C1:("INTRODUCED",None)}, pre_parent_map={C1:PARENT})
+    assert pending.state is ReconciliationState.PENDING
+    obs=M5AggregationObservation(C1,PARENT,PackageType.BOX,PARENT,relation_read_complete=True)
+    ok=svc.reconcile(operation_kind=TurnoverOperationKind.CANCEL_WITHDRAWAL, document_status_raw="CHECKED_OK", snapshots=(restored,), expected_restore={C1:("INTRODUCED",None)}, pre_parent_map={C1:PARENT}, aggregation_observations=(obs,))
+    assert ok.state is ReconciliationState.RECONCILED
