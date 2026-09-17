@@ -283,7 +283,7 @@ def validate_m4_job_payload(job_type: str, payload: Any) -> dict[str, Any]:
 
     if job_type == "DOCUMENT_LIST":
         allowed = {
-            "document_id", "did", "document_type_code", "document_status_code",
+            "document_id", "did", "document_type_code", "document_status_code", "operation",
             "document_format", "date_from", "date_to", "limit", "order", "page",
             "sender_inn", "receiver_inn",
         }
@@ -309,6 +309,10 @@ def validate_m4_job_payload(job_type: str, payload: Any) -> dict[str, Any]:
             normalized["document_type_code"] = normalized_types
         if "document_status_code" in root and root["document_status_code"] is not None:
             normalized["document_status_code"] = _expect_string(root["document_status_code"], "document_status_code")
+        if "operation" in root and root["operation"] is not None:
+            if "document_status_code" in normalized:
+                raise DocumentLifecycleContractError("operation and document_status_code are aliases; provide only one")
+            normalized["document_status_code"] = _expect_string(root["operation"], "operation")
         if "document_format" in root and root["document_format"] is not None:
             fmt = _expect_string(root["document_format"], "document_format").upper()
             if fmt not in {item.value for item in DocumentListFormat}:

@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from wbcz.reference_products import lookup_reference_value, reference_categories, reference_entries
-from wbcz.windows_agent import AgentJobType
+from wbcz.windows_agent import AgentJobType, AgentReplayConflict
 from wbcz.write_pipeline import InvalidWriteOperation
 from wbcz_web.auth import new_csrf_token
 from wbcz_web.repositories import ImportRepository
@@ -21,6 +21,7 @@ from wbcz_web.services import (
 from wbcz_web.services.agent_orchestration import AgentControlService
 from wbcz_web.services.cis_inventory import CisInventoryService, CisInventoryUnavailable
 from wbcz_web.services.reference_products import ReferenceProductsService, ReferenceProductsUnavailable
+from wbcz_web.services.document_lifecycle import DocumentLifecycleService, DocumentLifecycleUnavailable
 from wbcz_web.services.workspace import (
     BulkActionUnavailable,
     bulk_preview,
@@ -45,6 +46,9 @@ from .schemas import (
     ReferenceProductGtinRequest,
     ReferenceRdListRequest,
     ReferenceTnVedRequest,
+    DocumentListRequest,
+    DocumentInfoRequest,
+    DocumentCisesRequest,
 )
 
 router = APIRouter(prefix="/api")
@@ -504,3 +508,73 @@ def reference_registry_lookup(category: str, value: str, identity: Authenticated
         return lookup_reference_value(category, value)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="reference category not found") from exc
+
+
+
+def _document_lifecycle_service(request: Request, db: Session) -> DocumentLifecycleService:
+    try:
+        return DocumentLifecycleService(db, request.app.state.config)
+    except DocumentLifecycleUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/documents/list")
+def document_list(payload: DocumentListRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    body = payload.model_dump(exclude_none=True)
+    operation_id = body.pop("operation_id", None)
+    try:
+        return _document_lifecycle_service(request, db).queue(AgentJobType.DOCUMENT_LIST, body, operation_id=operation_id, user_id=identity.user_id)
+    except AgentReplayConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/documents/info")
+def document_info(payload: DocumentInfoRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    body = payload.model_dump(exclude_none=True)
+    operation_id = body.pop("operation_id", None)
+    try:
+        return _document_lifecycle_service(request, db).queue(AgentJobType.DOCUMENT_INFO, body, operation_id=operation_id, user_id=identity.user_id)
+    except AgentReplayConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/documents/cises")
+def document_cises(payload: DocumentCisesRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _document_lifecycle_service(request, db).queue_cises(
+            document_id=payload.document_id,
+            write_operation_id=payload.write_operation_id,
+            operation_id=payload.operation_id,
+            user_id=identity.user_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="write operation not found") from exc
+    except AgentReplayConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/documents/requests/{request_id}")
+def document_request_status(request_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _document_lifecycle_service(request, db).status(request_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="M4 request not found") from exc
+
+
+@router.get("/documents/ledger/{operation_id}")
+def document_ledger(operation_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _document_lifecycle_service(request, db).ledger(operation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="M4 operation not found") from exc
+
+
+@router.get("/documents/registries")
+def document_registries(identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
+    return DocumentLifecycleService.registries()

@@ -34,6 +34,14 @@ from wbcz.reference_products import (
     parse_reference_success_payload,
     validate_m2_job_payload,
 )
+from wbcz.document_lifecycle import (
+    M4_READ_JOB_TYPES,
+    build_document_read_spec,
+    capture_create_response,
+    is_allowed_document_target,
+    parse_m4_success_payload,
+    validate_m4_job_payload,
+)
 from wbcz.models import Decision, KiState, canonical_json, utc_now
 from wbcz.true_api import normalize_cises
 from wbcz.write_pipeline import (
@@ -108,6 +116,9 @@ class AgentJobType(StrEnum):
     TN_VED_SEARCH = "TN_VED_SEARCH"
     PRODUCT_GTIN_LIST = "PRODUCT_GTIN_LIST"
     RD_LIST = "RD_LIST"
+    DOCUMENT_LIST = "DOCUMENT_LIST"
+    DOCUMENT_INFO = "DOCUMENT_INFO"
+    DOCUMENT_CISES = "DOCUMENT_CISES"
 
 
 class AgentJobState(StrEnum):
@@ -193,6 +204,17 @@ class AgentJob:
                 raise AgentSecurityError(str(exc)) from exc
             if normalized != self.read_payload:
                 raise AgentSecurityError("M2 read_payload must already be canonical")
+        elif self.job_type.value in M4_READ_JOB_TYPES:
+            if self.read_payload is None:
+                raise AgentSecurityError("M4 document read job misses read_payload")
+            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):
+                raise AgentSecurityError("M4 document read job contains P0/write fields")
+            try:
+                normalized = validate_m4_job_payload(self.job_type.value, self.read_payload)
+            except ValueError as exc:
+                raise AgentSecurityError(str(exc)) from exc
+            if normalized != self.read_payload:
+                raise AgentSecurityError("M4 read_payload must already be canonical")
         else:
             raise AgentSecurityError("unsupported agent job type")
 
@@ -219,6 +241,7 @@ class AgentResult:
     error_message: str | None = None
     content_type: str | None = None
     read_result: Any | None = None
+    create_response: dict[str, Any] | None = None
 
     def safe_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -422,6 +445,55 @@ class ProductionAgentTrueApiTransport:
             raise
         except (OSError, http.client.HTTPException) as exc:
             self.audit.record(method=spec.method, endpoint=spec.audit_endpoint, cis_count=0, http_status=None, error=type(exc).__name__)
+            raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def m4_read(self, job_type: str, payload: dict[str, Any], *, bearer_token: str) -> AgentHttpResponse:
+        spec = build_document_read_spec(job_type, payload)
+        if not is_allowed_document_target(spec):
+            raise AgentSecurityError("arbitrary M4 True API document target denied")
+        if not bearer_token:
+            raise AgentSecurityError("True API bearer token is required")
+        headers = {
+            "Accept": "application/json, application/xml, text/xml",
+            "Host": PRODUCTION_HOST,
+            "Connection": "close",
+            "Authorization": "Bearer " + bearer_token,
+        }
+        connection: http.client.HTTPConnection | None = None
+        self.rate_limiter.acquire()
+        try:
+            marker = self.tunnel.session_marker()
+            connection = self._connection_factory("127.0.0.1", self.tunnel.local_port, timeout=self.timeout)
+            connection.putrequest(spec.method, spec.target, skip_host=True)
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            connection.endheaders()
+            response = connection.getresponse()
+            status = int(response.status)
+            raw = response.read()
+            self.tunnel.assert_gost_session(marker)
+            self.audit.record(
+                method=spec.method,
+                endpoint=spec.audit_endpoint,
+                cis_count=0,
+                http_status=status,
+                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+            )
+            return AgentHttpResponse(
+                status=status,
+                body=raw,
+                headers={str(k): str(v) for k, v in response.headers.items()},
+            )
+        except GostTlsUnavailable:
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            self.audit.record(
+                method=spec.method, endpoint=spec.audit_endpoint, cis_count=0,
+                http_status=None, error=type(exc).__name__,
+            )
             raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
         finally:
             if connection is not None:
@@ -737,6 +809,8 @@ class WindowsAgentExecutor:
             return self._m1_read(job)
         if job.job_type.value in M2_READ_JOB_TYPES:
             return self._m2_read(job)
+        if job.job_type.value in M4_READ_JOB_TYPES:
+            return self._m4_read(job)
         if job.job_type is AgentJobType.POLL_DOCUMENT:
             return self._poll(job)
         return self._write(job)
@@ -751,11 +825,12 @@ class WindowsAgentExecutor:
         getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)
         if 200 <= response.status < 300:
             payload = parse_json_bytes(response.body)
-            parsed = (
-                parse_reference_success_payload(job_type, request_payload, payload)
-                if job_type in M2_READ_JOB_TYPES
-                else parse_success_payload(job_type, request_payload, payload)
-            )
+            if job_type in M4_READ_JOB_TYPES:
+                parsed = parse_m4_success_payload(job_type, payload)
+            elif job_type in M2_READ_JOB_TYPES:
+                parsed = parse_reference_success_payload(job_type, request_payload, payload)
+            else:
+                parsed = parse_success_payload(job_type, request_payload, payload)
             return AgentResult(
                 job.job_id,
                 job.operation_id,
@@ -833,6 +908,14 @@ class WindowsAgentExecutor:
         response = self.transport.m2_read(job.job_type.value, job.read_payload, bearer_token=bearer)
         return self._read_response(job, response, job_type=job.job_type.value, request_payload=job.read_payload)
 
+    def _m4_read(self, job: AgentJob) -> AgentResult:
+        assert job.read_payload is not None
+        bearer = self.session_manager.bearer_token()
+        response = self.transport.m4_read(job.job_type.value, job.read_payload, bearer_token=bearer)
+        return self._read_response(
+            job, response, job_type=job.job_type.value, request_payload=job.read_payload
+        )
+
     def _cis_check(self, job: AgentJob) -> AgentResult:
         try:
             payload = self.transport.cises_info(job.cises, bearer_token=self.session_manager.bearer_token())
@@ -880,6 +963,10 @@ class WindowsAgentExecutor:
         )
         getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)
         body_sha = hashlib.sha256(response.body).hexdigest()
+        create_capture = (
+            capture_create_response(response.status, response.headers, response.body)
+            if response.status in (200, 201) else None
+        )
         if response.status in (200, 201):
             document_id = self.create_id_parser.parse_document_id(response)
             if document_id:
@@ -913,6 +1000,7 @@ class WindowsAgentExecutor:
             create_category=category,
             document_id=document_id,
             body_sha256=body_sha,
+            create_response=asdict(create_capture) if create_capture is not None else None,
             **metadata,
         )
         self._write_replay[job.operation_id] = (job.document_sha256, result)

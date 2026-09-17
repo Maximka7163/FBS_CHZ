@@ -200,6 +200,9 @@ class AgentOrchestrationBroker:
         elif metadata.purpose == "REFERENCE_PRODUCTS":
             # M2 is read-only; typed/sanitized results are already durable.
             pass
+        elif metadata.purpose == "DOCUMENT_LIFECYCLE":
+            # M4 is read-only; result/ledger persistence has no business mutation.
+            pass
         else:
             raise AgentReplayConflict("unknown agent job purpose")
         self.db.flush()
