@@ -59,3 +59,7 @@ The textual status «Сформирован» has no confirmed current raw enum;
 Production write remains default-off. All M6 writes use the existing exact-byte M3/M4 path: server builds approved JSON bytes, Windows signs those exact bytes and performs GOST transport. Private key, PIN and True API bearer remain Windows-side. No direct VPS True API transport is introduced.
 
 M7 remains deferred: UPD/EDO ownership transfer, seller/buyer EDO titles, aggregate shipment via EDO, EDO correction/cancellation. M8 remains deferred: SUZ ordering, marking-code issuance, application reports, code pools, KIN/KIK code generation/emission. M6 assumes required pre-existing codes where the official contract does.
+
+## Final fail-closed safeguards
+
+Formation rejects a child repeated under multiple parents in one document. Dedicated lp KIN validation enforces participant ownership, lp product group, an un-nested child relation and a plain APPLIED parent before mutation. KITU formation treats a discovered pre-existing parent identifier as a uniqueness conflict and mixed-PG validation requires the actual child product group rather than defaulting unknown data. ATK transformation validates the parent as FOREIGN/APPLIED and requires child product group and TN VED prefix compatibility with that parent. Removing the last child is reconciled as automatic disaggregation and requires the current graph, an auto-disaggregation history event and parent state readback. AUTO_DISAGGREGATION remains event/reconciliation-only and never submits a second mutation.

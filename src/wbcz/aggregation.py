@@ -210,6 +210,9 @@ class AggregationDocument:
         types = {x["unitSerialNumberType"] for x in wires}
         if len(lengths) != 1 or len(types) != 1:
             raise AggregationContractError("parents in one document must share code length and package type")
+        all_children = [child for unit in wires for child in unit["sntins"]]
+        if len(set(all_children)) != len(all_children):
+            raise AggregationContractError("a direct child may occur only once in an aggregation document")
         return {"participantId": _inn(self.participant_id, "participantId"), "aggregationUnits": wires}
 
 
@@ -340,9 +343,16 @@ class SetCompositionRequirement:
     published: bool = True
 
 
-def validate_set_preconditions(*, parent: CisAggregationSnapshot, children: Sequence[CisAggregationSnapshot], composition: SetCompositionRequirement) -> None:
+def validate_set_preconditions(*, parent: CisAggregationSnapshot, children: Sequence[CisAggregationSnapshot], composition: SetCompositionRequirement, participant_inn: str) -> None:
+    owner = _inn(participant_inn, "participant_inn")
     if parent.package_type is not PackageType.SET:
         raise AggregationContractError("FORM_SET requires SET parent")
+    if parent.product_group != M6_PG:
+        raise AggregationManualReview("KIN_PARENT_PRODUCT_GROUP_MUST_BE_LP")
+    if parent.owner_inn != owner:
+        raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")
+    if parent.status_ex_raw not in (None, ""):
+        raise AggregationManualReview("KIN_PARENT_SPECIAL_STATE_NOT_ALLOWED")
     if not composition.published:
         raise AggregationManualReview("SET_PRODUCT_CARD_NOT_PUBLISHED")
     if not children:
@@ -350,6 +360,12 @@ def validate_set_preconditions(*, parent: CisAggregationSnapshot, children: Sequ
     for child in children:
         if child.package_type not in {PackageType.UNIT, PackageType.BUNDLE}:
             raise AggregationContractError("KIN accepts only UNIT/BUNDLE")
+        if child.product_group != M6_PG:
+            raise AggregationManualReview("KIN_CHILD_PRODUCT_GROUP_MUST_BE_LP")
+        if child.owner_inn != owner:
+            raise AggregationManualReview("LEGACY_NON_OWNER_FLOW_NOT_ENABLED")
+        if child.parent not in (None, ""):
+            raise AggregationManualReview("KIN_CHILD_ALREADY_AGGREGATED")
     statuses = {x.status_raw for x in children}
     if len(statuses) != 1 or statuses.pop() not in {"APPLIED", "INTRODUCED"}:
         raise AggregationManualReview("KIN_CHILD_STATUS_NOT_SUPPORTED")
@@ -386,6 +402,8 @@ def validate_set_preconditions(*, parent: CisAggregationSnapshot, children: Sequ
 
 def validate_box_preconditions(*, parent: CisAggregationSnapshot | None, children: Sequence[CisAggregationSnapshot], participant_inn: str, leading_pg: str = M6_PG, mixed_pg: bool = False) -> None:
     owner = _inn(participant_inn, "participant_inn")
+    if parent is not None:
+        raise AggregationManualReview("KITU_PARENT_IDENTIFIER_ALREADY_PRESENT_IN_CRPT")
     if not children:
         raise AggregationContractError("KITU children required")
     statuses = {x.status_raw for x in children}
@@ -403,6 +421,8 @@ def validate_box_preconditions(*, parent: CisAggregationSnapshot | None, childre
             raise AggregationManualReview("CHILD_ALREADY_AGGREGATED")
         if child.package_type is None:
             raise AggregationManualReview("UNKNOWN_RAW_PACKAGE_TYPE")
+        if mixed_pg and not child.product_group:
+            raise AggregationManualReview("KITU_CHILD_PRODUCT_GROUP_REQUIRED")
         validate_lp_relation(PackageType.BOX, child.package_type, child_pg=child.product_group or M6_PG, mixed_pg=mixed_pg)
     if status == "APPLIED" and len({x.emission_type for x in children}) != 1:
         raise AggregationManualReview("KITU_APPLIED_EMISSION_MISMATCH")
@@ -519,7 +539,7 @@ def validate_atk_preconditions(*, role: str, participant_inn: str, children: Seq
     if not children:
         raise AggregationContractError("ATK children required")
     pgs = {x.product_group for x in children}
-    if len(pgs) != 1:
+    if len(pgs) != 1 or None in pgs or "" in pgs:
         raise AggregationManualReview("ATK_SINGLE_PRODUCT_GROUP_REQUIRED")
     prefixes: set[str] = set()
     for child in children:
@@ -545,6 +565,8 @@ def validate_atk_transformation_preconditions(
     owner = _inn(participant_inn, "participant_inn")
     if parent.package_type is not PackageType.ATK or parent.owner_inn != owner or parent.status_raw != "APPLIED":
         raise AggregationManualReview("ATK_PARENT_PRECONDITION_FAILED")
+    if parent.emission_type != "FOREIGN" or not parent.product_group or not parent.tnved or len(parent.tnved) < 4:
+        raise AggregationManualReview("ATK_PARENT_FOREIGN_PG_TNVED_REQUIRED")
     if parent.status_ex_raw not in (None, "", "FTS_RESPOND_NOT_OK"):
         raise AggregationManualReview("ATK_PARENT_STATUS_EX_NOT_ALLOWED")
     if transformation_type not in {"ADDING", "REMOVING"}:
@@ -561,8 +583,10 @@ def validate_atk_transformation_preconditions(
             raise AggregationManualReview("ATK_REMOVE_CHILD_NOT_IN_PARENT")
         assert child.tnved is not None
         prefixes.add(child.tnved[:4])
-    if len(pgs) != 1 or len(prefixes) != 1:
+    if len(pgs) != 1 or None in pgs or "" in pgs or len(prefixes) != 1:
         raise AggregationManualReview("ATK_SINGLE_PG_TNVED_REQUIRED")
+    if next(iter(pgs)) != parent.product_group or next(iter(prefixes)) != parent.tnved[:4]:
+        raise AggregationManualReview("ATK_CHILDREN_MUST_MATCH_PARENT_PG_TNVED")
 
 
 def validate_atk_disaggregation_preconditions(*, role: str, participant_inn: str, parents: Sequence[CisAggregationSnapshot]) -> None:
@@ -577,6 +601,8 @@ def validate_atk_disaggregation_preconditions(*, role: str, participant_inn: str
             raise AggregationManualReview("ATK_PARENT_PRECONDITION_FAILED")
         if parent.status_ex_raw not in (None, "", "FTS_RESPOND_NOT_OK", "FTS_CONTROL"):
             raise AggregationManualReview("ATK_DISAGGREGATION_STATUS_EX_NOT_ALLOWED")
+        if not parent.product_group:
+            raise AggregationManualReview("ATK_DISAGGREGATION_PRODUCT_GROUP_REQUIRED")
         pgs.add(parent.product_group)
     if len(pgs) != 1:
         raise AggregationManualReview("ATK_DISAGGREGATION_SINGLE_PG_REQUIRED")
@@ -751,7 +777,11 @@ class AggregationReconciliationService:
         elif operation is AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE:
             remaining_ok = child_parents is not None and all(child_parents.get(c) == expected_parent for c in expected)
             removed_ok = child_parents is not None and all(child_parents.get(c) != expected_parent for c in removed)
-            if actual == expected and not (removed & actual) and remaining_ok and removed_ok:
+            if not expected:
+                history_ok = any(x.semantic is AggregationHistorySemantic.AUTO_DISAGGREGATION for x in history_events)
+                if not actual and removed_ok and history_ok and parent_status_raw_observed is not None:
+                    return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "REMOVE_ALL_AUTO_DISAGGREGATION_CONFIRMED", expected_parent)
+            elif actual == expected and not (removed & actual) and remaining_ok and removed_ok:
                 return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "REMOVE_RELATION_CONFIRMED", expected_parent)
         elif operation is AggregationOperationKind.DISAGGREGATE_PACKAGE:
             history_ok = any(x.semantic in {AggregationHistorySemantic.DISAGGREGATION, AggregationHistorySemantic.AUTO_DISAGGREGATION} for x in history_events)
@@ -759,6 +789,15 @@ class AggregationReconciliationService:
             if not actual and parents_clear and history_ok and parent_status_raw_observed is not None:
                 return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "DISAGGREGATION_RELATION_HISTORY_STATE_READBACK_CONFIRMED", expected_parent)
         return AggregationReconciliationResult(AggregationReconciliationState.MANUAL_REVIEW, "RELATION_STATE_MISMATCH", expected_parent)
+
+    def reconcile_auto_disaggregation(self, *, parent: str, former_children: Sequence[str], actual_children: Sequence[str], child_parents: Mapping[str, str | None], history_events: Sequence[AggregationHistoryEvent]) -> AggregationReconciliationResult:
+        history_ok = any(x.semantic is AggregationHistorySemantic.AUTO_DISAGGREGATION for x in history_events)
+        relations_clear = not actual_children and all(child_parents.get(c) != parent for c in former_children)
+        if relations_clear and history_ok:
+            return AggregationReconciliationResult(AggregationReconciliationState.RECONCILED, "AUTO_DISAGGREGATION_GRAPH_AND_HISTORY_CONFIRMED", parent)
+        if not history_events:
+            return AggregationReconciliationResult(AggregationReconciliationState.RECONCILIATION_PENDING, "AUTO_DISAGGREGATION_HISTORY_PENDING", parent)
+        return AggregationReconciliationResult(AggregationReconciliationState.MANUAL_REVIEW, "AUTO_DISAGGREGATION_MISMATCH", parent)
 
     def reconcile_atk_formation(self, *, document_status_raw: str | None, submitted_children: Sequence[str], child_parents: Mapping[str, str | None], parent_package_types: Mapping[str, str | None], parent_children: Mapping[str, Sequence[str]]) -> AggregationReconciliationResult:
         if document_status_raw != "CHECKED_OK":

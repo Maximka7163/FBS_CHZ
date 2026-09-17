@@ -73,19 +73,19 @@ def test_set_document_exact_wire_and_preconditions_applied_and_introduced() -> N
     wire = SetsAggregationDocument(INN, (SetAggregationUnit(PARENT, (C1, C2)),)).to_wire()
     assert wire == {"participantId": INN, "aggregationUnits": [{"unitSerialNumber": PARENT, "sntins": [C1, C2]}]}
     parent = snap(PARENT, PackageType.SET, status="APPLIED", emission="LOCAL")
-    validate_set_preconditions(parent=parent, children=(snap(C1), snap(C2)), composition=SetCompositionRequirement(gtin_quantities={"04601234567890": 2}))
+    validate_set_preconditions(parent=parent, children=(snap(C1), snap(C2)), composition=SetCompositionRequirement(gtin_quantities={"04601234567890": 2}), participant_inn=INN)
     introduced = (snap(C1, status="INTRODUCED", emission="FOREIGN"), snap(C2, status="INTRODUCED", emission="LOCAL"))
-    validate_set_preconditions(parent=parent, children=introduced, composition=SetCompositionRequirement(marked_products_quantity_in_set=2))
+    validate_set_preconditions(parent=parent, children=introduced, composition=SetCompositionRequirement(marked_products_quantity_in_set=2), participant_inn=INN)
 
 
 def test_set_rejects_invalid_children_remark_reapply_and_composition_mismatch() -> None:
     parent = snap(PARENT, PackageType.SET, status="APPLIED", emission="LOCAL")
     with pytest.raises(AggregationContractError):
-        validate_set_preconditions(parent=parent, children=(snap(C1, PackageType.BOX),), composition=SetCompositionRequirement(marked_products_quantity_in_set=1))
+        validate_set_preconditions(parent=parent, children=(snap(C1, PackageType.BOX),), composition=SetCompositionRequirement(marked_products_quantity_in_set=1), participant_inn=INN)
     with pytest.raises(AggregationManualReview, match="REMARK_REAPPLY"):
-        validate_set_preconditions(parent=snap(PARENT, PackageType.SET, emission="REMARK"), children=(snap(C1, emission="REMARK"),), composition=SetCompositionRequirement(marked_products_quantity_in_set=1))
+        validate_set_preconditions(parent=snap(PARENT, PackageType.SET, emission="REMARK"), children=(snap(C1, emission="REMARK"),), composition=SetCompositionRequirement(marked_products_quantity_in_set=1), participant_inn=INN)
     with pytest.raises(AggregationManualReview, match="QUANTITY"):
-        validate_set_preconditions(parent=parent, children=(snap(C1),), composition=SetCompositionRequirement(marked_products_quantity_in_set=2))
+        validate_set_preconditions(parent=parent, children=(snap(C1),), composition=SetCompositionRequirement(marked_products_quantity_in_set=2), participant_inn=INN)
 
 
 def test_box_preconditions_nested_box_mixed_pg_leading_rule_owner_status_ex() -> None:
@@ -286,3 +286,59 @@ def test_cancel_withdrawal_requires_relation_reread_when_pre_parent_exists() -> 
     obs=M5AggregationObservation(C1,PARENT,PackageType.BOX,PARENT,relation_read_complete=True)
     ok=svc.reconcile(operation_kind=TurnoverOperationKind.CANCEL_WITHDRAWAL, document_status_raw="CHECKED_OK", snapshots=(restored,), expected_restore={C1:("INTRODUCED",None)}, pre_parent_map={C1:PARENT}, aggregation_observations=(obs,))
     assert ok.state is ReconciliationState.RECONCILED
+
+
+def test_aggregation_document_rejects_same_child_under_two_parents() -> None:
+    parent2 = "010123456789012321PARENT2"
+    doc=AggregationDocument(INN,(AggregationUnit(PARENT,UnitSerialNumberType.BOX,(C1,)),AggregationUnit(parent2,UnitSerialNumberType.BOX,(C1,))))
+    with pytest.raises(AggregationContractError, match="only once"):
+        doc.to_wire()
+
+
+def test_set_owner_parent_relation_and_product_group_fail_closed() -> None:
+    composition=SetCompositionRequirement(marked_products_quantity_in_set=1)
+    parent=snap(PARENT,PackageType.SET,status="APPLIED",emission="LOCAL")
+    with pytest.raises(AggregationManualReview, match="NON_OWNER"):
+        validate_set_preconditions(parent=parent,children=(snap(C1,owner="9999999999"),),composition=composition,participant_inn=INN)
+    with pytest.raises(AggregationManualReview, match="ALREADY_AGGREGATED"):
+        validate_set_preconditions(parent=parent,children=(snap(C1,parent=C2),),composition=composition,participant_inn=INN)
+    with pytest.raises(AggregationManualReview, match="PRODUCT_GROUP"):
+        validate_set_preconditions(parent=parent,children=(snap(C1,pg="milk"),),composition=composition,participant_inn=INN)
+
+
+def test_kitu_parent_uniqueness_and_mixed_pg_requires_actual_pg() -> None:
+    with pytest.raises(AggregationManualReview, match="ALREADY_PRESENT"):
+        validate_box_preconditions(parent=snap(PARENT,PackageType.BOX),children=(snap(C1),),participant_inn=INN)
+    missing_pg=snap(C1,pg=None)
+    with pytest.raises(AggregationManualReview, match="PRODUCT_GROUP_REQUIRED"):
+        validate_box_preconditions(parent=None,children=(missing_pg,),participant_inn=INN,mixed_pg=True,leading_pg="lp")
+
+
+def test_atk_transformation_matches_parent_pg_tnved_and_foreign() -> None:
+    parent=snap(PARENT,PackageType.ATK,status="APPLIED",emission="FOREIGN",tnved="6204430000")
+    child=snap(C1,PackageType.UNIT,status="APPLIED",emission="FOREIGN",parent=PARENT,tnved="6204990000")
+    validate_atk_transformation_preconditions(role="IMPORTER",participant_inn=INN,parent=parent,children=(child,),transformation_type="REMOVING")
+    with pytest.raises(AggregationManualReview, match="MATCH_PARENT"):
+        validate_atk_transformation_preconditions(role="IMPORTER",participant_inn=INN,parent=parent,children=(snap(C1,PackageType.UNIT,status="APPLIED",emission="FOREIGN",parent=PARENT,pg="milk",tnved="0401000000"),),transformation_type="REMOVING")
+    with pytest.raises(AggregationManualReview, match="FOREIGN_PG_TNVED"):
+        validate_atk_transformation_preconditions(role="IMPORTER",participant_inn=INN,parent=snap(PARENT,PackageType.ATK,status="APPLIED",emission="LOCAL"),children=(child,),transformation_type="REMOVING")
+
+
+def test_remove_all_requires_auto_disaggregation_history_and_parent_state_readback() -> None:
+    svc=AggregationReconciliationService()
+    no_history=svc.reconcile_relation(operation=AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE,document_status_raw="CHECKED_OK",expected_parent=PARENT,expected_children=(),actual_children=(),removed_children=(C1,),child_parents={C1:None},parent_status_raw_observed="RUNTIME_STATE")
+    assert no_history.state is AggregationReconciliationState.MANUAL_REVIEW
+    event=normalize_aggregation_history_event({"operationType":"AUTODISAGGREGATED","operationDate":"2021-08-10T10:11:01Z"})
+    no_state=svc.reconcile_relation(operation=AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE,document_status_raw="CHECKED_OK",expected_parent=PARENT,expected_children=(),actual_children=(),removed_children=(C1,),child_parents={C1:None},history_events=(event,))
+    assert no_state.state is AggregationReconciliationState.MANUAL_REVIEW
+    ok=svc.reconcile_relation(operation=AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE,document_status_raw="CHECKED_OK",expected_parent=PARENT,expected_children=(),actual_children=(),removed_children=(C1,),child_parents={C1:None},history_events=(event,),parent_status_raw_observed="RUNTIME_STATE")
+    assert ok.state is AggregationReconciliationState.RECONCILED
+
+
+def test_auto_disaggregation_event_reconciliation_never_synthesizes_success() -> None:
+    svc=AggregationReconciliationService()
+    pending=svc.reconcile_auto_disaggregation(parent=PARENT,former_children=(C1,),actual_children=(),child_parents={C1:None},history_events=())
+    assert pending.state is AggregationReconciliationState.RECONCILIATION_PENDING
+    event=normalize_aggregation_history_event({"operationType":"AUTODISAGGREGATION","operationDate":"2021-08-10 10:11:01"})
+    ok=svc.reconcile_auto_disaggregation(parent=PARENT,former_children=(C1,),actual_children=(),child_parents={C1:None},history_events=(event,))
+    assert ok.state is AggregationReconciliationState.RECONCILED
