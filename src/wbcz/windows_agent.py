@@ -43,6 +43,7 @@ from wbcz.document_lifecycle import (
     validate_m4_job_payload,
 )
 from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES
+from wbcz.aggregation import M6_DOCUMENT_TYPES
 from wbcz.models import Decision, KiState, canonical_json, utc_now
 from wbcz.true_api import normalize_cises
 from wbcz.write_pipeline import (
@@ -113,6 +114,13 @@ class AgentJobType(StrEnum):
     LK_REMARK = "LK_REMARK"
     WRITE_OFF = "WRITE_OFF"
     LK_RECEIPT_CANCEL = "LK_RECEIPT_CANCEL"
+    AGGREGATION_DOCUMENT = "AGGREGATION_DOCUMENT"
+    SETS_AGGREGATION = "SETS_AGGREGATION"
+    REAGGREGATION_DOCUMENT = "REAGGREGATION_DOCUMENT"
+    DISAGGREGATION_DOCUMENT = "DISAGGREGATION_DOCUMENT"
+    ATK_AGGREGATION = "ATK_AGGREGATION"
+    ATK_TRANSFORMATION = "ATK_TRANSFORMATION"
+    ATK_DISAGGREGATION = "ATK_DISAGGREGATION"
     POLL_DOCUMENT = "POLL_DOCUMENT"
     CIS_INFO = "CIS_INFO"
     CIS_SEARCH = "CIS_SEARCH"
@@ -158,11 +166,11 @@ class AgentJob:
             raise AgentSecurityError("P0 agent allows only pg=lp")
         if not self.expected_inn:
             raise AgentSecurityError("expected_inn is required")
-        if self.job_type.value in M5_AGENT_WRITE_JOB_TYPES:
+        if self.job_type.value in (M5_AGENT_WRITE_JOB_TYPES | M6_DOCUMENT_TYPES):
             expected_type = self.job_type.value
             if self.document_type != expected_type:
                 raise AgentSecurityError("job/document type mismatch")
-            if self.document_type not in M5_DOCUMENT_TYPES:
+            if self.document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):
                 raise AgentSecurityError("unsupported document type")
             if not self.document_sha256 or not self.product_document_base64:
                 raise AgentSecurityError("write job misses immutable document fields")
@@ -517,7 +525,7 @@ class ProductionAgentTrueApiTransport:
         signature_base64: str,
         bearer_token: str,
     ) -> AgentHttpResponse:
-        if document_type not in M5_DOCUMENT_TYPES:
+        if document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):
             raise AgentSecurityError("unsupported document type")
         if not bearer_token:
             raise AgentSecurityError("True API bearer token is required")
@@ -665,7 +673,7 @@ class WindowsCryptoProDocumentSigner:
     ) -> tuple[str, dict[str, Any]]:
         if not operation_id:
             raise AgentSecurityError("operation_id is required")
-        if document_type not in M5_DOCUMENT_TYPES:
+        if document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):
             raise AgentSecurityError("unsupported document type")
         if pg != P0_PG:
             raise AgentSecurityError("document signing allows only pg=lp")
