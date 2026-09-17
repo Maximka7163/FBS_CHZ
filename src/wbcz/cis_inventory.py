@@ -696,6 +696,7 @@ def parse_json_bytes(raw: bytes) -> Any:
 def _redact_secret_text(value: str) -> str:
     text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+\-/]+=*", "Bearer [REDACTED]", value)
     text = re.sub(r"(?i)(token|pin)\s*[:=]\s*\S+", r"\1=[REDACTED]", text)
+    text = re.sub(r"(?is)(<\s*(?:uuidtoken|token|pin)\b[^>]*>).*?(</\s*(?:uuidtoken|token|pin)\s*>)", r"\1[REDACTED]\2", text)
     return text
 
 

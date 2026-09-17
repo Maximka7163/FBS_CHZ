@@ -58,6 +58,7 @@ from wbcz_ui.live_true_api import (
     TrueApiAuthenticator,
     TrueApiCisesInfoAdapter,
     TrueApiError,
+    TrueApiHttpError,
     TrueApiProtocolError,
     WindowsCryptoProCertificateInspector,
     _find_cryptopro_binary,
@@ -590,6 +591,12 @@ class WindowsCryptoProDocumentSigner:
             raise AgentSecurityError("expected_inn mismatch")
         if hashlib.sha256(payload).hexdigest() != document_sha256:
             raise AgentSecurityError("document hash mismatch")
+        try:
+            parsed_document = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentSecurityError("document bytes are not UTF-8 JSON") from exc
+        if not isinstance(parsed_document, dict):
+            raise AgentSecurityError("document JSON root must be an object")
         cert = self.inspector.inspect()
         with tempfile.TemporaryDirectory(prefix="wbcz-doc-") as directory:
             temp = Path(directory)
@@ -644,7 +651,7 @@ class WindowsCryptoProDocumentSigner:
 
 
 class AgentSessionManager:
-    """Keeps the True API UUID bearer only in Windows process memory."""
+    """Memory-only UUID session; expiry/401 causes full re-auth, never refresh."""
 
     def __init__(
         self,
@@ -658,14 +665,19 @@ class AgentSessionManager:
         self._now = now
         self._session: AuthSession | None = None
 
+    def invalidate(self) -> None:
+        self._session = None
+
+    def observe_http_status(self, status: int | None) -> None:
+        if status == 401:
+            self.invalidate()
+
     def bearer_token(self) -> str:
         now = self._now().astimezone(timezone.utc)
-        if (
-            self._session is None
-            or self._session.expire_date <= now + self.refresh_margin
-        ):
+        if self._session is None or self._session.expire_date <= now + self.refresh_margin:
+            self._session = None
             self._session = self.authenticator.authenticate()
-        return self._session.bearer_token
+        return self._session.uuid_token
 
     @property
     def expire_date(self) -> datetime | None:
@@ -736,6 +748,7 @@ class WindowsAgentExecutor:
     def _read_response(self, job: AgentJob, response: AgentHttpResponse, *, job_type: str, request_payload: dict[str, Any]) -> AgentResult:
         body_sha = hashlib.sha256(response.body).hexdigest()
         content_type = self._content_type(response.headers)
+        self.session_manager.observe_http_status(response.status)
         if 200 <= response.status < 300:
             payload = parse_json_bytes(response.body)
             parsed = (
@@ -784,6 +797,7 @@ class WindowsAgentExecutor:
                 product_response = self.transport.m1_read("PRODUCT_INFO", product_payload, bearer_token=bearer)
                 product_http_status = product_response.status
                 product_body_sha256 = hashlib.sha256(product_response.body).hexdigest()
+                self.session_manager.observe_http_status(product_response.status)
                 if not 200 <= product_response.status < 300:
                     safe = safe_transport_error(product_response.status, product_response.headers, product_response.body)
                     return AgentResult(
@@ -820,9 +834,11 @@ class WindowsAgentExecutor:
         return self._read_response(job, response, job_type=job.job_type.value, request_payload=job.read_payload)
 
     def _cis_check(self, job: AgentJob) -> AgentResult:
-        payload = self.transport.cises_info(
-            job.cises, bearer_token=self.session_manager.bearer_token()
-        )
+        try:
+            payload = self.transport.cises_info(job.cises, bearer_token=self.session_manager.bearer_token())
+        except TrueApiHttpError as exc:
+            self.session_manager.observe_http_status(exc.status)
+            raise
         if isinstance(payload, dict) and isinstance(payload.get("results"), list):
             items = payload["results"]
         elif isinstance(payload, list):
@@ -862,6 +878,7 @@ class WindowsAgentExecutor:
             signature_base64=signature,
             bearer_token=self.session_manager.bearer_token(),
         )
+        self.session_manager.observe_http_status(response.status)
         body_sha = hashlib.sha256(response.body).hexdigest()
         if response.status in (200, 201):
             document_id = self.create_id_parser.parse_document_id(response)
@@ -906,6 +923,7 @@ class WindowsAgentExecutor:
         response = self.transport.poll_document(
             job.document_id, bearer_token=self.session_manager.bearer_token()
         )
+        self.session_manager.observe_http_status(response.status)
         body_sha = hashlib.sha256(response.body).hexdigest()
         if response.status != 200:
             return AgentResult(

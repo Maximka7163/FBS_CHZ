@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any, Callable, Iterable, Protocol
 
+from wbcz.cis_inventory import safe_transport_error
 from wbcz.models import KiState
 from wbcz.true_api import TrueApiError
 
@@ -55,9 +56,12 @@ class TrueApiProtocolError(TrueApiError):
 
 
 class TrueApiHttpError(TrueApiError):
-    def __init__(self, status: int | None, message: str) -> None:
+    def __init__(self, status: int | None, message: str, *, content_type: str | None = None, body_sha256: str | None = None, safe_error_code: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.content_type = content_type
+        self.body_sha256 = body_sha256
+        self.safe_error_code = safe_error_code
 
 
 class GostTlsUnavailable(TrueApiError):
@@ -161,8 +165,13 @@ class LiveReadOnlyConfig:
 
 @dataclass(frozen=True, slots=True)
 class AuthSession:
-    bearer_token: str
+    """Windows-memory UUID session; legacy token is never used as bearer."""
+    uuid_token: str
     expire_date: datetime
+
+    @property
+    def bearer_token(self) -> str:
+        return self.uuid_token
 
 
 class JsonlLiveAudit:
@@ -520,10 +529,8 @@ class ReadOnlyTrueApiTransport:
                 request_id=request_id,
             )
             if not 200 <= status < 300:
-                text = raw[:4096].decode("utf-8", errors="replace")
-                raise TrueApiHttpError(
-                    status, f"True API HTTP {status}: {text[:500]}"
-                )
+                safe = safe_transport_error(status, {str(k): str(v) for k, v in response_headers.items()}, raw)
+                raise TrueApiHttpError(status, safe.safe_error_message or f"True API HTTP {status}", content_type=safe.content_type, body_sha256=safe.body_sha256, safe_error_code=safe.safe_error_code)
         except ProductionMutationDisabled:
             raise
         except TrueApiError:
@@ -863,13 +870,11 @@ class TrueApiAuthenticator:
             )
         try:
             expire_date = datetime.fromisoformat(expire.replace("Z", "+00:00"))
-            if expire_date.tzinfo is None:
-                expire_date = expire_date.replace(tzinfo=timezone.utc)
         except ValueError as exc:
-            raise TrueApiProtocolError(
-                "Invalid expireDate in authentication response"
-            ) from exc
-        return AuthSession(token, expire_date.astimezone(timezone.utc))
+            raise TrueApiProtocolError("Invalid expireDate in authentication response") from exc
+        if expire_date.tzinfo is None or expire_date.utcoffset() is None:
+            raise TrueApiProtocolError("expireDate must include an explicit timezone")
+        return AuthSession(uuid_token=token, expire_date=expire_date.astimezone(timezone.utc))
 
 
 class TrueApiCisesInfoAdapter:
