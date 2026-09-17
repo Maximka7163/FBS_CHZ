@@ -84,7 +84,7 @@ All WB mutation capabilities are disabled with `M9_READ_ONLY_SCOPE`. There is no
 
 ## Rate limits
 
-Rate limiting is keyed by endpoint family and token type; there is no global WB limiter.
+Rate limiting is enforced inside the typed outbound transport before every adapter call. It is keyed by endpoint family, token type and credential `secret_ref`; denied admission never reaches the HTTP adapter. There is no single global WB limiter.
 
 Marketplace FBS production:
 - 300/minute
@@ -153,7 +153,10 @@ Request contract represented locally:
 
 The current-order source is treated as recent-domain evidence, not infinite history.
 
-Archive uses `GET /api/marketplace/v3/fbs/orders/archive`:
+Archive uses production `GET /api/marketplace/v3/fbs/orders/archive`:
+- production support: YES
+- sandbox support: NOT_DOCUMENTED / DISABLED
+- no archive call is mapped to the Marketplace sandbox host
 - year required
 - month 1..12
 - initial `next=0`
@@ -252,7 +255,11 @@ Metadata read is:
 The current surface is `metaDetails`. Deprecated legacy `meta` is not required and never controls a business decision.
 
 Because the nested `metaDetails` SGTIN contract is not fully pinned:
-- exact/sanitized raw metadata is preserved
+- `metaDetails` mappings, lists, tuples and arbitrary nested combinations are recursively sanitized
+- direct marking fields such as `sgtin`, `cis`, `kiz`, `markingCode` are redacted
+- discriminator-style metadata such as `{key/type: sgtin, value/values/data/...}` redacts the associated marking payload
+- non-sensitive unknown metadata remains preserved
+- exact marking values are routed only to encrypted marking evidence storage, never `raw_sanitized`
 - unknown statuses/decisions are preserved
 - `WB_API_SGTIN_AUTOBIND_ENABLED=false`
 
