@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0005_m4_document_lifecycle_read_jobs"
+revision = "0005_m4_documents"
 down_revision = "0004_m2_reference_products"
 branch_labels = None
 depends_on = None
