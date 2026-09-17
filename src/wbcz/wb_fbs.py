@@ -106,6 +106,7 @@ class WbConnection:
     secret_ref: str
     token_type: WbTokenType
     token_categories: tuple[WbTokenCategory, ...]
+    token_scopes: tuple[str, ...] = ()
     wb_sid: str | None = None
     wb_tin: str | None = None
     token_expires_at: datetime | None = None
@@ -450,13 +451,26 @@ class WbRateLimiter:
         return 10 if environment is WbEnvironment.PRODUCTION and family == "MARKETPLACE_FBS" and 400 <= status_code <= 499 else 1
 
 
-SENSITIVE_KEYS = frozenset({"authorization", "token", "secret", "sgtin", "cis", "kiz", "marking", "marking_code", "signature", "pin", "private_key"})
+SENSITIVE_KEYS = frozenset({"authorization", "token", "apitoken", "clienttoken", "rawtoken", "secret", "sgtin", "cis", "kiz", "marking", "markingcode", "signature", "pin", "privatekey", "fullmarking"})
+
+
+def _sensitive_key(key: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]", "", key.lower())
+    return (
+        compact in SENSITIVE_KEYS
+        or compact.startswith("sgtin")
+        or compact.startswith("kiz")
+        or compact.startswith("marking")
+        or compact.startswith("cis")
+        or compact.endswith("token")
+        or compact.endswith("secret")
+    )
 
 
 def redact_mapping(value: Mapping[str, object]) -> dict[str, object]:
     out: dict[str, object] = {}
     for key, item in value.items():
-        if key.lower() in SENSITIVE_KEYS:
+        if _sensitive_key(key):
             out[key] = "REDACTED"
         elif isinstance(item, Mapping):
             out[key] = redact_mapping(item)
@@ -1117,3 +1131,92 @@ def compare_assembly_evidence(existing: AssemblyOrderEvidence, incoming: Assembl
     if existing.fingerprint == incoming.fingerprint:
         return AssemblyEvidenceMergeState.DUPLICATE
     return AssemblyEvidenceMergeState.EVIDENCE_CONFLICT
+
+
+class WbSyncFeed(str, Enum):
+    FBS_CURRENT = "FBS_CURRENT"
+    FBS_ARCHIVE = "FBS_ARCHIVE"
+    ORDER_FEED = "ORDER_FEED"
+    METADATA = "METADATA"
+    GOODS_RETURN = "GOODS_RETURN"
+    SUPPLIER_SALES_COMPAT = "SUPPLIER_SALES_COMPAT"
+
+
+@dataclass(frozen=True, slots=True)
+class FirstRunBackfillPolicy:
+    current_horizon_days: int
+    order_feed_horizon_days: int
+    goods_return_horizon_days: int
+    supplier_sales_horizon_days: int
+    archive_start_year: int | None = None
+    archive_start_month: int | None = None
+
+    def validate(self) -> None:
+        values = (
+            self.current_horizon_days,
+            self.order_feed_horizon_days,
+            self.goods_return_horizon_days,
+            self.supplier_sales_horizon_days,
+        )
+        if any(type(v) is not int or v <= 0 for v in values):
+            raise WbContractError("backfill horizons must be positive integers")
+        if self.order_feed_horizon_days > ORDER_FEED_MAX_WINDOW_DAYS:
+            raise WbContractError("Order Feed first-run horizon cannot exceed current 31-day source domain")
+        if self.supplier_sales_horizon_days > SUPPLIER_SALES_GUARANTEED_STORAGE_DAYS:
+            raise WbContractError("Supplier Sales backfill cannot assume more than guaranteed storage")
+        if (self.archive_start_year is None) != (self.archive_start_month is None):
+            raise WbContractError("archive start year/month must be paired")
+        if self.archive_start_month is not None and not 1 <= self.archive_start_month <= 12:
+            raise WbContractError("archive start month invalid")
+
+    def current_windows(self, *, end: datetime) -> tuple[tuple[datetime, datetime], ...]:
+        self.validate()
+        end_utc = _utc(end)
+        start = end_utc - timedelta(days=self.current_horizon_days)
+        windows: list[tuple[datetime, datetime]] = []
+        cursor = start
+        while cursor < end_utc:
+            nxt = min(cursor + timedelta(days=CURRENT_MAX_WINDOW_DAYS), end_utc)
+            windows.append((cursor, nxt))
+            cursor = nxt
+        return tuple(windows)
+
+
+class M5LocalOperation(str, Enum):
+    DISTANCE = "DISTANCE"
+    REMOTE_SALE_RETURN = "REMOTE_SALE_RETURN"
+
+
+@dataclass(frozen=True, slots=True)
+class M5LocalDecisionRequest:
+    operation: M5LocalOperation
+    connection_id: int
+    assembly_order_id: int
+    marking_fingerprint: str
+    evidence_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if type(self.connection_id) is not int or self.connection_id <= 0:
+            raise WbContractError("connection_id invalid")
+        if type(self.assembly_order_id) is not int or self.assembly_order_id <= 0:
+            raise WbContractError("assembly_order_id invalid")
+        for name, value in (("marking_fingerprint", self.marking_fingerprint), ("evidence_fingerprint", self.evidence_fingerprint)):
+            if not isinstance(value, str) or len(value) != 64:
+                raise WbContractError(f"{name} must be SHA-256 hex evidence")
+
+
+def prepare_m5_local_decision(
+    decision: M9Decision,
+    *,
+    connection_id: int,
+    assembly_order_id: int,
+    marking_fingerprint: str,
+    evidence_fingerprint: str,
+) -> M5LocalDecisionRequest:
+    if decision is M9Decision.DISTANCE_READY:
+        operation = M5LocalOperation.DISTANCE
+    elif decision is M9Decision.REMOTE_SALE_RETURN_READY:
+        operation = M5LocalOperation.REMOTE_SALE_RETURN
+    else:
+        raise WbContractError("only ready M9 decisions may become local M5 decision requests")
+    return M5LocalDecisionRequest(operation, connection_id, assembly_order_id, marking_fingerprint, evidence_fingerprint)
