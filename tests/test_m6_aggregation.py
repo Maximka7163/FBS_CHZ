@@ -1,0 +1,183 @@
+from datetime import datetime, timezone
+
+import pytest
+
+from wbcz.aggregation import (
+    AggregationContractError, AggregationDocument, AggregationHistorySemantic, AggregationManualReview,
+    AggregationOperationKind, AggregationPreconditionService, AggregationReconciliationService,
+    AggregationReconciliationState, AggregationUnit, AtkAggregationDocument, AtkDisaggregationDocument,
+    AtkTransformationDocument, CisAggregationSnapshot, DisaggregationDocument, LP_PARENT_CHILDREN,
+    M5_AGGREGATION_HARDENING, M6_DOCUMENT_TYPES, M6_OPERATION_REGISTRY, PackageType,
+    ReaggregationDocument, ReaggregationItem, SetAggregationUnit, SetCompositionRequirement,
+    SetsAggregationDocument, UnitSerialNumberType, build_aggregate_tree, normalize_aggregation_history_event,
+    prepare_aggregation_document, validate_atk_preconditions, validate_box_preconditions,
+    validate_lp_relation, validate_set_preconditions,
+)
+
+INN = "1234567890"
+C1 = "010123456789012321ABCDEF"
+C2 = "010123456789012321ABCDEG"
+C3 = "010123456789012321ABCDEH"
+PARENT = "010123456789012321PARENT1"
+NOW = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+
+
+def snap(cis=C1, package=PackageType.UNIT, pg="lp", status="APPLIED", status_ex=None, owner=INN, emission="LOCAL", parent=None, children=(), gtin="04601234567890", tnved="6204430000"):
+    return CisAggregationSnapshot(cis, package, pg, status, status_ex, owner, emission, parent, tuple(children), gtin, tnved, NOW)
+
+
+def test_package_type_and_unit_serial_number_type_are_distinct_and_product_set_wire_value() -> None:
+    assert PackageType.SET.value == "SET"
+    assert UnitSerialNumberType.PRODUCT_SET.value == "PRODUCT_SET"
+    assert PackageType.SET.value != UnitSerialNumberType.PRODUCT_SET.value
+    assert PackageType.BUNDLE.value == "BUNDLE"
+
+
+def test_lp_parent_child_matrix_group_parent_and_nested_set_fail_closed_nested_box_allowed() -> None:
+    validate_lp_relation(PackageType.SET, PackageType.UNIT)
+    validate_lp_relation(PackageType.SET, PackageType.BUNDLE)
+    with pytest.raises(AggregationContractError): validate_lp_relation(PackageType.SET, PackageType.SET)
+    with pytest.raises(AggregationManualReview): validate_lp_relation(PackageType.GROUP, PackageType.UNIT)
+    validate_lp_relation(PackageType.BOX, PackageType.BOX)
+    with pytest.raises(AggregationContractError): validate_lp_relation(PackageType.BOX, PackageType.GROUP, child_pg="lp", mixed_pg=True)
+    validate_lp_relation(PackageType.BOX, PackageType.GROUP, child_pg="milk", mixed_pg=True)
+
+
+def test_operation_registry_separates_dedicated_and_generic_set_and_auto_is_not_submit() -> None:
+    assert M6_OPERATION_REGISTRY[AggregationOperationKind.FORM_SET].document_type == "SETS_AGGREGATION"
+    assert M6_OPERATION_REGISTRY[AggregationOperationKind.FORM_SET_GENERIC_COMPATIBILITY].document_type == "AGGREGATION_DOCUMENT"
+    assert not M6_OPERATION_REGISTRY[AggregationOperationKind.AUTO_DISAGGREGATION].executable
+    assert "ATK_AGGREGATION" in M6_DOCUMENT_TYPES
+
+
+def test_aggregation_document_exact_names_no_partnumber_for_lp_and_same_parent_shape() -> None:
+    doc = AggregationDocument(INN, (AggregationUnit(PARENT, UnitSerialNumberType.BOX, (C1, C2)),))
+    wire = doc.to_wire()
+    assert set(wire) == {"participantId", "aggregationUnits"}
+    unit = wire["aggregationUnits"][0]
+    assert set(unit) == {"unitSerialNumber", "unitSerialNumberType", "aggregationType", "sntins"}
+    assert unit["unitSerialNumberType"] == "BOX" and unit["aggregationType"] == "AGGREGATION"
+    with pytest.raises(AggregationManualReview):
+        AggregationUnit(PARENT, UnitSerialNumberType.BOX, (C1,), part_number="x").to_wire()
+
+
+def test_set_document_exact_wire_and_preconditions_applied_and_introduced() -> None:
+    wire = SetsAggregationDocument(INN, (SetAggregationUnit(PARENT, (C1, C2)),)).to_wire()
+    assert wire == {"participantId": INN, "aggregationUnits": [{"unitSerialNumber": PARENT, "sntins": [C1, C2]}]}
+    parent = snap(PARENT, PackageType.SET, status="APPLIED", emission="LOCAL")
+    validate_set_preconditions(parent=parent, children=(snap(C1), snap(C2)), composition=SetCompositionRequirement(gtin_quantities={"04601234567890": 2}))
+    introduced = (snap(C1, status="INTRODUCED", emission="FOREIGN"), snap(C2, status="INTRODUCED", emission="LOCAL"))
+    validate_set_preconditions(parent=parent, children=introduced, composition=SetCompositionRequirement(marked_products_quantity_in_set=2))
+
+
+def test_set_rejects_invalid_children_remark_reapply_and_composition_mismatch() -> None:
+    parent = snap(PARENT, PackageType.SET, status="APPLIED", emission="LOCAL")
+    with pytest.raises(AggregationContractError):
+        validate_set_preconditions(parent=parent, children=(snap(C1, PackageType.BOX),), composition=SetCompositionRequirement(marked_products_quantity_in_set=1))
+    with pytest.raises(AggregationManualReview, match="REMARK_REAPPLY"):
+        validate_set_preconditions(parent=snap(PARENT, PackageType.SET, emission="REMARK"), children=(snap(C1, emission="REMARK"),), composition=SetCompositionRequirement(marked_products_quantity_in_set=1))
+    with pytest.raises(AggregationManualReview, match="QUANTITY"):
+        validate_set_preconditions(parent=parent, children=(snap(C1),), composition=SetCompositionRequirement(marked_products_quantity_in_set=2))
+
+
+def test_box_preconditions_nested_box_mixed_pg_leading_rule_owner_status_ex() -> None:
+    validate_box_preconditions(parent=None, children=(snap(C1), snap(C2, PackageType.BOX)), participant_inn=INN)
+    mixed = (snap(C1, pg="lp"), snap(C2, PackageType.GROUP, pg="milk"))
+    validate_box_preconditions(parent=None, children=mixed, participant_inn=INN, mixed_pg=True, leading_pg="lp")
+    with pytest.raises(AggregationManualReview, match="LEADING_PG"):
+        validate_box_preconditions(parent=None, children=(snap(C2, PackageType.GROUP, pg="milk"),), participant_inn=INN, mixed_pg=True, leading_pg="lp")
+    with pytest.raises(AggregationManualReview, match="NON_OWNER"):
+        validate_box_preconditions(parent=None, children=(snap(C1, owner="9999999999"),), participant_inn=INN)
+    with pytest.raises(AggregationManualReview, match="STATUS_EX"):
+        validate_box_preconditions(parent=None, children=(snap(C1, status_ex="UNKNOWN"),), participant_inn=INN)
+
+
+def test_reaggregation_exact_xor_and_add_remove_operation_lock() -> None:
+    with pytest.raises(AggregationContractError): ReaggregationItem().to_wire()
+    with pytest.raises(AggregationContractError): ReaggregationItem(C1, C2).to_wire()
+    doc = ReaggregationDocument(INN, "ADDING", PARENT, (ReaggregationItem(uit_uitu=C1), ReaggregationItem(kitu=C2)))
+    wire = doc.to_wire()
+    assert wire["reaggregation_type"] == "ADDING"
+    assert wire["uit_uitu_list"] == [{"uit_uitu": C1}, {"kitu": C2}]
+    prepare_aggregation_document(AggregationOperationKind.TRANSFORM_PACKAGE_ADD, doc)
+    with pytest.raises(AggregationContractError): prepare_aggregation_document(AggregationOperationKind.TRANSFORM_PACKAGE_REMOVE, doc)
+
+
+def test_disaggregation_exact_contract_and_no_formed_enum_or_result_assumption() -> None:
+    wire = DisaggregationDocument(INN, (PARENT,)).to_wire()
+    assert wire == {"participant_inn": INN, "products_list": [{"uitu": PARENT}]}
+    import wbcz.aggregation as a
+    assert not hasattr(a, "FORMED")
+    assert "DISAGGREGATION" not in {x.value for x in a.AggregationReconciliationState}
+
+
+def test_atk_importer_owner_foreign_applied_tnved_and_status_ex_rules() -> None:
+    children = (snap(C1, emission="FOREIGN"), snap(C2, emission="FOREIGN"))
+    validate_atk_preconditions(role="IMPORTER", participant_inn=INN, children=children)
+    with pytest.raises(AggregationManualReview, match="IMPORTER"): validate_atk_preconditions(role="SELLER", participant_inn=INN, children=children)
+    with pytest.raises(AggregationManualReview, match="FOREIGN"): validate_atk_preconditions(role="IMPORTER", participant_inn=INN, children=(snap(C1),))
+    with pytest.raises(AggregationManualReview, match="STATUS_EX"): validate_atk_preconditions(role="IMPORTER", participant_inn=INN, children=(snap(C1, emission="FOREIGN", status_ex="FTS_CONTROL"),))
+    validate_atk_preconditions(role="IMPORTER", participant_inn=INN, children=(snap(C1, emission="FOREIGN", status_ex="FTS_CONTROL"),), allow_fts_control=True)
+
+
+def test_atk_wire_contracts_and_no_synthetic_parent_id() -> None:
+    form = AtkAggregationDocument(INN, (C1, C2)).to_wire()
+    assert set(form) == {"trade_participant_inn", "products_list"}
+    assert "atk" not in form
+    transform = AtkTransformationDocument(INN, PARENT, "REMOVING", (C1,)).to_wire()
+    assert transform["atk"] == PARENT and transform["transformation_type"] == "REMOVING"
+    dis = AtkDisaggregationDocument(INN, (PARENT,)).to_wire()
+    assert dis["products_list"] == [{"atk": PARENT}]
+
+
+def test_history_recognizes_both_auto_spellings_preserves_raw_and_tolerates_dates() -> None:
+    for raw in ("AUTODISAGGREGATED", "AUTODISAGGREGATION"):
+        ev = normalize_aggregation_history_event({"operationType": raw, "operationDate": "2021-08-10T10:11:01.000Z", "parent": PARENT})
+        assert ev.semantic is AggregationHistorySemantic.AUTO_DISAGGREGATION
+        assert ev.raw_operation_type == raw and ev.parsed_operation_date is not None
+    ev = normalize_aggregation_history_event({"operationType": "TRANSFORMATION", "operationDate": "2021-08-10 10:11:01"})
+    assert ev.semantic is AggregationHistorySemantic.TRANSFORMATION and ev.parsed_operation_date is not None
+    unknown = normalize_aggregation_history_event({"operationType": 105, "operationDate": "not-a-date"})
+    assert unknown.semantic is AggregationHistorySemantic.UNKNOWN and unknown.raw_operation_type == 105
+
+
+def test_tree_recurses_nested_box_cycle_protection_and_internal_limit_metadata() -> None:
+    edges = {PARENT: [C1, C2], C2: [C3], C3: [PARENT]}
+    result = build_aggregate_tree(PARENT, direct_children=lambda x: edges.get(x, []), package_type_of=lambda x: "BOX" if x in {PARENT, C2} else "UNIT")
+    assert not result.complete and "CYCLE_DETECTED" in result.warnings
+    truncated = build_aggregate_tree(PARENT, direct_children=lambda x: [C1] if x == PARENT else [C2] if x == C1 else [], package_type_of=lambda x: "BOX", safety_max_depth=1)
+    assert truncated.truncated and "INTERNAL_SAFETY_LIMIT" in truncated.warnings
+
+
+def test_reconciliation_checked_ok_alone_is_insufficient_and_relation_required() -> None:
+    svc = AggregationReconciliationService()
+    pending = svc.reconcile_relation(operation=AggregationOperationKind.FORM_SET, document_status_raw="IN_PROGRESS", expected_parent=PARENT, expected_children=(C1,), actual_children=(C1,))
+    assert pending.state is AggregationReconciliationState.RECONCILIATION_PENDING
+    mismatch = svc.reconcile_relation(operation=AggregationOperationKind.FORM_SET, document_status_raw="CHECKED_OK", expected_parent=PARENT, expected_children=(C1,), actual_children=())
+    assert mismatch.state is AggregationReconciliationState.MANUAL_REVIEW
+    ok = svc.reconcile_relation(operation=AggregationOperationKind.FORM_SET, document_status_raw="CHECKED_OK", expected_parent=PARENT, expected_children=(C1,), actual_children=(C1,), child_parents={C1: PARENT})
+    assert ok.state is AggregationReconciliationState.RECONCILED
+
+
+def test_atk_parent_discovery_requires_one_remote_parent_and_atk_type_no_synthesis() -> None:
+    svc = AggregationReconciliationService()
+    ok = svc.reconcile_atk_formation(document_status_raw="CHECKED_OK", submitted_children=(C1, C2), child_parents={C1: PARENT, C2: PARENT}, parent_package_types={PARENT: "ATK"}, parent_children={PARENT: (C1, C2)})
+    assert ok.state is AggregationReconciliationState.RECONCILED and ok.discovered_parent_cis == PARENT
+    bad = svc.reconcile_atk_formation(document_status_raw="CHECKED_OK", submitted_children=(C1, C2), child_parents={C1: PARENT, C2: C3}, parent_package_types={PARENT: "ATK", C3: "ATK"}, parent_children={})
+    assert bad.state is AggregationReconciliationState.MANUAL_REVIEW
+
+
+def test_precondition_freshness_and_m5_hardening_registry() -> None:
+    service = AggregationPreconditionService(INN, now=lambda: NOW)
+    service.require_fresh((snap(C1),))
+    service.require_owner((snap(C1),))
+    stale = CisAggregationSnapshot(C1, PackageType.UNIT, "lp", "APPLIED", None, INN, "LOCAL", None, (), None, None, datetime(2020, 1, 1, tzinfo=timezone.utc))
+    with pytest.raises(AggregationManualReview, match="STALE"): service.require_fresh((stale,))
+    assert M5_AGGREGATION_HARDENING["LK_RECEIPT_CANCEL"].startswith("REREAD_RELATION")
+    assert M5_AGGREGATION_HARDENING["WRITE_OFF_KIN"].startswith("MANUAL_REVIEW")
+
+
+def test_no_generic_move_cancel_or_generic_write_symbols() -> None:
+    import wbcz.aggregation as a
+    forbidden = {"MOVE_CHILD", "CANCEL_AGGREGATION", "GENERIC_AGGREGATION_WRITE", "GENERIC_DOCUMENT_SUBMIT", "RAW_URL", "RAW_PATH", "RAW_METHOD"}
+    assert forbidden.isdisjoint(set(dir(a)))
