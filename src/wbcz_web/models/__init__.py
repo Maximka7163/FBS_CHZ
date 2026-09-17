@@ -2,6 +2,7 @@ from .db import AuditLog, Base, CheckRecord, ControlRun, EventRecord, ImportReco
 from .agent import AgentJobRecord, DocumentLifecycleLedgerRecord, TurnoverOperationLedgerRecord, WriteAuditRecord, WriteOperationRecord
 from .edo_lite import EdoLiteAnnualQuotaRecord, EdoLiteLedgerRecord, EdoLiteSchemaRegistryRecord
 from .suz import SuzCodeBlockRecord, SuzConnectionRecord, SuzKmVaultRecord, SuzOrderItemRecord, SuzOrderRecord, SuzReconciliationEventRecord
+from .wb_fbs import WbConnectionRecord, WbOrderRecord, WbMarkingBindingRecord, WbEventRecord, WbReturnRecord, WbSyncCursorRecord, WbReconciliationRecord, WbPaidEvidenceRecord
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -10,5 +11,7 @@ __all__ = [
     "WriteAuditRecord", "WriteOperationRecord", "EdoLiteLedgerRecord",
     "EdoLiteSchemaRegistryRecord", "EdoLiteAnnualQuotaRecord", "SuzConnectionRecord",
     "SuzOrderRecord", "SuzOrderItemRecord", "SuzCodeBlockRecord", "SuzKmVaultRecord",
-    "SuzReconciliationEventRecord",
+    "SuzReconciliationEventRecord", "WbConnectionRecord", "WbOrderRecord",
+    "WbMarkingBindingRecord", "WbEventRecord", "WbReturnRecord", "WbSyncCursorRecord",
+    "WbReconciliationRecord", "WbPaidEvidenceRecord",
 ]
