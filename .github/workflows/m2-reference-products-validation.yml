@@ -76,7 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(alembic heads | tr -d '\r')" = '0004_m2_reference_products_read_jobs (head)'
+          test "$(alembic heads | tr -d '\r')" = '0004_m2_reference_products (head)'
           python - <<'PY'
           import os
           from sqlalchemy import create_engine
@@ -87,7 +87,7 @@ jobs:
           engine.dispose()
           PY
           alembic upgrade head
-          test "$(alembic current | tr -d '\r')" = '0004_m2_reference_products_read_jobs (head)'
+          test "$(alembic current | tr -d '\r')" = '0004_m2_reference_products (head)'
 
       - name: Focused M2 tests
         run: python -m pytest -q tests/test_m2_reference_products.py
