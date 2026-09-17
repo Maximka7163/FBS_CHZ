@@ -97,6 +97,25 @@ class SuzConnection:
         _opaque(self.installation_name, "installation_name")
 
 
+@dataclass(frozen=True, slots=True)
+class SuzRemoteIdentifiers:
+    remote_order_id: str | None = None
+    remote_block_id: str | None = None
+    remote_package_id: str | None = None
+    remote_report_id: str | None = None
+    oms_id: str | None = None
+    oms_connection: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "remote_order_id", "remote_block_id", "remote_package_id",
+            "remote_report_id", "oms_id", "oms_connection",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                _opaque(value, field_name)
+
+
 class TokenLifecycleState(str, Enum):
     NOT_ACQUIRED = "NOT_ACQUIRED"
     ACTIVE = "ACTIVE"
@@ -407,32 +426,33 @@ class ErrorKnowledge(str, Enum):
 @dataclass(frozen=True, slots=True)
 class SuzErrorEvidence:
     raw_code: str
-    category: str | None
+    categories: tuple[str, ...]
     knowledge: ErrorKnowledge
     meaning: str | None = None
 
 
-_EXACT_ERROR_CATEGORIES: Mapping[str, str] = {
-    **{code: "AUTH" for code in ("1090", "1100", "1110", "1140", "1150", "1160", "1170", "1350")},
-    **{code: "SIGNATURE" for code in ("1010", "1050", "1055", "1060", "1065", "1330")},
-    **{code: "ORDER" for code in ("3030", "3050", "3100", "3120", "3150", "3300", "3320", "3325", "3340", "3350", "3770", "3780", "3820", "3910", "3920", "3996", "5010", "5020", "5050")},
-    **{code: "FETCH" for code in ("3310", "3360", "3370", "3390", "3800")},
-    **{code: "CLOSE" for code in ("2200", "3010", "3810")},
-    "3710": "REPEAT_FETCH",
+SUZ_ERROR_REGISTRY: Mapping[str, tuple[str, ...]] = {
+    **{code: ("AUTH",) for code in ("1090", "1100", "1110", "1140", "1150", "1160", "1170", "1350")},
+    **{code: ("SIGNATURE",) for code in ("1010", "1050", "1055", "1060", "1065", "1330")},
+    **{code: ("ORDER",) for code in ("3030", "3050", "3100", "3120", "3150", "3300", "3320", "3325", "3340", "3350", "3770", "3780", "3820", "3910", "3920", "3996", "5010", "5020", "5050")},
+    **{code: ("FETCH",) for code in ("3310", "3370", "3390", "3800")},
+    "3360": ("FETCH", "CLOSE"),
+    **{code: ("CLOSE",) for code in ("2200", "3010", "3810")},
+    "3710": ("REPEAT_FETCH",),
 }
 
 
 def classify_suz_error(raw_code: str | int) -> SuzErrorEvidence:
     code = str(raw_code)
-    if code in _EXACT_ERROR_CATEGORIES:
-        return SuzErrorEvidence(code, _EXACT_ERROR_CATEGORIES[code], ErrorKnowledge.CONFIRMED_EXACT)
+    if code in SUZ_ERROR_REGISTRY:
+        return SuzErrorEvidence(code, SUZ_ERROR_REGISTRY[code], ErrorKnowledge.CONFIRMED_EXACT)
     try:
         number = int(code)
     except ValueError:
         number = -1
     if 3160 <= number <= 3220:
-        return SuzErrorEvidence(code, "SERIAL_ERROR_FAMILY", ErrorKnowledge.CONFIRMED_FAMILY_ONLY)
-    return SuzErrorEvidence(code, None, ErrorKnowledge.UNKNOWN_FUTURE)
+        return SuzErrorEvidence(code, ("SERIAL_ERROR_FAMILY",), ErrorKnowledge.CONFIRMED_FAMILY_ONLY)
+    return SuzErrorEvidence(code, (), ErrorKnowledge.UNKNOWN_FUTURE)
 
 
 class LocalM8State(str, Enum):
@@ -521,6 +541,22 @@ class FetchRecovery:
 
     def unresolved(self) -> "FetchRecovery":
         return FetchRecovery(FetchRecoveryState.MANUAL_REVIEW)
+
+
+def verify_repeat_recovery_payload(
+    *,
+    expected_payload_sha256: str,
+    expected_code_count: int,
+    exact_payload: bytes,
+    code_count: int,
+) -> bool:
+    if len(expected_payload_sha256) != 64:
+        raise SuzContractError("expected_payload_sha256 must be a SHA-256 hex digest")
+    if type(expected_code_count) is not int or expected_code_count < 0:
+        raise SuzContractError("expected_code_count must be non-negative")
+    if type(code_count) is not int or code_count < 0:
+        raise SuzContractError("code_count must be non-negative")
+    return code_count == expected_code_count and sha256_hex(exact_payload) == expected_payload_sha256
 
 
 class KmPayloadKind(str, Enum):

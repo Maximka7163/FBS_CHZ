@@ -38,7 +38,7 @@ class SuzKmVaultRecord(Base):
     __tablename__ = "suz_km_vault"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    order_operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    order_operation_id: Mapped[str] = mapped_column(String(128), ForeignKey("suz_orders.operation_id", ondelete="CASCADE"), nullable=False, index=True)
     gtin: Mapped[str] = mapped_column(Text, nullable=False)
     remote_block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

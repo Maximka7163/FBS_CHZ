@@ -51,6 +51,7 @@ from wbcz.suz_foundation import (
     SuzContractError,
     SuzOrderDraft,
     SuzOrderItem,
+    SuzRemoteIdentifiers,
     SuzSecurityError,
     SuzTokenSession,
     TokenLifecycleState,
@@ -65,6 +66,7 @@ from wbcz.suz_foundation import (
     redact_text,
     require_suz_core_capability,
     serials_sha256,
+    verify_repeat_recovery_payload,
 )
 from wbcz_web.models.suz import (
     SuzCodeBlockRecord,
@@ -99,6 +101,23 @@ def test_connection_identifiers_are_opaque_and_preserve_exact_value() -> None:
     assert connection.oms_connection == "Conn.MixedCase/001"
     with pytest.raises(SuzContractError):
         SuzConnection("123", "", "Conn", "TEST", "x")
+
+
+def test_all_suz_remote_identifiers_are_opaque_and_exact() -> None:
+    ids = SuzRemoteIdentifiers(
+        remote_order_id="Order/Mixed-01",
+        remote_block_id="Block/Mixed-02",
+        remote_package_id="Package/Mixed-03",
+        remote_report_id="Report/Mixed-04",
+        oms_id="Oms/Mixed-05",
+        oms_connection="Conn/Mixed-06",
+    )
+    assert ids.remote_order_id == "Order/Mixed-01"
+    assert ids.remote_block_id == "Block/Mixed-02"
+    assert ids.remote_package_id == "Package/Mixed-03"
+    assert ids.remote_report_id == "Report/Mixed-04"
+    with pytest.raises(SuzContractError):
+        SuzRemoteIdentifiers(remote_report_id="")
 
 
 def test_dynamic_token_is_10h_memory_only_and_redacted() -> None:
@@ -286,8 +305,10 @@ def test_error_registry_preserves_exact_family_and_unknown_without_retryability(
         evidence = classify_suz_error(code)
         assert evidence.raw_code == str(code)
         assert evidence.knowledge is ErrorKnowledge.CONFIRMED_EXACT
+        assert evidence.categories
         assert not hasattr(evidence, "retryable")
         assert not hasattr(evidence, "terminal")
+    assert classify_suz_error(3360).categories == ("FETCH", "CLOSE")
     for code in (3160, 3180, 3220):
         evidence = classify_suz_error(code)
         assert evidence.knowledge is ErrorKnowledge.CONFIRMED_FAMILY_ONLY
@@ -326,6 +347,20 @@ def test_ambiguous_fetch_cannot_advance_to_fresh_block_and_models_repeat_recover
     with pytest.raises(M8WireContractNotEnabled):
         require_suz_core_capability("REPEAT_KM_BLOCK")
     assert recovery.unresolved().state is FetchRecoveryState.MANUAL_REVIEW
+
+
+def test_repeat_recovery_requires_exact_hash_and_count_match_before_commit() -> None:
+    raw = b"historical-exact-block"
+    digest = hashlib.sha256(raw).hexdigest()
+    assert verify_repeat_recovery_payload(
+        expected_payload_sha256=digest, expected_code_count=3, exact_payload=raw, code_count=3
+    )
+    assert not verify_repeat_recovery_payload(
+        expected_payload_sha256=digest, expected_code_count=3, exact_payload=raw + b"x", code_count=3
+    )
+    assert not verify_repeat_recovery_payload(
+        expected_payload_sha256=digest, expected_code_count=3, exact_payload=raw, code_count=2
+    )
 
 
 def test_immutable_km_block_evidence_hashes_exact_bytes() -> None:
