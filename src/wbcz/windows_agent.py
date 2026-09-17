@@ -748,7 +748,7 @@ class WindowsAgentExecutor:
     def _read_response(self, job: AgentJob, response: AgentHttpResponse, *, job_type: str, request_payload: dict[str, Any]) -> AgentResult:
         body_sha = hashlib.sha256(response.body).hexdigest()
         content_type = self._content_type(response.headers)
-        self.session_manager.observe_http_status(response.status)
+        getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)
         if 200 <= response.status < 300:
             payload = parse_json_bytes(response.body)
             parsed = (
@@ -797,7 +797,7 @@ class WindowsAgentExecutor:
                 product_response = self.transport.m1_read("PRODUCT_INFO", product_payload, bearer_token=bearer)
                 product_http_status = product_response.status
                 product_body_sha256 = hashlib.sha256(product_response.body).hexdigest()
-                self.session_manager.observe_http_status(product_response.status)
+                getattr(self.session_manager, "observe_http_status", lambda _status: None)(product_response.status)
                 if not 200 <= product_response.status < 300:
                     safe = safe_transport_error(product_response.status, product_response.headers, product_response.body)
                     return AgentResult(
@@ -837,7 +837,7 @@ class WindowsAgentExecutor:
         try:
             payload = self.transport.cises_info(job.cises, bearer_token=self.session_manager.bearer_token())
         except TrueApiHttpError as exc:
-            self.session_manager.observe_http_status(exc.status)
+            getattr(self.session_manager, "observe_http_status", lambda _status: None)(exc.status)
             raise
         if isinstance(payload, dict) and isinstance(payload.get("results"), list):
             items = payload["results"]
@@ -878,7 +878,7 @@ class WindowsAgentExecutor:
             signature_base64=signature,
             bearer_token=self.session_manager.bearer_token(),
         )
-        self.session_manager.observe_http_status(response.status)
+        getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)
         body_sha = hashlib.sha256(response.body).hexdigest()
         if response.status in (200, 201):
             document_id = self.create_id_parser.parse_document_id(response)
@@ -923,7 +923,7 @@ class WindowsAgentExecutor:
         response = self.transport.poll_document(
             job.document_id, bearer_token=self.session_manager.bearer_token()
         )
-        self.session_manager.observe_http_status(response.status)
+        getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)
         body_sha = hashlib.sha256(response.body).hexdigest()
         if response.status != 200:
             return AgentResult(
