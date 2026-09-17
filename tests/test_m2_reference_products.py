@@ -308,13 +308,17 @@ def test_persisted_m2_job_survives_postgres_reopen_and_duplicate_result_is_safe(
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from wbcz.windows_agent import AgentResult
+    from wbcz_web.models import AgentJobRecord, Base
     from wbcz_web.repositories import SqlAlchemyAgentJobStore
 
     job = AgentJob("job_m2_persist_test", AgentJobType.PARTICIPANTS, "m2read:persist", P0_PG, INN, read_payload={"inns": [INN]})
     engine = create_engine(url)
+    # Other full-suite migration tests intentionally exercise destructive clean-db paths.
+    # Recreate the ORM schema here so this persistence/reopen regression is order-independent.
+    Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     with Session.begin() as db:
-        old = db.get(__import__("wbcz_web.models", fromlist=["AgentJobRecord"]).AgentJobRecord, job.job_id)
+        old = db.get(AgentJobRecord, job.job_id)
         if old is not None:
             db.delete(old)
     with Session.begin() as db:
