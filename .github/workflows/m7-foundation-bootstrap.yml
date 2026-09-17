@@ -1,0 +1,99 @@
+name: M7 foundation bootstrap
+
+on:
+  push:
+    branches:
+      - m7/edo-lite-foundation-001
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m7/edo-lite-foundation-001
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Materialize M7 foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY2'
+          from pathlib import Path
+          import base64, io, tarfile
+          payload = "".join(Path(f".m7_bootstrap/part{i:02d}").read_text() for i in range(9))
+          data = base64.b64decode(payload)
+          with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tf:
+              members = {m.name: tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
+          mapping = {
+              'edo_lite.py': 'src/wbcz/edo_lite.py',
+              '0008_m7.py': 'migrations/versions/0008_m7_edo_lite_foundation.py',
+              'edo_models.py': 'src/wbcz_web/models/edo_lite.py',
+              'test_m7.py': 'tests/test_m7_edo_lite_foundation.py',
+              'agent_true_api_transport.py': 'src/wbcz/agent_true_api_transport.py',
+              'models_init.py': 'src/wbcz_web/models/__init__.py',
+              'pyproject_m7.toml': 'pyproject.toml',
+              'M7_EDO_LITE_FOUNDATION_CONTRACT.md': 'docs/M7_EDO_LITE_FOUNDATION_CONTRACT.md',
+          }
+          for src, dst in mapping.items():
+              p=Path(dst); p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(members[src])
+
+          def replace_once(path, old, new):
+              p=Path(path); s=p.read_text(encoding='utf-8'); n=s.count(old)
+              if n != 1: raise SystemExit(f'{path}: expected one match, got {n}')
+              p.write_text(s.replace(old,new,1), encoding='utf-8')
+
+          replace_once(
+              'src/wbcz/windows_agent.py',
+              'from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES\n',
+              'from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES\nfrom wbcz.edo_lite import M7_READ_JOB_TYPES, capture_edo_read_success, validate_edo_read_payload\n',
+          )
+          replace_once(
+              'src/wbcz/windows_agent.py',
+              '    DOCUMENT_CISES = "DOCUMENT_CISES"\n',
+              '    DOCUMENT_CISES = "DOCUMENT_CISES"\n    EDO_PARTICIPANT = "EDO_PARTICIPANT"\n    EDO_OUTGOING_LIST = "EDO_OUTGOING_LIST"\n    EDO_INCOMING_LIST = "EDO_INCOMING_LIST"\n    EDO_OUTGOING_CONTENT = "EDO_OUTGOING_CONTENT"\n    EDO_INCOMING_CONTENT = "EDO_INCOMING_CONTENT"\n    EDO_OUTGOING_PRINT = "EDO_OUTGOING_PRINT"\n    EDO_INCOMING_PRINT = "EDO_INCOMING_PRINT"\n    EDO_OUTGOING_LEGAL_ZIP = "EDO_OUTGOING_LEGAL_ZIP"\n    EDO_INCOMING_LEGAL_ZIP = "EDO_INCOMING_LEGAL_ZIP"\n    EDO_OUTGOING_UNSIGNED_EVENTS = "EDO_OUTGOING_UNSIGNED_EVENTS"\n    EDO_INCOMING_UNSIGNED_EVENTS = "EDO_INCOMING_UNSIGNED_EVENTS"\n    EDO_EVENT_CONTENT = "EDO_EVENT_CONTENT"\n    EDO_OUTGOING_RECEIPT = "EDO_OUTGOING_RECEIPT"\n    EDO_INCOMING_RECEIPT = "EDO_INCOMING_RECEIPT"\n    EDO_OUTGOING_MCHD = "EDO_OUTGOING_MCHD"\n    EDO_INCOMING_MCHD = "EDO_INCOMING_MCHD"\n    EDO_GIS_PROCESSING = "EDO_GIS_PROCESSING"\n',
+          )
+          old = '        elif self.job_type.value in M4_READ_JOB_TYPES:\n            if self.read_payload is None:\n                raise AgentSecurityError("M4 document read job misses read_payload")\n            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):\n                raise AgentSecurityError("M4 document read job contains P0/write fields")\n            try:\n                normalized = validate_m4_job_payload(self.job_type.value, self.read_payload)\n            except ValueError as exc:\n                raise AgentSecurityError(str(exc)) from exc\n            if normalized != self.read_payload:\n                raise AgentSecurityError("M4 read_payload must already be canonical")\n        else:\n'
+          new = old.replace('        else:\n', '        elif self.job_type.value in M7_READ_JOB_TYPES:\n            if self.read_payload is None:\n                raise AgentSecurityError("M7 EDO read job misses read_payload")\n            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):\n                raise AgentSecurityError("M7 EDO read job contains P0/write fields")\n            try:\n                normalized = validate_edo_read_payload(self.job_type.value, self.read_payload)\n            except ValueError as exc:\n                raise AgentSecurityError(str(exc)) from exc\n            if normalized != self.read_payload:\n                raise AgentSecurityError("M7 EDO read_payload must already be canonical")\n        else:\n')
+          replace_once('src/wbcz/windows_agent.py', old, new)
+          replace_once(
+              'src/wbcz/windows_agent.py',
+              '        if job.job_type.value in M4_READ_JOB_TYPES:\n            return self._m4_read(job)\n        if job.job_type is AgentJobType.POLL_DOCUMENT:\n',
+              '        if job.job_type.value in M4_READ_JOB_TYPES:\n            return self._m4_read(job)\n        if job.job_type.value in M7_READ_JOB_TYPES:\n            return self._m7_read(job)\n        if job.job_type is AgentJobType.POLL_DOCUMENT:\n',
+          )
+          anchor = '    def _cis_check(self, job: AgentJob) -> AgentResult:\n'
+          method = '    def _m7_read(self, job: AgentJob) -> AgentResult:\n        assert job.read_payload is not None\n        bearer = self.session_manager.bearer_token()\n        response = self.transport.edo_read(job.job_type.value, job.read_payload, bearer_token=bearer)\n        getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)\n        body_sha = hashlib.sha256(response.body).hexdigest()\n        content_type = self._content_type(response.headers)\n        if 200 <= response.status < 300:\n            parsed = capture_edo_read_success(job.job_type.value, job.read_payload, response.body, content_type)\n            return AgentResult(job.job_id, job.operation_id, "READ_COMPLETED", http_status=response.status, body_sha256=body_sha, content_type=content_type, read_result=parsed)\n        safe = safe_transport_error(response.status, response.headers, response.body)\n        return AgentResult(\n            job.job_id, job.operation_id, "READ_FAILED", http_status=response.status,\n            body_sha256=safe.body_sha256, content_type=safe.content_type,\n            error_code=safe.safe_error_code or f"HTTP_{response.status}",\n            error_message=safe.safe_error_message,\n            read_result={"transport_error": asdict(safe), "raw_body_base64": base64.b64encode(response.body).decode("ascii")},\n        )\n\n'
+          replace_once('src/wbcz/windows_agent.py', anchor, method + anchor)
+
+          p=Path('src/wbcz_web/models/agent.py')
+          s=p.read_text(encoding='utf-8')
+          needle="'ATK_AGGREGATION','ATK_TRANSFORMATION','ATK_DISAGGREGATION')\", name=\"ck_agent_jobs_type\")"
+          repl="'ATK_AGGREGATION','ATK_TRANSFORMATION','ATK_DISAGGREGATION','EDO_PARTICIPANT','EDO_OUTGOING_LIST','EDO_INCOMING_LIST','EDO_OUTGOING_CONTENT','EDO_INCOMING_CONTENT','EDO_OUTGOING_PRINT','EDO_INCOMING_PRINT','EDO_OUTGOING_LEGAL_ZIP','EDO_INCOMING_LEGAL_ZIP','EDO_OUTGOING_UNSIGNED_EVENTS','EDO_INCOMING_UNSIGNED_EVENTS','EDO_EVENT_CONTENT','EDO_OUTGOING_RECEIPT','EDO_INCOMING_RECEIPT','EDO_OUTGOING_MCHD','EDO_INCOMING_MCHD','EDO_GIS_PROCESSING')\", name=\"ck_agent_jobs_type\")"
+          if s.count(needle) != 1: raise SystemExit('agent model type constraint patch mismatch')
+          p.write_text(s.replace(needle,repl,1), encoding='utf-8')
+          import shutil
+          shutil.rmtree('.m7_bootstrap')
+          PY2
+          python -m compileall -q src tests/test_m7_edo_lite_foundation.py migrations/versions/0008_m7_edo_lite_foundation.py
+          git diff --check
+      - name: Install dependencies and run focused safety tests
+        run: |
+          python -m pip install -e ".[ui,test,web]"
+          python -m pytest -q tests/test_m7_edo_lite_foundation.py tests/test_windows_agent.py
+      - name: Commit M7 foundation source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src migrations/versions/0008_m7_edo_lite_foundation.py tests/test_m7_edo_lite_foundation.py docs/M7_EDO_LITE_FOUNDATION_CONTRACT.md pyproject.toml
+          git add -A .m7_bootstrap
+          git diff --cached --check
+          git commit -m 'feat: add safe M7 EDO Lite foundation'
+          git push origin HEAD:m7/edo-lite-foundation-001
