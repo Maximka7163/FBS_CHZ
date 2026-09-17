@@ -16,6 +16,7 @@ import zipfile
 
 M7_SOURCE_VERSION = "true-api-v726.0"
 M7_PRODUCT_GROUP = "lp"
+M7_PRODUCT_GROUP_WIRE_VALUE = 1
 EDO_LITE_ANNUAL_OUTGOING_LIMIT = 1000
 TRUE_API_ENDPOINT_FORMAT_UKD = "736"
 CURRENT_FNS_736_STATUS = "REPEALED"
@@ -158,24 +159,44 @@ def validate_edo_read_payload(job_type: str, payload: Any) -> dict[str, Any]:
             raise EdoLiteContractError(f"EDO list has unknown fields: {sorted(unknown)}")
         limit = root.get("limit", 10)
         offset = root.get("offset", 0)
-        if type(limit) is not int or not 1 <= limit <= 100:
-            raise EdoLiteContractError("limit must be 1..100")
+        if type(limit) is not int or limit < 1:
+            raise EdoLiteContractError("limit must be a positive integer")
         if type(offset) is not int or offset < 0:
             raise EdoLiteContractError("offset must be a non-negative integer")
         out: dict[str, Any] = {"limit": limit, "offset": offset}
-        for key in ("created_from", "created_to", "partner_id", "status", "type", "folder"):
+        for key in ("created_from", "created_to"):
             if key in root and root[key] is not None:
-                out[key] = _string(root[key], key)
+                value = root[key]
+                if type(value) is not int or value < 0:
+                    raise EdoLiteContractError(f"{key} must be a non-negative integer timestamp")
+                out[key] = value
+        if "partner_id" in root and root["partner_id"] is not None:
+            out["partner_id"] = _string(root["partner_id"], "partner_id")
         if "partner_inn" in root and root["partner_inn"] is not None:
             out["partner_inn"] = _inn(root["partner_inn"], "partner_inn")
+        if "status" in root and root["status"] is not None:
+            status = root["status"]
+            if type(status) is not int or status not in KNOWN_EDO_RAW_STATUSES:
+                raise EdoLiteContractError("status must be a documented numeric EDO status code")
+            out["status"] = status
+        if "type" in root and root["type"] is not None:
+            document_type = root["type"]
+            if type(document_type) is not int or document_type < 0:
+                raise EdoLiteContractError("type must be a non-negative integer official document code")
+            out["type"] = document_type
+        if "folder" in root and root["folder"] is not None:
+            folder = root["folder"]
+            if type(folder) is not int or not 0 <= folder <= 8:
+                raise EdoLiteContractError("folder must be an integer in range 0..8")
+            out["folder"] = folder
         asc = root.get("asc", False)
         if type(asc) is not bool:
             raise EdoLiteContractError("asc must be boolean")
         out["asc"] = asc
         if "product_group" in root and root["product_group"] is not None:
-            pg = _string(root["product_group"], "product_group", max_len=32)
-            if pg != M7_PRODUCT_GROUP:
-                raise EdoLiteContractError("M7 foundation is restricted to product_group=lp")
+            pg = root["product_group"]
+            if type(pg) is not int or pg != M7_PRODUCT_GROUP_WIRE_VALUE:
+                raise EdoLiteContractError("M7 foundation requires numeric product_group=1 for lp")
             out["product_group"] = pg
         return out
 
@@ -302,11 +323,39 @@ def is_allowed_edo_read_target(spec: EdoReadSpec) -> bool:
             return False
         if any(len(values) != 1 for values in query.values()):
             return False
-        return (
-            query.get("sortBy") == ["created_at"]
-            and query.get("asc") in (["true"], ["false"])
-            and "limit" in query and "offset" in query
-        )
+        def one_uint(name: str) -> int | None:
+            values = query.get(name)
+            if values is None:
+                return None
+            raw = values[0]
+            if re.fullmatch(r"0|[1-9]\d*", raw) is None:
+                return -1
+            return int(raw)
+
+        limit = one_uint("limit")
+        offset = one_uint("offset")
+        if limit is None or limit < 1 or offset is None or offset < 0:
+            return False
+        for name in ("created_from", "created_to"):
+            if name in query and one_uint(name) < 0:
+                return False
+        if "partner_inn" in query and re.fullmatch(r"\d{10}|\d{12}", query["partner_inn"][0]) is None:
+            return False
+        if "partner_id" in query and not query["partner_id"][0]:
+            return False
+        if "status" in query:
+            status = one_uint("status")
+            if status not in KNOWN_EDO_RAW_STATUSES:
+                return False
+        if "type" in query and one_uint("type") < 0:
+            return False
+        if "folder" in query:
+            folder = one_uint("folder")
+            if folder is None or not 0 <= folder <= 8:
+                return False
+        if "product_group" in query and one_uint("product_group") != M7_PRODUCT_GROUP_WIRE_VALUE:
+            return False
+        return query.get("sortBy") == ["created_at"] and query.get("asc") in (["true"], ["false"])
 
     direction = "outgoing" if "OUTGOING" in spec.job_type else "incoming"
     exact_patterns = {
@@ -557,14 +606,26 @@ def _schema(identity: str, family: str, type_code: str | None, role: str | None 
 
 
 PRODUCTION_SCHEMA_REGISTRY: Mapping[str, SchemaDefinition] = {
-    "UPD_970_SELLER": _schema("UPD_970_SELLER", "UPD", "520/522/524", "SELLER"),
-    "UPD_970_BUYER": _schema("UPD_970_BUYER", "UPD", "521/525", "BUYER"),
-    "UPDI_970_SELLER": _schema("UPDI_970_SELLER", "UPDI", "820/822/824", "SELLER"),
-    "UPDI_970_BUYER": _schema("UPDI_970_BUYER", "UPDI", "821/825", "BUYER"),
-    "UKD_736_SELLER": _schema("UKD_736_SELLER", "UKD", "600/602/604", "SELLER", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKD_736_BUYER": _schema("UKD_736_BUYER", "UKD", "601/605", "BUYER", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKDI_736_SELLER": _schema("UKDI_736_SELLER", "UKDI", "700/702/704", "SELLER", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
-    "UKDI_736_BUYER": _schema("UKDI_736_BUYER", "UKDI", "701/705", "BUYER", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UPD_970_520_SELLER": _schema("UPD_970_520_SELLER", "UPD", "520", "SELLER", "ДОП"),
+    "UPD_970_521_BUYER": _schema("UPD_970_521_BUYER", "UPD", "521", "BUYER", "ДОП"),
+    "UPD_970_522_SELLER": _schema("UPD_970_522_SELLER", "UPD", "522", "SELLER", "СЧФ"),
+    "UPD_970_524_SELLER": _schema("UPD_970_524_SELLER", "UPD", "524", "SELLER", "СЧФДОП"),
+    "UPD_970_525_BUYER": _schema("UPD_970_525_BUYER", "UPD", "525", "BUYER", "СЧФДОП"),
+    "UPDI_970_820_SELLER": _schema("UPDI_970_820_SELLER", "UPDI", "820", "SELLER", "ДОП"),
+    "UPDI_970_821_BUYER": _schema("UPDI_970_821_BUYER", "UPDI", "821", "BUYER", "ДОП"),
+    "UPDI_970_822_SELLER": _schema("UPDI_970_822_SELLER", "UPDI", "822", "SELLER", "СЧФ"),
+    "UPDI_970_824_SELLER": _schema("UPDI_970_824_SELLER", "UPDI", "824", "SELLER", "СЧФДОП"),
+    "UPDI_970_825_BUYER": _schema("UPDI_970_825_BUYER", "UPDI", "825", "BUYER", "СЧФДОП"),
+    "UKD_736_600_SELLER": _schema("UKD_736_600_SELLER", "UKD", "600", "SELLER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_601_BUYER": _schema("UKD_736_601_BUYER", "UKD", "601", "BUYER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_602_SELLER": _schema("UKD_736_602_SELLER", "UKD", "602", "SELLER", "КСЧФ", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_604_SELLER": _schema("UKD_736_604_SELLER", "UKD", "604", "SELLER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKD_736_605_BUYER": _schema("UKD_736_605_BUYER", "UKD", "605", "BUYER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_700_SELLER": _schema("UKDI_736_700_SELLER", "UKDI", "700", "SELLER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_701_BUYER": _schema("UKDI_736_701_BUYER", "UKDI", "701", "BUYER", "ДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_702_SELLER": _schema("UKDI_736_702_SELLER", "UKDI", "702", "SELLER", "КСЧФ", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_704_SELLER": _schema("UKDI_736_704_SELLER", "UKDI", "704", "SELLER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
+    "UKDI_736_705_BUYER": _schema("UKDI_736_705_BUYER", "UKDI", "705", "BUYER", "КСФДИС", reason="TRUE_API_FNS_FORMAT_CONFLICT"),
     "DP_UVUTOCH": _schema("DP_UVUTOCH", "SERVICE", None, function="UVTOCH"),
     "DP_PRANNUL": _schema("DP_PRANNUL", "SERVICE", None, function="PRANNUL"),
     "DP_UNISOOBSCH": _schema("DP_UNISOOBSCH", "SERVICE", None, function="UNISOOBSCH"),

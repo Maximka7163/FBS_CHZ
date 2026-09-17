@@ -14,6 +14,7 @@ from wbcz.edo_lite import (
     EDO_LITE_ANNUAL_OUTGOING_LIMIT,
     KNOWN_EDO_RAW_STATUSES,
     M7_MUTATION_REGISTRY,
+    M7_PRODUCT_GROUP_WIRE_VALUE,
     M7_READ_JOB_TYPES,
     MCHD_RAW_STATUSES,
     PRODUCTION_SCHEMA_REGISTRY,
@@ -208,13 +209,13 @@ def test_ukd_736_29_conflict_is_explicit_and_writer_disabled() -> None:
     assert CURRENT_FNS_736_STATUS == "REPEALED"
     assert REPLACEMENT_FNS_ORDER == "ЕД-1-26/29@"
     assert UKD_FORMAT_COMPATIBILITY == "UNRESOLVED"
-    assert PRODUCTION_SCHEMA_REGISTRY["UKD_736_SELLER"].disabled_reason == "TRUE_API_FNS_FORMAT_CONFLICT"
+    assert PRODUCTION_SCHEMA_REGISTRY["UKD_736_600_SELLER"].disabled_reason == "TRUE_API_FNS_FORMAT_CONFLICT"
     assert not M7_MUTATION_REGISTRY["CREATE_UKD_736"].enabled
 
 
 def test_immutable_remote_blob_and_signing_hard_block() -> None:
     raw = b"<remote>exact bytes</remote>"
-    blob = ImmutableDocumentBlob.capture_remote(raw, document_family="UPD", schema_identity="UPD_970_SELLER")
+    blob = ImmutableDocumentBlob.capture_remote(raw, document_family="UPD", schema_identity="UPD_970_520_SELLER")
     assert blob.source is BlobSource.REMOTE_CONTENT
     assert blob.sha256 == hashlib.sha256(raw).hexdigest()
     blob.verify()
@@ -222,7 +223,7 @@ def test_immutable_remote_blob_and_signing_hard_block() -> None:
         ImmutableDocumentBlob.capture_remote(raw, document_family="UPD", schema_identity=None, source=BlobSource.LOCAL_BUILT)
     with pytest.raises(M7SchemaNotEnabled):
         create_m7_signing_envelope(
-            operation_id="op-1", blob=blob, schema_identity="UPD_970_SELLER",
+            operation_id="op-1", blob=blob, schema_identity="UPD_970_520_SELLER",
             participant_inn="1234567890", reference="ledger:op-1",
         )
 
@@ -344,3 +345,57 @@ def test_windows_agent_accepts_only_canonical_typed_m7_read_job() -> None:
 def test_read_job_registry_has_no_mutation_or_generic_proxy() -> None:
     forbidden = {"GENERIC_EDO_HTTP", "RAW_URL", "RAW_PATH", "RAW_METHOD", "RAW_HEADERS", "ARBITRARY_BODY", "ARBITRARY_XML_SIGN", "ARBITRARY_FILE_SIGN"}
     assert forbidden.isdisjoint(M7_READ_JOB_TYPES)
+
+
+def test_list_query_official_numeric_wire_types_and_serialization() -> None:
+    payload = canonical("EDO_OUTGOING_LIST", {
+        "limit": 101, "offset": 0, "created_from": 1770000000, "created_to": 1770003600,
+        "status": 3, "type": 520, "folder": 3, "product_group": 1,
+    })
+    assert payload["limit"] == 101 and M7_PRODUCT_GROUP_WIRE_VALUE == 1
+    spec = build_edo_read_spec("EDO_OUTGOING_LIST", payload)
+    for fragment in ("limit=101", "offset=0", "sortBy=created_at", "asc=false", "created_from=1770000000", "created_to=1770003600", "status=3", "type=520", "folder=3", "product_group=1"):
+        assert fragment in spec.target
+    assert "product_group=lp" not in spec.target
+    assert is_allowed_edo_read_target(spec)
+
+
+@pytest.mark.parametrize("bad", [
+    {"created_from": "1770000000"}, {"created_to": "1770003600"}, {"status": "3"}, {"type": "520"},
+    {"folder": "3"}, {"folder": 9}, {"product_group": "lp"}, {"product_group": 2},
+    {"created_from": True}, {"created_to": True}, {"status": True}, {"type": True}, {"folder": True},
+    {"product_group": True}, {"limit": True}, {"offset": True},
+])
+def test_list_query_rejects_non_contract_integer_values(bad: dict) -> None:
+    with pytest.raises(EdoLiteContractError):
+        validate_edo_read_payload("EDO_OUTGOING_LIST", bad)
+
+
+def test_list_query_integer_boundaries_and_no_invented_limit_100() -> None:
+    assert canonical("EDO_OUTGOING_LIST", {"folder": 0})["folder"] == 0
+    assert canonical("EDO_OUTGOING_LIST", {"folder": 8})["folder"] == 8
+    assert canonical("EDO_OUTGOING_LIST", {"limit": 1000})["limit"] == 1000
+    assert canonical("EDO_OUTGOING_LIST", {"offset": 0})["offset"] == 0
+    for bad in ({"limit": 0}, {"offset": -1}, {"created_from": -1}, {"created_to": -1}):
+        with pytest.raises(EdoLiteContractError): validate_edo_read_payload("EDO_OUTGOING_LIST", bad)
+    assert not is_allowed_edo_read_target(EdoReadSpec("EDO_OUTGOING_LIST", "GET", "/api/v3/true-api/elk/outgoing-documents?limit=10&offset=0&sortBy=created_at&asc=false&product_group=lp", "x"))
+
+
+def test_schema_registry_has_one_exact_official_type_per_disabled_row() -> None:
+    expected = {
+        ("UPD","520","SELLER","ДОП"),("UPD","521","BUYER","ДОП"),("UPD","522","SELLER","СЧФ"),("UPD","524","SELLER","СЧФДОП"),("UPD","525","BUYER","СЧФДОП"),
+        ("UPDI","820","SELLER","ДОП"),("UPDI","821","BUYER","ДОП"),("UPDI","822","SELLER","СЧФ"),("UPDI","824","SELLER","СЧФДОП"),("UPDI","825","BUYER","СЧФДОП"),
+        ("UKD","600","SELLER","ДИС"),("UKD","601","BUYER","ДИС"),("UKD","602","SELLER","КСЧФ"),("UKD","604","SELLER","КСФДИС"),("UKD","605","BUYER","КСФДИС"),
+        ("UKDI","700","SELLER","ДИС"),("UKDI","701","BUYER","ДИС"),("UKDI","702","SELLER","КСЧФ"),("UKDI","704","SELLER","КСФДИС"),("UKDI","705","BUYER","КСФДИС"),
+    }
+    rows=[x for x in PRODUCTION_SCHEMA_REGISTRY.values() if x.family != "SERVICE"]
+    assert {(x.family,x.official_type_code,x.title_role,x.function) for x in rows} == expected
+    assert all(x.official_type_code is None or "/" not in x.official_type_code for x in PRODUCTION_SCHEMA_REGISTRY.values())
+    by_code={x.official_type_code:x for x in rows}
+    for code in {"522","602","702","822"}: assert by_code[code].title_role == "SELLER"
+    assert all(not x.enabled_for_lp for x in PRODUCTION_SCHEMA_REGISTRY.values())
+    assert all(x.disabled_reason == "TRUE_API_FNS_FORMAT_CONFLICT" for x in rows if x.family in {"UKD","UKDI"})
+    assert all(x.disabled_reason == "OFFICIAL_SCHEMA_NOT_PINNED" for x in rows if x.family in {"UPD","UPDI"})
+    for x in PRODUCTION_SCHEMA_REGISTRY.values():
+        assert x.artifact_filename is None and x.artifact_sha256 is None and x.xsd_filename is None and x.xsd_sha256 is None
+        assert x.root is None and x.target_namespace is None

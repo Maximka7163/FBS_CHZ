@@ -24,7 +24,7 @@ Only the following schema-independent GET capabilities are represented. Caller-c
 - GIS processing: `/documents/edo/tpr/ud?fileId=<ИдФайл>`;
 - GIS document-info reconciliation continues to reuse accepted M4 `/api/v4/true-api/doc/{docId}/info`.
 
-List requests expose only `limit`, `offset`, `created_from`, `created_to`, `partner_inn`, `partner_id`, `status`, `type`, `folder`, `asc`, `product_group`; `sortBy` is fixed to `created_at`. Defaults are `limit=10`, `offset=0`. Remote `has_next_page` is preserved as evidence. No cursor, document-number filter, event-id filter or snapshot guarantee is invented.
+List requests expose only the documented §9.2.8 fields. `limit` and `offset` are integers with defaults `10` and `0`; `limit` must be positive and `MAX_LIMIT=NOT_DOCUMENTED` (no CRPT maximum is invented). `created_from`/`created_to` are non-negative integer timestamps. `status` and `type` are numeric codes; `folder` is integer `0..8`; `asc` is boolean; `sortBy` is fixed to `created_at`. The local product-group slug `lp` is **not** the §9.2.8 wire value: optional `product_group` is numeric code `1`, where the official product-group registry maps `1 = lp`. Remote `has_next_page` is preserved as evidence. No cursor, document-number filter, event-id filter or snapshot guarantee is invented.
 
 ## Remote identifiers and downloaded bytes
 
@@ -55,6 +55,8 @@ Future idempotency reuses M4 principles: `operation_id`, immutable payload hash 
 Remote draft/content bytes may be captured with exact SHA-256, document family, schema identity and source. `LOCAL_BUILT` is intentionally unavailable in this foundation because there is no XML builder. Any future signature must bind to exactly the immutable bytes/hash; reserialization after hashing/signing is forbidden.
 
 ## Disabled production schema registry
+
+Registry granularity is exact: one production row represents one official type code, never a slash-separated local group. Current disabled rows preserve established UPD/UPDi/UKD/UKDi code, title-role and function metadata. Seller-only types `522`, `602`, `702`, `822` have no synthetic buyer rows. Service rows remain fail-closed without invented type codes.
 
 Registry rows describe family/type/title/function metadata only where known. All production entries have `enabled_for_lp=false`. Missing official order, artifact/XSD filename, checksum, root, target namespace, encoding, filename grammar, parent-link rule and marking capability remain explicit NULL/unknown values; no `latest` alias or fake schema metadata exists.
 
