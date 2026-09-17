@@ -26,11 +26,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git checkout -- .github/workflows/m6-aggregation-validation.yml
           git diff --check
           python -m compileall -q src tests/test_m6_aggregation.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/wbcz/aggregation.py tests/test_m6_aggregation.py docs/M6_AGGREGATION_CONTRACT.md .github/workflows/m6-aggregation-validation.yml
+          git add src/wbcz/aggregation.py tests/test_m6_aggregation.py docs/M6_AGGREGATION_CONTRACT.md
           git diff --cached --check
           git commit -m 'fix: align M6 aggregate identifiers and multiproduct statuses'
           git push origin HEAD:m6/aggregation-001
