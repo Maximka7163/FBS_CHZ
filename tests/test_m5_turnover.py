@@ -22,6 +22,7 @@ from wbcz.turnover import (
     ModLocation,
     OperationPreconditionService,
     OperationReconciliationService,
+    PermitDocument,
     PrimaryDocument,
     ReconciliationState,
     RemarkProduct,
@@ -174,73 +175,38 @@ def test_distance_date_rules_fail_closed() -> None:
         ).to_wire()
 
 
-def test_lp_return_paid_root_item_precedence_and_missing_effective_paid() -> None:
+def test_remote_sale_return_paid_root_item_precedence_and_missing_effective_paid() -> None:
     with pytest.raises(TurnoverManualReview, match="PAID_REQUIRED"):
         LpReturnDocument(
             trade_participant_inn=INN,
             products_list=(ReturnProduct(CIS),),
-            paid=None,
         ).to_wire()
 
-    root_only = LpReturnDocument(
+    root_paid_false = LpReturnDocument(
         trade_participant_inn=INN,
         products_list=(ReturnProduct(CIS),),
         paid=False,
     ).to_wire()
-    assert root_only["paid"] is False
-    assert "paid" not in root_only["products_list"][0]
+    assert root_paid_false["paid"] is False
+    assert "paid" not in root_paid_false["products_list"][0]
 
-    item_only = LpReturnDocument(
-        trade_participant_inn=INN,
-        products_list=(ReturnProduct(CIS, paid=False),),
-        paid=None,
-    ).to_wire()
-    assert "paid" not in item_only
-    assert item_only["products_list"][0]["paid"] is False
-
-    mixed = LpReturnDocument(
+    item_override = LpReturnDocument(
         trade_participant_inn=INN,
         paid=False,
-        primary_document=PrimaryDocument("RECEIPT", "ROOT", TODAY),
         products_list=(
-            ReturnProduct(CIS),
-            ReturnProduct(CIS2, paid=True, primary_document=PrimaryDocument("SALES_RECEIPT", "ITEM", TODAY)),
+            ReturnProduct(
+                CIS,
+                paid=True,
+                primary_document=PrimaryDocument("RECEIPT", "I-1", TODAY),
+            ),
         ),
     ).to_wire()
-    assert mixed["paid"] is False
-    assert "paid" not in mixed["products_list"][0]
-    assert mixed["products_list"][1]["paid"] is True
-    assert mixed["primary_document_number"] == "ROOT"
-    assert mixed["products_list"][1]["primary_document_number"] == "ITEM"
-
-    with pytest.raises(TurnoverManualReview, match="PRIMARY_DOCUMENT_REQUIRED"):
-        LpReturnDocument(
-            trade_participant_inn=INN,
-            paid=False,
-            products_list=(ReturnProduct(CIS, paid=True),),
-        ).to_wire()
+    assert item_override["paid"] is False
+    assert item_override["products_list"][0]["paid"] is True
+    assert item_override["products_list"][0]["primary_document_number"] == "I-1"
 
 
-def test_lp_return_paid_false_does_not_invent_primary_document_prohibition() -> None:
-    root_doc = LpReturnDocument(
-        trade_participant_inn=INN,
-        products_list=(ReturnProduct(CIS),),
-        paid=False,
-        primary_document=PrimaryDocument("RECEIPT", "R-0", TODAY),
-    ).to_wire()
-    assert root_doc["paid"] is False
-    assert root_doc["primary_document_number"] == "R-0"
-
-    item_doc = LpReturnDocument(
-        trade_participant_inn=INN,
-        products_list=(ReturnProduct(CIS, paid=False, primary_document=PrimaryDocument("RECEIPT", "I-0", TODAY)),),
-        paid=None,
-    ).to_wire()
-    assert item_doc["products_list"][0]["paid"] is False
-    assert item_doc["products_list"][0]["primary_document_number"] == "I-0"
-
-
-def test_lp_return_paid_true_requires_effective_primary_document() -> None:
+def test_remote_sale_return_primary_document_exact_paid_semantics_and_item_override() -> None:
     with pytest.raises(TurnoverManualReview, match="PRIMARY_DOCUMENT_REQUIRED"):
         LpReturnDocument(
             trade_participant_inn=INN,
@@ -248,16 +214,235 @@ def test_lp_return_paid_true_requires_effective_primary_document() -> None:
             paid=True,
         ).to_wire()
 
+    with pytest.raises(TurnoverContractError, match="paid=false"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            paid=False,
+            primary_document=PrimaryDocument("RECEIPT", "R-0", TODAY),
+        ).to_wire()
+
+    with pytest.raises(TurnoverContractError, match="paid=false"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS, paid=False, primary_document=PrimaryDocument("RECEIPT", "I-0", TODAY)),),
+            paid=True,
+            primary_document=PrimaryDocument("RECEIPT", "ROOT", TODAY),
+        ).to_wire()
+
+    wire = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(
+            ReturnProduct(CIS, primary_document=PrimaryDocument("SALES_RECEIPT", "ITEM", TODAY)),
+        ),
+        paid=True,
+        primary_document=PrimaryDocument("RECEIPT", "ROOT", TODAY),
+    ).to_wire()
+    assert wire["primary_document_number"] == "ROOT"
+    assert wire["products_list"][0]["primary_document_number"] == "ITEM"
+
+
+def test_non_remote_returns_reject_paid_at_root_and_item_levels() -> None:
+    for return_type, primary, state_contract_id in (
+        ("RETAIL_RETURN", PrimaryDocument("RECEIPT", "R", TODAY), None),
+        ("NOT_FOR_SALE_RETURN", PrimaryDocument("OTHER", "N", TODAY, custom_name="Other document"), None),
+        ("OWN_USE_RETURN", None, None),
+        ("STATE_CONTRACT_RETURN", None, "1234567890121123456789012"),
+    ):
+        with pytest.raises(TurnoverContractError, match="paid must be absent"):
+            LpReturnDocument(
+                trade_participant_inn=INN,
+                products_list=(ReturnProduct(CIS),),
+                paid=False,
+                primary_document=primary,
+                state_contract_id=state_contract_id,
+                return_type=return_type,
+            ).to_wire()
+        with pytest.raises(TurnoverContractError, match="paid must be absent"):
+            LpReturnDocument(
+                trade_participant_inn=INN,
+                products_list=(ReturnProduct(CIS, paid=False),),
+                primary_document=primary,
+                state_contract_id=state_contract_id,
+                return_type=return_type,
+            ).to_wire()
+
+
+def test_retail_return_requires_primary_and_accepts_only_source_allowed_types() -> None:
+    with pytest.raises(TurnoverManualReview, match="PRIMARY_DOCUMENT_REQUIRED"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            return_type="RETAIL_RETURN",
+        ).to_wire()
+
+    for primary in (
+        PrimaryDocument("RECEIPT", "R-1", TODAY),
+        PrimaryDocument("SALES_RECEIPT", "S-1", TODAY),
+        PrimaryDocument("OTHER", "O-1", TODAY, custom_name="Other retail document"),
+    ):
+        wire = LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            primary_document=primary,
+            return_type="RETAIL_RETURN",
+        ).to_wire()
+        assert "paid" not in wire
+        assert wire["primary_document_type"] == primary.document_type
+
+    with pytest.raises(TurnoverContractError, match="primary_document_custom_name"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            primary_document=PrimaryDocument("RECEIPT", "R-2", TODAY, custom_name="forbidden"),
+            return_type="RETAIL_RETURN",
+        ).to_wire()
+
+
+def test_not_for_sale_return_requires_primary_and_restricts_primary_type() -> None:
+    with pytest.raises(TurnoverManualReview, match="PRIMARY_DOCUMENT_REQUIRED"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            return_type="NOT_FOR_SALE_RETURN",
+        ).to_wire()
+
+    for forbidden in ("RECEIPT", "SALES_RECEIPT"):
+        with pytest.raises(TurnoverContractError, match="unsupported primary_document_type"):
+            LpReturnDocument(
+                trade_participant_inn=INN,
+                products_list=(ReturnProduct(CIS),),
+                primary_document=PrimaryDocument(forbidden, "N-1", TODAY),
+                return_type="NOT_FOR_SALE_RETURN",
+            ).to_wire()
+
     wire = LpReturnDocument(
         trade_participant_inn=INN,
         products_list=(ReturnProduct(CIS),),
-        paid=True,
-        primary_document=PrimaryDocument("RECEIPT", "R-1", TODAY),
+        primary_document=PrimaryDocument("OTHER", "N-2", TODAY, custom_name="Donation act"),
+        return_type="NOT_FOR_SALE_RETURN",
     ).to_wire()
-    assert wire["paid"] is True
-    assert wire["primary_document_type"] == "RECEIPT"
-    assert wire["primary_document_number"] == "R-1"
+    assert wire["primary_document_type"] == "OTHER"
+    assert wire["primary_document_custom_name"] == "Donation act"
 
+
+def test_own_use_return_forbids_primary_and_certificate_data() -> None:
+    clean = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS),),
+        return_type="OWN_USE_RETURN",
+    ).to_wire()
+    assert clean["return_type"] == "OWN_USE_RETURN"
+    assert "paid" not in clean
+
+    with pytest.raises(TurnoverContractError, match="primary document must be absent"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            primary_document=PrimaryDocument("OTHER", "O", TODAY, custom_name="Other"),
+            return_type="OWN_USE_RETURN",
+        ).to_wire()
+    with pytest.raises(TurnoverContractError, match="certificate data must be absent"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS, permit=PermitDocument("DECLARATION", "C-1", TODAY)),),
+            return_type="OWN_USE_RETURN",
+        ).to_wire()
+
+
+def test_state_contract_return_exact_id_and_absence_rules() -> None:
+    valid_id = "1234567890121123456789012"
+    wire = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS),),
+        state_contract_id=valid_id,
+        return_type="STATE_CONTRACT_RETURN",
+    ).to_wire()
+    assert wire["state_contract_id"] == valid_id
+
+    with pytest.raises(TurnoverManualReview, match="STATE_CONTRACT_ID_REQUIRED"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            return_type="STATE_CONTRACT_RETURN",
+        ).to_wire()
+    with pytest.raises(TurnoverContractError, match="25 digits"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            state_contract_id="123",
+            return_type="STATE_CONTRACT_RETURN",
+        ).to_wire()
+    with pytest.raises(TurnoverContractError, match="13th character"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            state_contract_id="1234567890124123456789012",
+            return_type="STATE_CONTRACT_RETURN",
+        ).to_wire()
+    with pytest.raises(TurnoverContractError, match="state_contract_id must be absent"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            paid=False,
+            state_contract_id=valid_id,
+            return_type="REMOTE_SALE_RETURN",
+        ).to_wire()
+    with pytest.raises(TurnoverContractError, match="primary document must be absent"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            state_contract_id=valid_id,
+            primary_document=PrimaryDocument("OTHER", "S", TODAY, custom_name="Other"),
+            return_type="STATE_CONTRACT_RETURN",
+        ).to_wire()
+    with pytest.raises(TurnoverContractError, match="certificate data must be absent"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            state_contract_id=valid_id,
+            permit=PermitDocument("DECLARATION", "C-1", TODAY),
+            return_type="STATE_CONTRACT_RETURN",
+        ).to_wire()
+
+
+def test_return_certificate_root_item_mutual_exclusion_and_tuple_validation() -> None:
+    with pytest.raises(TurnoverContractError, match="root-level or item-level"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(
+                ReturnProduct(CIS, permit=PermitDocument("DECLARATION", "ITEM-CERT", TODAY)),
+            ),
+            primary_document=PrimaryDocument("RECEIPT", "R", TODAY),
+            permit=PermitDocument("DECLARATION", "ROOT-CERT", TODAY),
+            return_type="RETAIL_RETURN",
+        ).to_wire()
+
+    with pytest.raises(TurnoverContractError, match="certificate_number"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS),),
+            primary_document=PrimaryDocument("RECEIPT", "R", TODAY),
+            permit=PermitDocument("DECLARATION", "", TODAY),
+            return_type="RETAIL_RETURN",
+        ).to_wire()
+
+    root_wire = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS),),
+        primary_document=PrimaryDocument("RECEIPT", "R", TODAY),
+        permit=PermitDocument("DECLARATION", "ROOT-CERT", TODAY),
+        return_type="RETAIL_RETURN",
+    ).to_wire()
+    assert root_wire["certificate_number"] == "ROOT-CERT"
+
+    item_wire = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS, permit=PermitDocument("DECLARATION", "ITEM-CERT", TODAY)),),
+        primary_document=PrimaryDocument("RECEIPT", "R", TODAY),
+        return_type="RETAIL_RETURN",
+    ).to_wire()
+    assert item_wire["products_list"][0]["certificate_number"] == "ITEM-CERT"
 
 def test_return_reason_matrix_contains_all_confirmed_lp_cells_and_no_inference() -> None:
     confirmed = {
@@ -309,7 +494,7 @@ def test_general_lp_return_uses_exact_matrix_and_remote_alias_stays_exact() -> N
         TurnoverOperationKind.RETURN_TO_CIRCULATION,
         LpReturnDocument(
             trade_participant_inn=INN,
-            products_list=(ReturnProduct(CIS, paid=False),),
+            products_list=(ReturnProduct(CIS),),
             return_type="OWN_USE_RETURN",
         ),
     )

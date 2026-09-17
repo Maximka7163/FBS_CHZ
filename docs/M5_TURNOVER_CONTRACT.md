@@ -1,6 +1,6 @@
 # M5 Turnover Contract
 
-Source: True API v726.0 dated 2026-09-04 and accepted `M5-TURNOVER-RESEARCH-001`.
+Source: True API v726.0 dated 2026-09-04, authoritative LP_RETURN schema §4.1.5 (PDF pp. 124-128), accepted M5 research, and official return-reason matrix pp. 789-790. Where the research shorthand differed, §4.1.5 is authoritative for LP_RETURN wire semantics.
 
 This milestone hardens the accepted P0 sale/return path and adds typed turnover operations for product group `lp`. It does not replace the accepted M1-M4/P0 architecture.
 
@@ -74,24 +74,45 @@ DISTANCE business success is two-stage: document `CHECKED_OK` and fresh M1 CIS r
 
 Generic `WITHDRAW` is deliberately non-executable in M5. The accepted research did not provide implementation-ready reason-specific LK_RECEIPT wire contracts beyond DISTANCE, so generic WITHDRAW cannot silently reuse DISTANCE semantics.
 
-## REMOTE_SALE_RETURN hardening
+## LP_RETURN exact §4.1.5 contract
 
-Existing mapping remains `WB FBS Return -> LP_RETURN -> REMOTE_SALE_RETURN`.
+`LP_RETURN` wire validation follows True API v726.0 §4.1.5, PDF pp. 124-128. The generalized `RETURN_TO_CIRCULATION` operation is executable only through the exact conditional rules below; unknown combinations fail closed.
 
-- `trade_participant_inn` required.
-- `return_type` exact `REMOTE_SALE_RETURN` for the implemented M5 assembler.
-- `paid` must resolve explicitly at root or item level. `products_list[].paid` is an optional item override and has priority over root `paid`. It is never defaulted or inferred.
-- `state_contract_id` is absent.
+Common rules:
+
+- `trade_participant_inn` is required.
 - `products_list` is non-empty and `products_list[].ki` is unique.
-- fresh precondition state: `RETIRED`, no special state, participant owns the code, prior raw withdrawal reason is `DISTANCE` or `BY_SAMPLES`.
-- effective `paid=true` requires the exact effective primary-document tuple. Item primary-document fields override root fields for that item.
-- effective `paid=false` does not require a primary document. v726.0 does not establish an absent-only rule here, so M5 does not invent a prohibition against otherwise source-valid supplied primary-document data.
-- root values may coexist with item overrides; item-level values take precedence for that item.
-- KPP/FIAS/product cost/WB-only fields are not written into LP_RETURN.
+- `VENDING_RETURN` remains unsupported for `lp`.
+- item-level values override root-level values only where §4.1.5 defines such fallback/override semantics.
+- KPP/FIAS/product cost/WB-only fields are not synthesized into LP_RETURN.
 
-Business success is document `CHECKED_OK` plus fresh M1 CIS reconciliation to `INTRODUCED`.
+`paid`:
 
-There is no generic LP_RETURN cancellation.
+- permitted only for `REMOTE_SALE_RETURN`; root `paid` and item `products_list[].paid` are both valid source locations; item value has priority over root; every item must resolve to an explicit boolean. Missing effective `paid` is `MANUAL_REVIEW / PAID_REQUIRED`.
+- for `RETAIL_RETURN`, `OWN_USE_RETURN`, `STATE_CONTRACT_RETURN`, `NOT_FOR_SALE_RETURN`, and every other non-REMOTE return, root and item `paid` are strictly absent.
+
+Primary document:
+
+- `REMOTE_SALE_RETURN`: effective `paid=true` requires an effective primary document; effective `paid=false` requires the primary-document tuple to be absent for that item.
+- `RETAIL_RETURN`: effective primary document required.
+- `NOT_FOR_SALE_RETURN`: effective primary document required.
+- `OWN_USE_RETURN` and `STATE_CONTRACT_RETURN`: primary document strictly absent.
+- item primary-document fields override root fields for that item.
+- `RECEIPT` and `SALES_RECEIPT` are accepted only for `RETAIL_RETURN` / `REMOTE_SALE_RETURN`. `NOT_FOR_SALE_RETURN` uses `OTHER`; `primary_document_custom_name` is required only for `OTHER` and strictly absent for non-`OTHER`.
+
+State contract:
+
+- `STATE_CONTRACT_RETURN` requires `state_contract_id`.
+- it is strictly absent for all other return types.
+- validation is exact: 25 numeric characters; the 13th character is `1`, `2`, or `3`; the value is not normalized or mutated.
+
+Certificate / RD tuple:
+
+- certificate data is strictly absent for `STATE_CONTRACT_RETURN`, `OWN_USE_RETURN`, and unsupported `VENDING_RETURN`.
+- for return types where certificate data is allowed, it remains optional. If `certificate_type` is supplied, `certificate_number` and `certificate_date` belong to the same complete tuple.
+- root-level and item-level certificate data must not be supplied simultaneously.
+
+The P0 WB FBS return alias remains `RETURN_REMOTE_SALE -> LP_RETURN -> REMOTE_SALE_RETURN` and is additionally type-locked by the assembler. Business success remains document `CHECKED_OK` plus fresh M1 CIS reconciliation to `INTRODUCED`. There is no generic LP_RETURN cancellation.
 
 ## Return reason matrix
 

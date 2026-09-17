@@ -23,6 +23,14 @@ _COUNTRY_RE = re.compile(r"^\d{3}$")
 _DECLARATION_8_RE = re.compile(r"^\d{8}/\d{6}/\d{7}$")
 _DECLARATION_FLEX_RE = re.compile(r"^(?:\d{2}|\d{5}|\d{8})/\d{6}/\d{7}$")
 _RETURN_PRIMARY_TYPES = frozenset({"RECEIPT", "SALES_RECEIPT", "OTHER"})
+_RETURN_PRIMARY_TYPES_BY_RETURN_TYPE: Mapping[str, frozenset[str]] = {
+    "REMOTE_SALE_RETURN": _RETURN_PRIMARY_TYPES,
+    "RETAIL_RETURN": _RETURN_PRIMARY_TYPES,
+    "NOT_FOR_SALE_RETURN": frozenset({"OTHER"}),
+    "OWN_USE_RETURN": frozenset(),
+    "STATE_CONTRACT_RETURN": frozenset(),
+}
+_STATE_CONTRACT_ID_RE = re.compile(r"^\d{25}$")
 _WITHDRAW_DISTANCE_PRIMARY_TYPES = frozenset(
     {"RECEIPT", "SALES_RECEIPT", "OTHER", "CONSIGNMENT_NOTE", "UTD"}
 )
@@ -295,12 +303,12 @@ class PrimaryDocument:
             raise TurnoverContractError("primary_document_custom_name must be absent unless type=OTHER")
         return result
 
-    def to_return_wire(self) -> dict[str, Any]:
+    def to_return_wire(self, *, allowed: frozenset[str] = _RETURN_PRIMARY_TYPES) -> dict[str, Any]:
         return self._common(
             kind_label="primary_document_type",
             number_label="primary_document_number",
             date_label="primary_document_date",
-            allowed=_RETURN_PRIMARY_TYPES,
+            allowed=allowed,
         )
 
     def to_withdrawal_wire(self) -> dict[str, Any]:
@@ -652,14 +660,14 @@ class ReturnProduct:
     primary_document: PrimaryDocument | None = None
     permit: PermitDocument | None = None
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self, *, allowed_primary_types: frozenset[str]) -> dict[str, Any]:
         result: dict[str, Any] = {"ki": _cis(self.ki, "ki")}
         if self.paid is not None:
             if type(self.paid) is not bool:
                 raise TurnoverContractError("products_list[].paid must be boolean")
             result["paid"] = self.paid
         if self.primary_document is not None:
-            result.update(self.primary_document.to_return_wire())
+            result.update(self.primary_document.to_return_wire(allowed=allowed_primary_types))
         if self.permit is not None:
             result.update(self.permit.to_wire())
         return result
@@ -672,44 +680,99 @@ class LpReturnDocument:
     paid: bool | None = None
     primary_document: PrimaryDocument | None = None
     permit: PermitDocument | None = None
+    state_contract_id: str | None = None
     return_type: str = "REMOTE_SALE_RETURN"
     document_type = "LP_RETURN"
 
+    @staticmethod
+    def _validated_state_contract_id(value: str) -> str:
+        text = _nonempty(value, "state_contract_id", max_len=25)
+        if _STATE_CONTRACT_ID_RE.fullmatch(text) is None:
+            raise TurnoverContractError("state_contract_id must contain exactly 25 digits")
+        if text[12] not in {"1", "2", "3"}:
+            raise TurnoverContractError("state_contract_id 13th character must be 1, 2, or 3")
+        return text
+
     def to_wire(self) -> dict[str, Any]:
-        if self.return_type in UNSUPPORTED_LP_RETURN_TYPES:
+        return_type = self.return_type
+        if return_type in UNSUPPORTED_LP_RETURN_TYPES:
             raise TurnoverManualReview("RETURN_TYPE_NOT_APPLICABLE_TO_LP")
-        if self.return_type not in KNOWN_LP_RETURN_TYPES:
+        if return_type not in KNOWN_LP_RETURN_TYPES:
             raise TurnoverManualReview("RETURN_TYPE_MATRIX_NOT_CONFIRMED_FOR_LP")
-        if self.paid is not None and type(self.paid) is not bool:
-            raise TurnoverContractError("paid must be boolean")
         if not self.products_list:
             raise TurnoverContractError("products_list must be non-empty")
+
+        item_paid_present = any(item.paid is not None for item in self.products_list)
+        item_primary_present = any(item.primary_document is not None for item in self.products_list)
+        item_permit_present = any(item.permit is not None for item in self.products_list)
+
+        if return_type == "REMOTE_SALE_RETURN":
+            if self.paid is not None and type(self.paid) is not bool:
+                raise TurnoverContractError("paid must be boolean")
+        else:
+            if self.paid is not None or item_paid_present:
+                raise TurnoverContractError("paid must be absent unless return_type=REMOTE_SALE_RETURN")
+
+        if return_type == "STATE_CONTRACT_RETURN":
+            if self.state_contract_id is None:
+                raise TurnoverManualReview("STATE_CONTRACT_ID_REQUIRED")
+            state_contract_id = self._validated_state_contract_id(self.state_contract_id)
+        else:
+            if self.state_contract_id is not None:
+                raise TurnoverContractError("state_contract_id must be absent unless return_type=STATE_CONTRACT_RETURN")
+            state_contract_id = None
+
+        primary_forbidden = return_type in {"OWN_USE_RETURN", "STATE_CONTRACT_RETURN"}
+        if primary_forbidden and (self.primary_document is not None or item_primary_present):
+            raise TurnoverContractError(f"primary document must be absent for {return_type}")
+
+        certificate_forbidden = return_type in {"OWN_USE_RETURN", "STATE_CONTRACT_RETURN"}
+        if certificate_forbidden and (self.permit is not None or item_permit_present):
+            raise TurnoverContractError(f"certificate data must be absent for {return_type}")
+        if self.permit is not None and item_permit_present:
+            raise TurnoverContractError("certificate data must be root-level or item-level, not both")
+
+        allowed_primary_types = _RETURN_PRIMARY_TYPES_BY_RETURN_TYPE[return_type]
+        root_primary_wire: dict[str, Any] | None = None
+        if self.primary_document is not None:
+            root_primary_wire = self.primary_document.to_return_wire(allowed=allowed_primary_types)
 
         wires: list[dict[str, Any]] = []
         for item in self.products_list:
             if item.paid is not None and type(item.paid) is not bool:
                 raise TurnoverContractError("products_list[].paid must be boolean")
-            effective_paid = item.paid if item.paid is not None else self.paid
-            if effective_paid is None:
-                raise TurnoverManualReview("LP_RETURN_PAID_REQUIRED")
+
             effective_primary = item.primary_document if item.primary_document is not None else self.primary_document
-            if effective_paid is True and effective_primary is None:
-                raise TurnoverManualReview("LP_RETURN_PRIMARY_DOCUMENT_REQUIRED")
-            wires.append(item.to_wire())
+            if return_type == "REMOTE_SALE_RETURN":
+                effective_paid = item.paid if item.paid is not None else self.paid
+                if effective_paid is None:
+                    raise TurnoverManualReview("LP_RETURN_PAID_REQUIRED")
+                if effective_paid is True and effective_primary is None:
+                    raise TurnoverManualReview("LP_RETURN_PRIMARY_DOCUMENT_REQUIRED")
+                if effective_paid is False and effective_primary is not None:
+                    raise TurnoverContractError("primary document must be absent when REMOTE_SALE_RETURN effective paid=false")
+            elif return_type in {"RETAIL_RETURN", "NOT_FOR_SALE_RETURN"}:
+                if effective_primary is None:
+                    raise TurnoverManualReview("LP_RETURN_PRIMARY_DOCUMENT_REQUIRED")
+
+            wires.append(item.to_wire(allowed_primary_types=allowed_primary_types))
 
         if len({item["ki"] for item in wires}) != len(wires):
             raise TurnoverContractError("products_list[].ki must be unique")
+
         result: dict[str, Any] = {
             "trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"),
-            "return_type": self.return_type,
+            "return_type": return_type,
             "products_list": wires,
         }
-        if self.paid is not None:
+        if return_type == "REMOTE_SALE_RETURN" and self.paid is not None:
             result["paid"] = self.paid
-        if self.primary_document is not None:
-            result.update(self.primary_document.to_return_wire())
+        if root_primary_wire is not None:
+            result.update(root_primary_wire)
         if self.permit is not None:
             result.update(self.permit.to_wire())
+        if state_contract_id is not None:
+            result["state_contract_id"] = state_contract_id
         return result
 
 
