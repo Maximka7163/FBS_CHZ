@@ -90,7 +90,7 @@ class AgentJobRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        CheckConstraint("job_type IN ('CIS_CHECK','LK_RECEIPT','LP_RETURN','POLL_DOCUMENT','CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY','PRODUCT_INFO','CIS_TO_PRODUCT','PARTICIPANTS','MODS_LIST','TN_VED_SEARCH','PRODUCT_GTIN_LIST','RD_LIST','DOCUMENT_LIST','DOCUMENT_INFO','DOCUMENT_CISES')", name="ck_agent_jobs_type"),
+        CheckConstraint("job_type IN ('CIS_CHECK','LK_RECEIPT','LP_RETURN','POLL_DOCUMENT','CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY','PRODUCT_INFO','CIS_TO_PRODUCT','PARTICIPANTS','MODS_LIST','TN_VED_SEARCH','PRODUCT_GTIN_LIST','RD_LIST','DOCUMENT_LIST','DOCUMENT_INFO','DOCUMENT_CISES','LP_INTRODUCE_GOODS','LK_INDI_COMMISSIONING','LP_GOODS_IMPORT','CROSSBORDER','LP_INTRODUCE_OST','LK_CONTRACT_COMMISSIONING','LP_FTS_INTRODUCE','LK_REMARK','WRITE_OFF','LK_RECEIPT_CANCEL')", name="ck_agent_jobs_type"),
         CheckConstraint("state IN ('PENDING','LEASED','COMPLETED')", name="ck_agent_jobs_state"),
         UniqueConstraint("job_id", "payload_sha256", name="uq_agent_jobs_payload"),
     )
@@ -107,3 +107,31 @@ class DocumentLifecycleLedgerRecord(Base):
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class TurnoverOperationLedgerRecord(Base):
+    __tablename__ = "turnover_operation_ledger"
+
+    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    operation_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    raw_business_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    precondition_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    expected_postcondition: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    reconciliation_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    reconciliation_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    cancellation_reference: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    remote_document_id: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "reconciliation_state IN ('RECONCILIATION_PENDING','RECONCILED','MANUAL_REVIEW')",
+            name="ck_turnover_reconciliation_state",
+        ),
+    )
