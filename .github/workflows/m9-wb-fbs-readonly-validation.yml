@@ -1,0 +1,234 @@
+name: M9 WB FBS read-only validation
+
+on:
+  push:
+    branches:
+      - m9/wb-fbs-readonly-001
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  M9_BASE_SHA: f9cdc4704b2c37ca532315a609ac7bcb7b617671
+  FROZEN_P0_SHA: 395701f1757711b5a11b9348d929182d40f51f0a
+  WBCZ_ENV: test
+  WBCZ_OWN_INN: "1234567890"
+  WBCZ_TRUE_API_WRITE_ENABLED: "false"
+  WBCZ_WB_WRITE_ENABLED: "false"
+
+jobs:
+  linux-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_m9
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_m9"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m9
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove exact base, frozen P0, M8 preservation and frontend freeze
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$M9_BASE_SHA")" = "$M9_BASE_SHA"
+          test "$(git rev-parse "$M9_BASE_SHA")" = "$M9_BASE_SHA"
+          test "$(git rev-parse origin/p0/test-candidate-001)" = "$FROZEN_P0_SHA"
+          if git diff --name-only "$M9_BASE_SHA"...HEAD | grep '^frontend/'; then
+            echo 'FRONTEND_SOURCE_CHANGES must remain NONE in M9' >&2; exit 1
+          fi
+          if git diff --name-only "$M9_BASE_SHA"...HEAD | grep -E '^migrations/versions/000[1-9]'; then
+            echo 'historical migration changed in M9' >&2; exit 1
+          fi
+          git diff --quiet "$M9_BASE_SHA"...HEAD --             src/wbcz/suz_foundation.py             src/wbcz_web/models/suz.py             migrations/versions/0009_m8_suz.py             docs/M8_SUZ_FOUNDATION_CONTRACT.md             tests/test_m8_suz_foundation.py             .github/workflows/m8-suz-foundation-validation.yml
+          if git diff --name-only "$M9_BASE_SHA"...HEAD | grep -Ei '(^|/)(m10)(_|/|\.)'; then
+            echo 'M10 must not start in M9' >&2; exit 1
+          fi
+          if find .github/workflows -maxdepth 1 -type f \( -name '*m9*bootstrap*.yml' -o -name '*m9*patch*.yml' \) -print -quit | grep .; then
+            echo 'temporary M9 workflow remains at final head' >&2; exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install backend dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: Build deterministic WB regression workbook
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python scripts/generate_regression_workbook.py /mnt/data/REF_WB_archive_9.xlsx
+          test -s /mnt/data/REF_WB_archive_9.xlsx
+
+      - name: Migration head is M9
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(alembic heads | tr -d '\r')" = '0010_m9_wb (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          e=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with e.begin() as c:
+              c.exec_driver_sql('DROP SCHEMA public CASCADE')
+              c.exec_driver_sql('CREATE SCHEMA public')
+          e.dispose()
+          PY
+          alembic upgrade head
+          test "$(alembic current | tr -d '\r')" = '0010_m9_wb (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          e=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with e.connect() as c:
+              tables={r[0] for r in c.execute(text("select table_name from information_schema.tables where table_schema='public'"))}
+              expected={'wb_connections','wb_orders','wb_marking_bindings','wb_events','wb_returns','wb_sync_cursors','wb_reconciliation','wb_paid_evidence'}
+              assert expected <= tables
+              conn={r[0].lower() for r in c.execute(text("select column_name from information_schema.columns where table_name='wb_connections'"))}
+              assert not {'token','raw_token','authorization','api_token'} & conn
+              mark={r[0].lower() for r in c.execute(text("select column_name from information_schema.columns where table_name='wb_marking_bindings'"))}
+              assert not {'cis','sgtin','kiz','plaintext','full_marking'} & mark
+              assert {'ciphertext','nonce','auth_tag','fingerprint_sha256','masked_value','key_version'} <= mark
+              assert c.execute(text("select count(*) from edo_lite_schema_registry where enabled_for_lp=true")).scalar_one() == 0
+          e.dispose()
+          PY
+
+      - name: Focused M9 tests
+        run: python -m pytest -q tests/test_m9_wb_fbs.py
+
+      - name: M8 M7 M6 M5 M4 M3 M2 M1 regressions
+        run: |
+          python -m pytest -q tests/test_m8_suz_foundation.py
+          python -m pytest -q tests/test_m7_edo_lite_foundation.py
+          python -m pytest -q tests/test_m6_aggregation.py
+          python -m pytest -q tests/test_m5_turnover.py
+          python -m pytest -q tests/test_m4_document_lifecycle.py
+          python -m pytest -q tests/test_m3_auth_signing.py
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+
+      - name: P0 regressions
+        run: |
+          python -m pytest -q tests/test_p0_document_assembler.py
+          python -m pytest -q tests/test_write_pipeline.py
+          python -m pytest -q tests/test_p0_endtoend_wiring.py
+
+      - name: Full PostgreSQL backend regression
+        run: python -m pytest -q
+
+      - name: Frontend regression
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm test
+          npm run build
+          if grep -R -E 'wildberries\.ru|WBCZ_WB_|markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/' dist; then
+            echo 'WB/TrueAPI production boundary leaked into browser bundle' >&2; exit 1
+          fi
+
+      - name: M9 security and contract assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R -E 'GENERIC_WB_PROXY|RAW_WB_URL|RAW_WB_HOST|RAW_WB_PATH|RAW_WB_METHOD|ARBITRARY_WB_HEADERS' src/wbcz/wb_fbs.py
+          ! grep -R -E -- '-----BEGIN .*PRIVATE KEY-----' src frontend migrations
+          ! grep -Ei 'Column\("token"|Column\("raw_token"|Column\("authorization"|Column\("cis"|Column\("sgtin"|Column\("kiz"|Column\("plaintext"' migrations/versions/0010_m9_wb.py
+          python - <<'PY'
+          import inspect
+          from wbcz.edo_lite import M7_MUTATION_REGISTRY, PRODUCTION_SCHEMA_REGISTRY
+          from wbcz.suz_foundation import PRODUCTION_SUZ_CORE_TRANSPORT_ENABLED, PRODUCTION_SUZ_WRITE_ENABLED, SUZ_CORE_CAPABILITIES
+          from wbcz.wb_fbs import (
+              AUTO_DISTANCE_READY_ENABLED, PAID_SOURCE_CONTRACT_PINNED, PRODUCTION_WB_WRITE_ENABLED,
+              WB_API_SGTIN_AUTOBIND_ENABLED, WB_MUTATION_CAPABILITIES, WB_READ_CAPABILITIES,
+              WbReadTransport,
+          )
+          from wbcz_web.models.wb_fbs import WbConnectionRecord, WbMarkingBindingRecord
+          assert all(not x.enabled_for_lp for x in PRODUCTION_SCHEMA_REGISTRY.values())
+          assert all(not x.enabled for x in M7_MUTATION_REGISTRY.values())
+          assert not PRODUCTION_SUZ_CORE_TRANSPORT_ENABLED
+          assert not PRODUCTION_SUZ_WRITE_ENABLED
+          assert all(not x.enabled for x in SUZ_CORE_CAPABILITIES.values())
+          assert not PRODUCTION_WB_WRITE_ENABLED
+          assert not AUTO_DISTANCE_READY_ENABLED
+          assert not PAID_SOURCE_CONTRACT_PINNED
+          assert not WB_API_SGTIN_AUTOBIND_ENABLED
+          assert all(x.read_only for x in WB_READ_CAPABILITIES.values())
+          assert all(not x['enabled'] for x in WB_MUTATION_CAPABILITIES.values())
+          sig=inspect.signature(WbReadTransport.fbs_current)
+          assert not {'host','path','method','headers','authorization','url'} & set(sig.parameters)
+          conn=set(WbConnectionRecord.__table__.columns.keys())
+          assert not {'token','raw_token','authorization','api_token'} & conn
+          mark=set(WbMarkingBindingRecord.__table__.columns.keys())
+          assert not {'cis','sgtin','kiz','plaintext','full_marking'} & mark
+          PY
+          python -m pytest -q             tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent             tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener             tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
+
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove exact base and frozen P0
+        shell: pwsh
+        run: |
+          $base=(git merge-base HEAD $env:M9_BASE_SHA).Trim()
+          if ($base -ne $env:M9_BASE_SHA) { throw "wrong M9 base: $base" }
+          $frozen=(git rev-parse origin/p0/test-candidate-001).Trim()
+          if ($frozen -ne $env:FROZEN_P0_SHA) { throw "frozen P0 changed: $frozen" }
+          $frontend=(git diff --name-only "$env:M9_BASE_SHA...HEAD" | Select-String '^frontend/')
+          if ($frontend) { throw 'frontend source changed in M9' }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: M9 M8 M7 M6 M5 focused tests
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m9_wb_fbs.py
+          python -m pytest -q tests/test_m8_suz_foundation.py
+          python -m pytest -q tests/test_m7_edo_lite_foundation.py
+          python -m pytest -q tests/test_m6_aggregation.py
+          python -m pytest -q tests/test_m5_turnover.py
+
+      - name: M4 M3 M2 M1 Windows regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m4_document_lifecycle.py
+          python -m pytest -q tests/test_m3_auth_signing.py
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+          python -m pytest -q tests/test_windows_agent.py
+
+      - name: P0 Windows safety regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_p0_document_assembler.py
+          python -m pytest -q `
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener `
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
