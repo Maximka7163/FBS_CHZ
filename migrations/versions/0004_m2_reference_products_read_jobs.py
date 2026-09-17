@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0004_m2_reference_products_read_jobs"
+revision = "0004_m2_reference_products"
 down_revision = "0003_m1_cis_inventory_read_jobs"
 branch_labels = None
 depends_on = None
