@@ -43,6 +43,7 @@ from wbcz.document_lifecycle import (
     validate_m4_job_payload,
 )
 from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES
+from wbcz.edo_lite import M7_READ_JOB_TYPES, capture_edo_read_success, validate_edo_read_payload
 from wbcz.aggregation import M6_DOCUMENT_TYPES
 from wbcz.models import Decision, KiState, canonical_json, utc_now
 from wbcz.true_api import normalize_cises
@@ -137,6 +138,23 @@ class AgentJobType(StrEnum):
     DOCUMENT_LIST = "DOCUMENT_LIST"
     DOCUMENT_INFO = "DOCUMENT_INFO"
     DOCUMENT_CISES = "DOCUMENT_CISES"
+    EDO_PARTICIPANT = "EDO_PARTICIPANT"
+    EDO_OUTGOING_LIST = "EDO_OUTGOING_LIST"
+    EDO_INCOMING_LIST = "EDO_INCOMING_LIST"
+    EDO_OUTGOING_CONTENT = "EDO_OUTGOING_CONTENT"
+    EDO_INCOMING_CONTENT = "EDO_INCOMING_CONTENT"
+    EDO_OUTGOING_PRINT = "EDO_OUTGOING_PRINT"
+    EDO_INCOMING_PRINT = "EDO_INCOMING_PRINT"
+    EDO_OUTGOING_LEGAL_ZIP = "EDO_OUTGOING_LEGAL_ZIP"
+    EDO_INCOMING_LEGAL_ZIP = "EDO_INCOMING_LEGAL_ZIP"
+    EDO_OUTGOING_UNSIGNED_EVENTS = "EDO_OUTGOING_UNSIGNED_EVENTS"
+    EDO_INCOMING_UNSIGNED_EVENTS = "EDO_INCOMING_UNSIGNED_EVENTS"
+    EDO_EVENT_CONTENT = "EDO_EVENT_CONTENT"
+    EDO_OUTGOING_RECEIPT = "EDO_OUTGOING_RECEIPT"
+    EDO_INCOMING_RECEIPT = "EDO_INCOMING_RECEIPT"
+    EDO_OUTGOING_MCHD = "EDO_OUTGOING_MCHD"
+    EDO_INCOMING_MCHD = "EDO_INCOMING_MCHD"
+    EDO_GIS_PROCESSING = "EDO_GIS_PROCESSING"
 
 
 class AgentJobState(StrEnum):
@@ -233,6 +251,17 @@ class AgentJob:
                 raise AgentSecurityError(str(exc)) from exc
             if normalized != self.read_payload:
                 raise AgentSecurityError("M4 read_payload must already be canonical")
+        elif self.job_type.value in M7_READ_JOB_TYPES:
+            if self.read_payload is None:
+                raise AgentSecurityError("M7 EDO read job misses read_payload")
+            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):
+                raise AgentSecurityError("M7 EDO read job contains P0/write fields")
+            try:
+                normalized = validate_edo_read_payload(self.job_type.value, self.read_payload)
+            except ValueError as exc:
+                raise AgentSecurityError(str(exc)) from exc
+            if normalized != self.read_payload:
+                raise AgentSecurityError("M7 EDO read_payload must already be canonical")
         else:
             raise AgentSecurityError("unsupported agent job type")
 
@@ -829,6 +858,8 @@ class WindowsAgentExecutor:
             return self._m2_read(job)
         if job.job_type.value in M4_READ_JOB_TYPES:
             return self._m4_read(job)
+        if job.job_type.value in M7_READ_JOB_TYPES:
+            return self._m7_read(job)
         if job.job_type is AgentJobType.POLL_DOCUMENT:
             return self._poll(job)
         return self._write(job)
@@ -932,6 +963,25 @@ class WindowsAgentExecutor:
         response = self.transport.m4_read(job.job_type.value, job.read_payload, bearer_token=bearer)
         return self._read_response(
             job, response, job_type=job.job_type.value, request_payload=job.read_payload
+        )
+
+    def _m7_read(self, job: AgentJob) -> AgentResult:
+        assert job.read_payload is not None
+        bearer = self.session_manager.bearer_token()
+        response = self.transport.edo_read(job.job_type.value, job.read_payload, bearer_token=bearer)
+        getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)
+        body_sha = hashlib.sha256(response.body).hexdigest()
+        content_type = self._content_type(response.headers)
+        if 200 <= response.status < 300:
+            parsed = capture_edo_read_success(job.job_type.value, job.read_payload, response.body, content_type)
+            return AgentResult(job.job_id, job.operation_id, "READ_COMPLETED", http_status=response.status, body_sha256=body_sha, content_type=content_type, read_result=parsed)
+        safe = safe_transport_error(response.status, response.headers, response.body)
+        return AgentResult(
+            job.job_id, job.operation_id, "READ_FAILED", http_status=response.status,
+            body_sha256=safe.body_sha256, content_type=safe.content_type,
+            error_code=safe.safe_error_code or f"HTTP_{response.status}",
+            error_message=safe.safe_error_message,
+            read_result={"transport_error": asdict(safe), "raw_body_base64": base64.b64encode(response.body).decode("ascii")},
         )
 
     def _cis_check(self, job: AgentJob) -> AgentResult:
