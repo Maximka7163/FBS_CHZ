@@ -173,6 +173,36 @@ class TrueApiProductInfoWire:
     productGroup: str | None = None
     goodMarkFlag: bool | None = None
     goodTurnFlag: bool | None = None
+    subBrand: Any = None
+    privateBrand: Any = None
+    packageType: Any = None
+    innerUnitCount: Any = None
+    model: Any = None
+    inn: Any = None
+    permittedInns: Any = None
+    productGroupId: Any = None
+    goodSignedFlag: Any = None
+    goodStatus: Any = None
+    isKit: Any = None
+    isTechGtin: Any = None
+    isSet: Any = None
+    setGtin: Any = None
+    setDescription: Any = None
+    level: Any = None
+    mainGtin: Any = None
+    multiplier: Any = None
+    foreignProducer: Any = None
+    exporter: Any = None
+    standardNumber: Any = None
+    tnVedCode: Any = None
+    tnVedCode10: Any = None
+    fullName: Any = None
+    basicUnit: Any = None
+    quantityInPack: Any = None
+    quantityInPackType: Any = None
+    reasonCertMissing: Any = None
+    reasonCertMissingDetails: Any = None
+    certDocList: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,6 +650,19 @@ def parse_success_payload(job_type: str, request_payload: dict[str, Any], payloa
                 productGroup=raw.get("productGroup"),
                 goodMarkFlag=raw.get("goodMarkFlag") if type(raw.get("goodMarkFlag")) is bool else None,
                 goodTurnFlag=raw.get("goodTurnFlag") if type(raw.get("goodTurnFlag")) is bool else None,
+                subBrand=raw.get("subBrand"), privateBrand=raw.get("privateBrand"),
+                packageType=raw.get("packageType"), innerUnitCount=raw.get("innerUnitCount"),
+                model=raw.get("model"), inn=raw.get("inn"), permittedInns=raw.get("permittedInns"),
+                productGroupId=raw.get("productGroupId"), goodSignedFlag=raw.get("goodSignedFlag"),
+                goodStatus=raw.get("goodStatus"), isKit=raw.get("isKit"), isTechGtin=raw.get("isTechGtin"),
+                isSet=raw.get("isSet"), setGtin=raw.get("setGtin"), setDescription=raw.get("setDescription"),
+                level=raw.get("level"), mainGtin=raw.get("mainGtin"), multiplier=raw.get("multiplier"),
+                foreignProducer=raw.get("foreignProducer"), exporter=raw.get("exporter"),
+                standardNumber=raw.get("standardNumber"), tnVedCode=raw.get("tnVedCode"),
+                tnVedCode10=raw.get("tnVedCode10"), fullName=raw.get("fullName"), basicUnit=raw.get("basicUnit"),
+                quantityInPack=raw.get("quantityInPack"), quantityInPackType=raw.get("quantityInPackType"),
+                reasonCertMissing=raw.get("reasonCertMissing"), reasonCertMissingDetails=raw.get("reasonCertMissingDetails"),
+                certDocList=raw.get("certDocList"),
             )
             parsed.append({"wire": asdict(wire)})
             if wire.gtin:

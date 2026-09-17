@@ -197,6 +197,9 @@ class AgentOrchestrationBroker:
             # M1 read results are already sanitized/typed on Windows and durably
             # stored by the job store. No P0 control/write state is touched.
             pass
+        elif metadata.purpose == "REFERENCE_PRODUCTS":
+            # M2 is read-only; typed/sanitized results are already durable.
+            pass
         else:
             raise AgentReplayConflict("unknown agent job purpose")
         self.db.flush()

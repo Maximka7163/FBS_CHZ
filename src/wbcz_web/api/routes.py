@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from wbcz.reference_products import lookup_reference_value, reference_categories, reference_entries
 from wbcz.windows_agent import AgentJobType
 from wbcz.write_pipeline import InvalidWriteOperation
 from wbcz_web.auth import new_csrf_token
@@ -19,6 +20,7 @@ from wbcz_web.services import (
 )
 from wbcz_web.services.agent_orchestration import AgentControlService
 from wbcz_web.services.cis_inventory import CisInventoryService, CisInventoryUnavailable
+from wbcz_web.services.reference_products import ReferenceProductsService, ReferenceProductsUnavailable
 from wbcz_web.services.workspace import (
     BulkActionUnavailable,
     bulk_preview,
@@ -37,6 +39,12 @@ from .schemas import (
     ControlRequest,
     LoginRequest,
     PreviewRequest,
+    ReferenceModValidateRequest,
+    ReferenceModsRequest,
+    ReferenceParticipantsRequest,
+    ReferenceProductGtinRequest,
+    ReferenceRdListRequest,
+    ReferenceTnVedRequest,
 )
 
 router = APIRouter(prefix="/api")
@@ -393,3 +401,106 @@ def cis_inventory_request_status(
         return _cis_inventory_service(request, db).status(request_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="M1 request not found") from exc
+
+
+def _reference_products_service(request: Request, db: Session) -> ReferenceProductsService:
+    try:
+        return ReferenceProductsService(db, request.app.state.config)
+    except ReferenceProductsUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/participants")
+def reference_participants(payload: ReferenceParticipantsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).queue(AgentJobType.PARTICIPANTS, {"inns": payload.inns})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/participants/self")
+def reference_self_participant(request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).self_participant()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/mods/list")
+def reference_mods(payload: ReferenceModsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).queue(AgentJobType.MODS_LIST, payload.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/mods/validate-lp")
+def reference_validate_lp_mod(payload: ReferenceModValidateRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    body = {"productGroups": ["lp"], "inns": [payload.inn], "limit": 1000, "page": 0}
+    if payload.kpp is not None: body["kpp"] = payload.kpp
+    if payload.fiasId is not None: body["fiasId"] = payload.fiasId
+    try:
+        return _reference_products_service(request, db).queue(AgentJobType.MODS_LIST, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/tn-ved/search")
+def reference_tnved(payload: ReferenceTnVedRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).queue(AgentJobType.TN_VED_SEARCH, payload.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/product-info")
+def reference_product_info(payload: CisInventoryProductRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).queue(AgentJobType.PRODUCT_INFO, {"gtins": payload.gtins, "rdInfo": payload.rdInfo})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/product-gtins")
+def reference_product_gtins(payload: ReferenceProductGtinRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).queue(AgentJobType.PRODUCT_GTIN_LIST, {"pg": "lp", **payload.model_dump()})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reference-products/regulatory-documents")
+def reference_regulatory_documents(payload: ReferenceRdListRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).queue(AgentJobType.RD_LIST, payload.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/reference-products/requests/{request_id}")
+def reference_request_status(request_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return _reference_products_service(request, db).status(request_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="M2 request not found") from exc
+
+
+@router.get("/reference-products/references")
+def reference_registry_categories(identity: AuthenticatedIdentity = Depends(require_user)) -> list[dict]:
+    return reference_categories()
+
+
+@router.get("/reference-products/references/{category}")
+def reference_registry_entries(category: str, identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
+    try:
+        return reference_entries(category)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="reference category not found") from exc
+
+
+@router.get("/reference-products/references/{category}/{value}")
+def reference_registry_lookup(category: str, value: str, identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
+    try:
+        return lookup_reference_value(category, value)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="reference category not found") from exc
