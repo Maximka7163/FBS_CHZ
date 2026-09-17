@@ -1,0 +1,174 @@
+name: M3 auth signing validation
+
+on:
+  push:
+    branches:
+      - m3/auth-signing-hardening-001
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  M3_BASE_SHA: 2ee5e5fe8cedce29abde9a4206a7384c3cd40166
+  FROZEN_P0_SHA: 395701f1757711b5a11b9348d929182d40f51f0a
+  WBCZ_ENV: test
+  WBCZ_OWN_INN: "1234567890"
+  WBCZ_TRUE_API_WRITE_ENABLED: "false"
+
+jobs:
+  linux-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_m3
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_m3"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m3
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove accepted M2 base and frozen boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$M3_BASE_SHA")" = "$M3_BASE_SHA"
+          test "$(git rev-parse "$M3_BASE_SHA")" = "$M3_BASE_SHA"
+          test "$(git rev-parse origin/p0/test-candidate-001)" = "$FROZEN_P0_SHA"
+          if git diff --name-only "$M3_BASE_SHA"...HEAD | grep '^frontend/'; then
+            echo 'FRONTEND_SOURCE_CHANGES must remain NONE for M3' >&2
+            exit 1
+          fi
+          if git diff --name-only "$M3_BASE_SHA"...HEAD | grep '^migrations/'; then
+            echo 'MIGRATION_ADDED must remain NO for M3' >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install backend dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: Build deterministic WB regression workbook
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python scripts/generate_regression_workbook.py /mnt/data/REF_WB_archive_9.xlsx
+          test -s /mnt/data/REF_WB_archive_9.xlsx
+
+      - name: Migration head remains M2 head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(alembic heads | tr -d '\r')" = '0004_m2_reference_products (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          engine=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with engine.begin() as c:
+              c.exec_driver_sql('DROP SCHEMA public CASCADE')
+              c.exec_driver_sql('CREATE SCHEMA public')
+          engine.dispose()
+          PY
+          alembic upgrade head
+          test "$(alembic current | tr -d '\r')" = '0004_m2_reference_products (head)'
+
+      - name: Focused M3 tests
+        run: python -m pytest -q tests/test_m3_auth_signing.py
+
+      - name: M2 and M1 regressions
+        run: |
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+
+      - name: Full PostgreSQL backend regression
+        run: python -m pytest -q
+
+      - name: Frontend regression
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm test
+          npm run build
+          if grep -R -E 'markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/' dist; then
+            echo 'forbidden production/agent boundary leaked into browser bundle' >&2
+            exit 1
+          fi
+
+      - name: M3 security assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R -F 'markirovka.crpt.ru' src/wbcz_web
+          ! grep -R -E 'TRUE_API_GENERIC|TRUE_API_REQUEST|GENERIC_HTTP|HTTP_REQUEST|RAW_URL|RAW_PATH|ARBITRARY_REQUEST|GENERIC_GET|GENERIC_POST' src
+          ! grep -R -E -- '-----BEGIN .*PRIVATE KEY-----' src frontend migrations
+          ! grep -R -E 'WBCZ_AGENT_MACHINE_TOKEN=[A-Za-z0-9._~-]{16,}' src frontend migrations
+          grep -F 'WBCZ_TRUE_API_WRITE_ENABLED=false' .env.production.example
+          grep -F '"-attached"' src/wbcz_ui/_live_true_api_base.py
+          grep -F 'Intentionally no -attached' src/wbcz/windows_agent.py
+          python -m pytest -q \
+            tests/test_p0_endtoend_wiring.py::test_direct_vps_true_api_production_path_is_absent \
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener \
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
+
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove accepted M2 base and frozen P0
+        shell: pwsh
+        run: |
+          $base=(git merge-base HEAD $env:M3_BASE_SHA).Trim()
+          if ($base -ne $env:M3_BASE_SHA) { throw "wrong M3 base: $base" }
+          $frozen=(git rev-parse origin/p0/test-candidate-001).Trim()
+          if ($frozen -ne $env:FROZEN_P0_SHA) { throw "frozen P0 changed: $frozen" }
+          $frontend=(git diff --name-only "$env:M3_BASE_SHA...HEAD" | Select-String '^frontend/')
+          if ($frontend) { throw 'frontend source changed in M3' }
+          $migration=(git diff --name-only "$env:M3_BASE_SHA...HEAD" | Select-String '^migrations/')
+          if ($migration) { throw 'migration added in M3' }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: Focused M3 tests
+        run: python -m pytest -q tests/test_m3_auth_signing.py
+
+      - name: M2 M1 Windows-agent regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+          python -m pytest -q tests/test_windows_agent.py
+
+      - name: P0 Windows safety regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q `
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener `
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
