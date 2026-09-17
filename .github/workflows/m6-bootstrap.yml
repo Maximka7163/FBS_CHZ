@@ -1,0 +1,68 @@
+name: M6 bootstrap wiring
+on:
+  push:
+    branches: [m6/aggregation-001]
+permissions:
+  contents: write
+jobs:
+  wire:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m6/aggregation-001
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply typed M6 wiring
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def rep(path, old, new):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              if s.count(old)!=1: raise SystemExit(f'{path}: expected exactly one match for {old[:80]!r}, got {s.count(old)}')
+              p.write_text(s.replace(old,new,1),encoding='utf-8')
+
+          p='src/wbcz/windows_agent.py'
+          rep(p, 'from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES\n', 'from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES\nfrom wbcz.aggregation import M6_DOCUMENT_TYPES\n')
+          rep(p, '    LK_RECEIPT_CANCEL = "LK_RECEIPT_CANCEL"\n    POLL_DOCUMENT = "POLL_DOCUMENT"\n', '    LK_RECEIPT_CANCEL = "LK_RECEIPT_CANCEL"\n    AGGREGATION_DOCUMENT = "AGGREGATION_DOCUMENT"\n    SETS_AGGREGATION = "SETS_AGGREGATION"\n    REAGGREGATION_DOCUMENT = "REAGGREGATION_DOCUMENT"\n    DISAGGREGATION_DOCUMENT = "DISAGGREGATION_DOCUMENT"\n    ATK_AGGREGATION = "ATK_AGGREGATION"\n    ATK_TRANSFORMATION = "ATK_TRANSFORMATION"\n    ATK_DISAGGREGATION = "ATK_DISAGGREGATION"\n    POLL_DOCUMENT = "POLL_DOCUMENT"\n')
+          rep(p, '        if self.job_type.value in M5_AGENT_WRITE_JOB_TYPES:\n', '        if self.job_type.value in (M5_AGENT_WRITE_JOB_TYPES | M6_DOCUMENT_TYPES):\n')
+          rep(p, '            if self.document_type not in M5_DOCUMENT_TYPES:\n', '            if self.document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):\n')
+          rep(p, '        if document_type not in M5_DOCUMENT_TYPES:\n', '        if document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):\n')
+
+          p='src/wbcz_web/models/agent.py'
+          old="'WRITE_OFF','LK_RECEIPT_CANCEL')\", name=\"ck_agent_jobs_type\")"
+          new="'WRITE_OFF','LK_RECEIPT_CANCEL','AGGREGATION_DOCUMENT','SETS_AGGREGATION','REAGGREGATION_DOCUMENT','DISAGGREGATION_DOCUMENT','ATK_AGGREGATION','ATK_TRANSFORMATION','ATK_DISAGGREGATION')\", name=\"ck_agent_jobs_type\")"
+          rep(p, old, new)
+          path=Path(p); s=path.read_text(encoding='utf-8')
+          if 'class AggregationOperationLedgerRecord' not in s:
+              s += '''\n\nclass AggregationOperationLedgerRecord(Base):\n    __tablename__ = "aggregation_operation_ledger"\n\n    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)\n    request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)\n    operation_kind: Mapped[str] = mapped_column(String(64), nullable=False)\n    document_type: Mapped[str] = mapped_column(String(64), nullable=False)\n    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)\n    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)\n    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)\n    parent_cis: Mapped[str | None] = mapped_column(String(128), nullable=True)\n    discovered_parent_cis: Mapped[str | None] = mapped_column(String(128), nullable=True)\n    child_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)\n    relation_delta: Mapped[str] = mapped_column(String(32), nullable=False)\n    precondition_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)\n    expected_relation_delta: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)\n    reconciliation_state: Mapped[str] = mapped_column(String(32), nullable=False)\n    reconciliation_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)\n    raw_history_evidence: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)\n    remote_document_id: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)\n    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())\n    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())\n\n    __table_args__ = (\n        CheckConstraint("relation_delta IN ('FORM','ADD','REMOVE','DISAGGREGATE')", name="ck_aggregation_relation_delta"),\n        CheckConstraint(\n            "reconciliation_state IN ('RECONCILIATION_PENDING','RECONCILED','MANUAL_REVIEW')",\n            name="ck_aggregation_reconciliation_state",\n        ),\n    )\n'''
+          path.write_text(s,encoding='utf-8')
+
+          p='src/wbcz_web/models/__init__.py'
+          path=Path(p); s=path.read_text(encoding='utf-8')
+          if 'AggregationOperationLedgerRecord' not in s:
+              s=s.replace('    TurnoverOperationLedgerRecord,\n', '    TurnoverOperationLedgerRecord,\n    AggregationOperationLedgerRecord,\n')
+              s=s.replace('    "TurnoverOperationLedgerRecord",\n', '    "TurnoverOperationLedgerRecord",\n    "AggregationOperationLedgerRecord",\n')
+          path.write_text(s,encoding='utf-8')
+
+          for f in ('src/wbcz/windows_agent.py','src/wbcz_web/models/agent.py','src/wbcz_web/models/__init__.py','src/wbcz/aggregation.py'):
+              compile(Path(f).read_text(encoding='utf-8'),f,'exec')
+          PY
+          git diff --check
+          python -m pip install -e '.[ui,test,web]'
+          python -m pytest -q tests/test_m6_aggregation.py
+      - name: Commit wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/wbcz/windows_agent.py src/wbcz_web/models/agent.py src/wbcz_web/models/__init__.py
+          git diff --cached --check
+          git commit -m 'feat: wire M6 typed jobs and evidence ledger'
+          git push origin HEAD:m6/aggregation-001
