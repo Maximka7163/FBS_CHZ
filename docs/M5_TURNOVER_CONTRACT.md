@@ -26,7 +26,8 @@ This milestone hardens the accepted P0 sale/return path and adds typed turnover 
 | INTRODUCE_REMAINS | LP_INTRODUCE_OST | MANUAL | yes | REMAINS only, never fallback |
 | INTRODUCE_CONTRACT | LK_CONTRACT_COMMISSIONING | MANUAL | yes | producer/owner distinction retained |
 | INTRODUCE_FTS | LP_FTS_INTRODUCE | MANUAL | yes | normal FTS introduction path |
-| WITHDRAW / WITHDRAW_DISTANCE | LK_RECEIPT | MANUAL | yes | M5 exposes confirmed DISTANCE contract only |
+| WITHDRAW | LK_RECEIPT | MANUAL | yes | reference-only; not executable because exact reason-specific wire contracts beyond DISTANCE are unavailable |
+| WITHDRAW_DISTANCE | LK_RECEIPT | MANUAL | yes | executable confirmed DISTANCE contract |
 | RETURN_TO_CIRCULATION / RETURN_REMOTE_SALE | LP_RETURN | MANUAL | yes | general return remains matrix-gated; remote sale exact flow implemented |
 | REMARK | LK_REMARK | MANUAL | yes | no SUZ/code ordering |
 | WRITE_OFF | WRITE_OFF | MANUAL | yes | separate typed schema |
@@ -71,19 +72,21 @@ The accepted Sellari owner check is retained as `OUR_BACKEND_POLICY`; it is not 
 
 DISTANCE business success is two-stage: document `CHECKED_OK` and fresh M1 CIS reconciliation to `RETIRED` with raw `withdrawReason=DISTANCE`.
 
+Generic `WITHDRAW` is deliberately non-executable in M5. The accepted research did not provide implementation-ready reason-specific LK_RECEIPT wire contracts beyond DISTANCE, so generic WITHDRAW cannot silently reuse DISTANCE semantics.
+
 ## REMOTE_SALE_RETURN hardening
 
 Existing mapping remains `WB FBS Return -> LP_RETURN -> REMOTE_SALE_RETURN`.
 
 - `trade_participant_inn` required.
 - `return_type` exact `REMOTE_SALE_RETURN` for the implemented M5 assembler.
-- `paid` is a required explicit boolean. It is never defaulted or inferred.
+- `paid` must resolve explicitly at root or item level. `products_list[].paid` is an optional item override and has priority over root `paid`. It is never defaulted or inferred.
 - `state_contract_id` is absent.
 - `products_list` is non-empty and `products_list[].ki` is unique.
 - fresh precondition state: `RETIRED`, no special state, participant owns the code, prior raw withdrawal reason is `DISTANCE` or `BY_SAMPLES`.
-- `paid=true` requires the exact primary-document tuple.
-- `paid=false` does not invent a primary-document requirement and rejects supplied primary-document data for this subflow.
-- root/item primary-document and permit tuples are mutually exclusive when the schema permits either location.
+- effective `paid=true` requires the exact effective primary-document tuple. Item primary-document fields override root fields for that item.
+- effective `paid=false` does not require a primary document. v726.0 does not establish an absent-only rule here, so M5 does not invent a prohibition against otherwise source-valid supplied primary-document data.
+- root values may coexist with item overrides; item-level values take precedence for that item.
 - KPP/FIAS/product cost/WB-only fields are not written into LP_RETURN.
 
 Business success is document `CHECKED_OK` plus fresh M1 CIS reconciliation to `INTRODUCED`.
@@ -96,10 +99,13 @@ M5 uses a dedicated return matrix keyed by `(pg, current_status, current_withdra
 
 Confirmed cells implemented now:
 
-- `lp + RETIRED + DISTANCE + REMOTE_SALE_RETURN`
-- `lp + RETIRED + BY_SAMPLES + REMOTE_SALE_RETURN`
+- `REMOTE_SALE_RETURN`: prior `DISTANCE`, `BY_SAMPLES`.
+- `RETAIL_RETURN`: prior `RETAIL`, `BY_SAMPLES`, `DISTANCE`.
+- `OWN_USE_RETURN`: prior `OWN_USE`, `PRODUCTION_USE`, `MEDICAL_USE`, `VETERINARY_USE`.
+- `STATE_CONTRACT_RETURN`: prior `STATE_SECRET`.
+- `NOT_FOR_SALE_RETURN`: prior `DONATION`, `OWN_USE`, `PRODUCTION_USE`, `STATE_CONTRACT`.
 
-Other documented return type names may appear in registry metadata, but an unconfirmed matrix cell is `MANUAL_REVIEW` / validation failure. `VENDING_RETURN` is not accepted for `lp`.
+Every cell is still keyed with `pg=lp` and current status `RETIRED`. Any combination not explicitly listed above is `MANUAL_REVIEW` / validation failure. `VENDING_RETURN` is not accepted for `lp`.
 
 ## Introduction flows
 

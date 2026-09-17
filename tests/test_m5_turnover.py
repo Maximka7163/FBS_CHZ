@@ -100,8 +100,14 @@ def test_registry_exact_operation_document_mapping_and_lp_scope() -> None:
     assert "LK_UNIVERSAL_INTRODUCE" not in M5_DOCUMENT_TYPES
     assert "LP_SHIP_GOODS" not in M5_DOCUMENT_TYPES
     assert KNOWN_FAIL_CLOSED_DOCUMENT_TYPES["LP_CANCEL_SHIPMENT"] == "SOURCE_DOCUMENT_REQUIRED"
+    assert TURNOVER_OPERATION_REGISTRY[TurnoverOperationKind.WITHDRAW].capability == (
+        "NOT_EXECUTABLE_EXACT_REASON_CONTRACTS_UNAVAILABLE"
+    )
+    assert TURNOVER_OPERATION_REGISTRY[TurnoverOperationKind.WITHDRAW].supported_reasons == ()
     with pytest.raises(TurnoverContractError):
         document_type_for_operation("ARBITRARY")
+    with pytest.raises(TurnoverManualReview, match="OPERATION_NOT_EXECUTABLE"):
+        prepare_turnover_document(TurnoverOperationKind.WITHDRAW, _distance())
 
 
 def test_eaeu_direct_subflow_is_explicitly_deferred() -> None:
@@ -168,7 +174,7 @@ def test_distance_date_rules_fail_closed() -> None:
         ).to_wire()
 
 
-def test_remote_return_paid_is_never_guessed_or_defaulted() -> None:
+def test_lp_return_paid_root_item_precedence_and_missing_effective_paid() -> None:
     with pytest.raises(TurnoverManualReview, match="PAID_REQUIRED"):
         LpReturnDocument(
             trade_participant_inn=INN,
@@ -176,6 +182,65 @@ def test_remote_return_paid_is_never_guessed_or_defaulted() -> None:
             paid=None,
         ).to_wire()
 
+    root_only = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS),),
+        paid=False,
+    ).to_wire()
+    assert root_only["paid"] is False
+    assert "paid" not in root_only["products_list"][0]
+
+    item_only = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS, paid=False),),
+        paid=None,
+    ).to_wire()
+    assert "paid" not in item_only
+    assert item_only["products_list"][0]["paid"] is False
+
+    mixed = LpReturnDocument(
+        trade_participant_inn=INN,
+        paid=False,
+        primary_document=PrimaryDocument("RECEIPT", "ROOT", TODAY),
+        products_list=(
+            ReturnProduct(CIS),
+            ReturnProduct(CIS2, paid=True, primary_document=PrimaryDocument("SALES_RECEIPT", "ITEM", TODAY)),
+        ),
+    ).to_wire()
+    assert mixed["paid"] is False
+    assert "paid" not in mixed["products_list"][0]
+    assert mixed["products_list"][1]["paid"] is True
+    assert mixed["primary_document_number"] == "ROOT"
+    assert mixed["products_list"][1]["primary_document_number"] == "ITEM"
+
+    with pytest.raises(TurnoverManualReview, match="PRIMARY_DOCUMENT_REQUIRED"):
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            paid=False,
+            products_list=(ReturnProduct(CIS, paid=True),),
+        ).to_wire()
+
+
+def test_lp_return_paid_false_does_not_invent_primary_document_prohibition() -> None:
+    root_doc = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS),),
+        paid=False,
+        primary_document=PrimaryDocument("RECEIPT", "R-0", TODAY),
+    ).to_wire()
+    assert root_doc["paid"] is False
+    assert root_doc["primary_document_number"] == "R-0"
+
+    item_doc = LpReturnDocument(
+        trade_participant_inn=INN,
+        products_list=(ReturnProduct(CIS, paid=False, primary_document=PrimaryDocument("RECEIPT", "I-0", TODAY)),),
+        paid=None,
+    ).to_wire()
+    assert item_doc["products_list"][0]["paid"] is False
+    assert item_doc["products_list"][0]["primary_document_number"] == "I-0"
+
+
+def test_lp_return_paid_true_requires_effective_primary_document() -> None:
     with pytest.raises(TurnoverManualReview, match="PRIMARY_DOCUMENT_REQUIRED"):
         LpReturnDocument(
             trade_participant_inn=INN,
@@ -183,21 +248,6 @@ def test_remote_return_paid_is_never_guessed_or_defaulted() -> None:
             paid=True,
         ).to_wire()
 
-    wire = LpReturnDocument(
-        trade_participant_inn=INN,
-        products_list=(ReturnProduct(CIS),),
-        paid=False,
-    ).to_wire()
-    assert wire == {
-        "trade_participant_inn": INN,
-        "return_type": "REMOTE_SALE_RETURN",
-        "paid": False,
-        "products_list": [{"ki": CIS}],
-    }
-    assert {"kpp", "fias_id", "product_cost", "state_contract_id"}.isdisjoint(wire)
-
-
-def test_remote_return_paid_true_accepts_explicit_primary_document() -> None:
     wire = LpReturnDocument(
         trade_participant_inn=INN,
         products_list=(ReturnProduct(CIS),),
@@ -209,23 +259,71 @@ def test_remote_return_paid_true_accepts_explicit_primary_document() -> None:
     assert wire["primary_document_number"] == "R-1"
 
 
-def test_return_reason_matrix_only_confirms_researched_remote_sale_cells() -> None:
-    validate_return_reason_matrix(
-        pg="lp", current_status="RETIRED", current_withdraw_reason="DISTANCE", return_type="REMOTE_SALE_RETURN"
-    )
-    validate_return_reason_matrix(
-        pg="lp", current_status="RETIRED", current_withdraw_reason="BY_SAMPLES", return_type="REMOTE_SALE_RETURN"
-    )
-    for reason in ("OWN_USE", "STATE_CONTRACT", None):
+def test_return_reason_matrix_contains_all_confirmed_lp_cells_and_no_inference() -> None:
+    confirmed = {
+        ("DISTANCE", "REMOTE_SALE_RETURN"),
+        ("BY_SAMPLES", "REMOTE_SALE_RETURN"),
+        ("RETAIL", "RETAIL_RETURN"),
+        ("BY_SAMPLES", "RETAIL_RETURN"),
+        ("DISTANCE", "RETAIL_RETURN"),
+        ("OWN_USE", "OWN_USE_RETURN"),
+        ("PRODUCTION_USE", "OWN_USE_RETURN"),
+        ("MEDICAL_USE", "OWN_USE_RETURN"),
+        ("VETERINARY_USE", "OWN_USE_RETURN"),
+        ("STATE_SECRET", "STATE_CONTRACT_RETURN"),
+        ("DONATION", "NOT_FOR_SALE_RETURN"),
+        ("OWN_USE", "NOT_FOR_SALE_RETURN"),
+        ("PRODUCTION_USE", "NOT_FOR_SALE_RETURN"),
+        ("STATE_CONTRACT", "NOT_FOR_SALE_RETURN"),
+    }
+    for prior_reason, return_type in confirmed:
+        validate_return_reason_matrix(
+            pg="lp", current_status="RETIRED", current_withdraw_reason=prior_reason, return_type=return_type
+        )
+
+    for prior_reason, return_type in (
+        ("STATE_SECRET", "REMOTE_SALE_RETURN"),
+        ("RETAIL", "OWN_USE_RETURN"),
+        ("DISTANCE", "STATE_CONTRACT_RETURN"),
+        (None, "NOT_FOR_SALE_RETURN"),
+    ):
         with pytest.raises(TurnoverManualReview):
             validate_return_reason_matrix(
-                pg="lp", current_status="RETIRED", current_withdraw_reason=reason, return_type="REMOTE_SALE_RETURN"
+                pg="lp", current_status="RETIRED", current_withdraw_reason=prior_reason, return_type=return_type
             )
     with pytest.raises(TurnoverManualReview):
         validate_return_reason_matrix(
             pg="lp", current_status="RETIRED", current_withdraw_reason="DISTANCE", return_type="VENDING_RETURN"
         )
 
+
+def test_general_lp_return_uses_exact_matrix_and_remote_alias_stays_exact() -> None:
+    service = OperationPreconditionService(participant_inn=INN, now=lambda: NOW)
+    evidence = service.validate_return(
+        (_snapshot(status="RETIRED", withdraw_reason="OWN_USE"),),
+        return_type="OWN_USE_RETURN",
+    )
+    assert evidence.operation_kind is TurnoverOperationKind.RETURN_TO_CIRCULATION
+
+    prepared = prepare_turnover_document(
+        TurnoverOperationKind.RETURN_TO_CIRCULATION,
+        LpReturnDocument(
+            trade_participant_inn=INN,
+            products_list=(ReturnProduct(CIS, paid=False),),
+            return_type="OWN_USE_RETURN",
+        ),
+    )
+    assert prepared.raw_business_reason == "OWN_USE_RETURN"
+
+    with pytest.raises(TurnoverContractError, match="RETURN_REMOTE_SALE"):
+        prepare_turnover_document(
+            TurnoverOperationKind.RETURN_REMOTE_SALE,
+            LpReturnDocument(
+                trade_participant_inn=INN,
+                products_list=(ReturnProduct(CIS, paid=False),),
+                return_type="RETAIL_RETURN",
+            ),
+        )
 
 def test_preconditions_require_fresh_owner_plain_state_and_raw_reason() -> None:
     service = OperationPreconditionService(participant_inn=INN, now=lambda: NOW)
@@ -328,6 +426,14 @@ def test_reconciliation_needs_document_and_cis_postcondition() -> None:
     )
     assert unknown.state is ReconciliationState.PENDING
     assert unknown.document_status_raw == "NEW_UNKNOWN_STATUS"
+
+    generic = reconcile.reconcile(
+        operation_kind=TurnoverOperationKind.WITHDRAW,
+        document_status_raw="CHECKED_OK",
+        snapshots=(_snapshot(status="RETIRED", withdraw_reason="DISTANCE"),),
+    )
+    assert generic.state is ReconciliationState.MANUAL_REVIEW
+    assert generic.reason == "OPERATION_NOT_EXECUTABLE"
 
 
 def test_prepare_freezes_exact_bytes_and_operation_type_is_not_caller_arbitrary() -> None:

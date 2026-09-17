@@ -102,8 +102,9 @@ TURNOVER_OPERATION_REGISTRY: Mapping[TurnoverOperationKind, TurnoverOperationDef
         TurnoverOperationKind.INTRODUCE_FTS, "LP_FTS_INTRODUCE", ("MANUAL",), (M5_PG,), (),
         "FTS_INTRODUCTION", "INTRODUCED", None),
     TurnoverOperationKind.WITHDRAW: TurnoverOperationDefinition(
-        TurnoverOperationKind.WITHDRAW, "LK_RECEIPT", ("MANUAL",), (M5_PG,), ("DISTANCE",),
-        "WITHDRAWAL", "RETIRED", "LK_RECEIPT_CANCEL"),
+        TurnoverOperationKind.WITHDRAW, "LK_RECEIPT", ("MANUAL",), (M5_PG,), (),
+        "WITHDRAWAL_REFERENCE_ONLY", "UNKNOWN", "LK_RECEIPT_CANCEL",
+        capability="NOT_EXECUTABLE_EXACT_REASON_CONTRACTS_UNAVAILABLE"),
     TurnoverOperationKind.WITHDRAW_DISTANCE: TurnoverOperationDefinition(
         TurnoverOperationKind.WITHDRAW_DISTANCE, "LK_RECEIPT", ("MANUAL",), (M5_PG,), ("DISTANCE",),
         "DISTANCE_WITHDRAWAL", "RETIRED:DISTANCE", "LK_RECEIPT_CANCEL"),
@@ -647,18 +648,19 @@ class LkReceiptDistanceDocument:
 @dataclass(frozen=True, slots=True)
 class ReturnProduct:
     ki: str
+    paid: bool | None = None
     primary_document: PrimaryDocument | None = None
     permit: PermitDocument | None = None
 
-    def to_wire(self, *, include_primary: bool, include_permit: bool) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, Any]:
         result: dict[str, Any] = {"ki": _cis(self.ki, "ki")}
+        if self.paid is not None:
+            if type(self.paid) is not bool:
+                raise TurnoverContractError("products_list[].paid must be boolean")
+            result["paid"] = self.paid
         if self.primary_document is not None:
-            if not include_primary:
-                raise TurnoverContractError("item primary document is forbidden by the selected root tuple")
             result.update(self.primary_document.to_return_wire())
         if self.permit is not None:
-            if not include_permit:
-                raise TurnoverContractError("item permit is forbidden by the selected root tuple")
             result.update(self.permit.to_wire())
         return result
 
@@ -667,7 +669,7 @@ class ReturnProduct:
 class LpReturnDocument:
     trade_participant_inn: str
     products_list: tuple[ReturnProduct, ...]
-    paid: bool | None
+    paid: bool | None = None
     primary_document: PrimaryDocument | None = None
     permit: PermitDocument | None = None
     return_type: str = "REMOTE_SALE_RETURN"
@@ -676,37 +678,34 @@ class LpReturnDocument:
     def to_wire(self) -> dict[str, Any]:
         if self.return_type in UNSUPPORTED_LP_RETURN_TYPES:
             raise TurnoverManualReview("RETURN_TYPE_NOT_APPLICABLE_TO_LP")
-        if self.return_type != "REMOTE_SALE_RETURN":
-            raise TurnoverManualReview("RETURN_TYPE_MATRIX_NOT_CONFIRMED_FOR_M5_WIRE_ASSEMBLY")
-        if self.paid is None:
-            raise TurnoverManualReview("REMOTE_SALE_RETURN_PAID_REQUIRED")
-        if type(self.paid) is not bool:
+        if self.return_type not in KNOWN_LP_RETURN_TYPES:
+            raise TurnoverManualReview("RETURN_TYPE_MATRIX_NOT_CONFIRMED_FOR_LP")
+        if self.paid is not None and type(self.paid) is not bool:
             raise TurnoverContractError("paid must be boolean")
         if not self.products_list:
             raise TurnoverContractError("products_list must be non-empty")
-        has_item_primary = any(item.primary_document is not None for item in self.products_list)
-        has_item_permit = any(item.permit is not None for item in self.products_list)
-        if self.primary_document is not None and has_item_primary:
-            raise TurnoverContractError("primary document must be root-level or item-level, not mixed")
-        if self.permit is not None and has_item_permit:
-            raise TurnoverContractError("permit must be root-level or item-level, not mixed")
-        if self.paid:
-            if self.primary_document is None and not all(item.primary_document is not None for item in self.products_list):
-                raise TurnoverManualReview("REMOTE_SALE_RETURN_PRIMARY_DOCUMENT_REQUIRED")
-        elif self.primary_document is not None or has_item_primary:
-            raise TurnoverContractError("primary document must be absent for REMOTE_SALE_RETURN paid=false")
-        wires = [
-            item.to_wire(include_primary=self.primary_document is None, include_permit=self.permit is None)
-            for item in self.products_list
-        ]
+
+        wires: list[dict[str, Any]] = []
+        for item in self.products_list:
+            if item.paid is not None and type(item.paid) is not bool:
+                raise TurnoverContractError("products_list[].paid must be boolean")
+            effective_paid = item.paid if item.paid is not None else self.paid
+            if effective_paid is None:
+                raise TurnoverManualReview("LP_RETURN_PAID_REQUIRED")
+            effective_primary = item.primary_document if item.primary_document is not None else self.primary_document
+            if effective_paid is True and effective_primary is None:
+                raise TurnoverManualReview("LP_RETURN_PRIMARY_DOCUMENT_REQUIRED")
+            wires.append(item.to_wire())
+
         if len({item["ki"] for item in wires}) != len(wires):
             raise TurnoverContractError("products_list[].ki must be unique")
         result: dict[str, Any] = {
             "trade_participant_inn": _inn(self.trade_participant_inn, "trade_participant_inn"),
-            "return_type": "REMOTE_SALE_RETURN",
-            "paid": self.paid,
+            "return_type": self.return_type,
             "products_list": wires,
         }
+        if self.paid is not None:
+            result["paid"] = self.paid
         if self.primary_document is not None:
             result.update(self.primary_document.to_return_wire())
         if self.permit is not None:
@@ -845,7 +844,6 @@ _EXPECTED_CLASS: Mapping[TurnoverOperationKind, type] = {
     TurnoverOperationKind.INTRODUCE_REMAINS: LpIntroduceOstDocument,
     TurnoverOperationKind.INTRODUCE_CONTRACT: LkContractCommissioningDocument,
     TurnoverOperationKind.INTRODUCE_FTS: LpFtsIntroduceDocument,
-    TurnoverOperationKind.WITHDRAW: LkReceiptDistanceDocument,
     TurnoverOperationKind.WITHDRAW_DISTANCE: LkReceiptDistanceDocument,
     TurnoverOperationKind.RETURN_TO_CIRCULATION: LpReturnDocument,
     TurnoverOperationKind.RETURN_REMOTE_SALE: LpReturnDocument,
@@ -871,9 +869,17 @@ def prepare_turnover_document(kind: TurnoverOperationKind | str, document: Typed
         normalized = kind if isinstance(kind, TurnoverOperationKind) else TurnoverOperationKind(kind)
     except ValueError as exc:
         raise TurnoverContractError("unsupported turnover operation") from exc
-    expected_cls = _EXPECTED_CLASS[normalized]
+    expected_cls = _EXPECTED_CLASS.get(normalized)
+    if expected_cls is None:
+        raise TurnoverManualReview("OPERATION_NOT_EXECUTABLE")
     if not isinstance(document, expected_cls):
         raise TurnoverContractError("operation/document DTO mismatch")
+    if (
+        normalized is TurnoverOperationKind.RETURN_REMOTE_SALE
+        and isinstance(document, LpReturnDocument)
+        and document.return_type != "REMOTE_SALE_RETURN"
+    ):
+        raise TurnoverContractError("RETURN_REMOTE_SALE requires return_type=REMOTE_SALE_RETURN")
     definition = TURNOVER_OPERATION_REGISTRY[normalized]
     if document.document_type != definition.document_type:
         raise TurnoverContractError("operation/document type registry mismatch")
@@ -952,6 +958,18 @@ class PreconditionEvidence:
 RETURN_REASON_MATRIX: Mapping[tuple[str, str, str, str], str] = {
     (M5_PG, "RETIRED", "DISTANCE", "REMOTE_SALE_RETURN"): "SUPPORTED",
     (M5_PG, "RETIRED", "BY_SAMPLES", "REMOTE_SALE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "RETAIL", "RETAIL_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "BY_SAMPLES", "RETAIL_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "DISTANCE", "RETAIL_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "OWN_USE", "OWN_USE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "PRODUCTION_USE", "OWN_USE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "MEDICAL_USE", "OWN_USE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "VETERINARY_USE", "OWN_USE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "STATE_SECRET", "STATE_CONTRACT_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "DONATION", "NOT_FOR_SALE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "OWN_USE", "NOT_FOR_SALE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "PRODUCTION_USE", "NOT_FOR_SALE_RETURN"): "SUPPORTED",
+    (M5_PG, "RETIRED", "STATE_CONTRACT", "NOT_FOR_SALE_RETURN"): "SUPPORTED",
 }
 
 
@@ -1092,22 +1110,39 @@ class OperationPreconditionService:
                 raise TurnoverManualReview("DISTANCE_REQUIRES_INTRODUCED")
         return self._evidence(TurnoverOperationKind.WITHDRAW_DISTANCE, snapshots)
 
-    def validate_remote_sale_return(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+    def validate_return(
+        self,
+        snapshots: Sequence[CisSnapshot],
+        *,
+        return_type: str,
+        operation_kind: TurnoverOperationKind = TurnoverOperationKind.RETURN_TO_CIRCULATION,
+    ) -> PreconditionEvidence:
         if not snapshots:
             raise TurnoverContractError("return requires CIS snapshots")
+        if return_type in UNSUPPORTED_LP_RETURN_TYPES:
+            raise TurnoverManualReview("RETURN_TYPE_NOT_APPLICABLE_TO_LP")
+        if return_type not in KNOWN_LP_RETURN_TYPES:
+            raise TurnoverManualReview("RETURN_TYPE_MATRIX_NOT_CONFIRMED_FOR_LP")
         for snapshot in snapshots:
             self._fresh(snapshot)
             self._owned(snapshot)
             self._plain(snapshot)
             if snapshot.status != "RETIRED":
-                raise TurnoverManualReview("REMOTE_RETURN_REQUIRES_RETIRED")
+                raise TurnoverManualReview("RETURN_REQUIRES_RETIRED")
             validate_return_reason_matrix(
                 pg=M5_PG,
                 current_status=snapshot.status,
                 current_withdraw_reason=snapshot.withdraw_reason,
-                return_type="REMOTE_SALE_RETURN",
+                return_type=return_type,
             )
-        return self._evidence(TurnoverOperationKind.RETURN_REMOTE_SALE, snapshots)
+        return self._evidence(operation_kind, snapshots)
+
+    def validate_remote_sale_return(self, snapshots: Sequence[CisSnapshot]) -> PreconditionEvidence:
+        return self.validate_return(
+            snapshots,
+            return_type="REMOTE_SALE_RETURN",
+            operation_kind=TurnoverOperationKind.RETURN_REMOTE_SALE,
+        )
 
     def validate_remark(
         self,
@@ -1203,9 +1238,13 @@ class OperationReconciliationService:
             if document_status_raw in {"CHECKED_NOT_OK", "PARSE_ERROR", "PROCESSING_ERROR"}:
                 return ReconciliationResult(ReconciliationState.MANUAL_REVIEW, document_status_raw, "DOCUMENT_TERMINAL_FAILURE", observed)
             return ReconciliationResult(ReconciliationState.PENDING, document_status_raw, "DOCUMENT_NOT_CONFIRMED_SUCCESS", observed)
+        if kind is TurnoverOperationKind.WITHDRAW:
+            return ReconciliationResult(
+                ReconciliationState.MANUAL_REVIEW, document_status_raw, "OPERATION_NOT_EXECUTABLE", observed
+            )
         if not snapshots and kind is not TurnoverOperationKind.CANCEL_WITHDRAWAL:
             return ReconciliationResult(ReconciliationState.PENDING, document_status_raw, "FRESH_CIS_POSTCONDITION_REQUIRED", observed)
-        if kind in {TurnoverOperationKind.WITHDRAW, TurnoverOperationKind.WITHDRAW_DISTANCE}:
+        if kind is TurnoverOperationKind.WITHDRAW_DISTANCE:
             ok = all(item.status == "RETIRED" and item.withdraw_reason == "DISTANCE" for item in snapshots)
         elif kind in {
             TurnoverOperationKind.RETURN_TO_CIRCULATION,
