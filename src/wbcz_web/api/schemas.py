@@ -91,3 +91,38 @@ class ReferenceRdDocument(StrictModel):
 
 class ReferenceRdListRequest(StrictModel):
     documents: list[ReferenceRdDocument] = Field(min_length=1, max_length=25)
+
+
+class DocumentPageRequest(StrictModel):
+    ordered_column_value: str = Field(min_length=1, max_length=512)
+    direction: Literal["PREV", "NEXT"] = "NEXT"
+
+
+class DocumentListRequest(StrictModel):
+    operation_id: str | None = Field(default=None, min_length=1, max_length=128)
+    document_id: str | None = Field(default=None, min_length=1, max_length=256)
+    did: str | None = Field(default=None, min_length=1, max_length=512)
+    document_type_code: str | list[str] | None = None
+    document_status_code: str | None = Field(default=None, min_length=1, max_length=128)
+    operation: str | None = Field(default=None, min_length=1, max_length=128)
+    document_format: Literal["MANUAL", "UPD", "XML", "CSV"] | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    limit: int = Field(default=50, ge=1, le=1000)
+    order: Literal["ASC", "DESC"] = "DESC"
+    page: DocumentPageRequest | None = None
+    sender_inn: str | None = None
+    receiver_inn: str | None = None
+
+
+class DocumentInfoRequest(StrictModel):
+    operation_id: str | None = Field(default=None, min_length=1, max_length=128)
+    document_id: str = Field(min_length=1, max_length=256)
+    body: bool = False
+    content: bool = False
+
+
+class DocumentCisesRequest(StrictModel):
+    operation_id: str | None = Field(default=None, min_length=1, max_length=128)
+    document_id: str | None = Field(default=None, min_length=1, max_length=256)
+    write_operation_id: str | None = Field(default=None, min_length=1, max_length=128)
