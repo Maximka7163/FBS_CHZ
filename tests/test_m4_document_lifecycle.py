@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import wbcz.document_lifecycle as lifecycle_module
 from wbcz.document_lifecycle import (
     DOCUMENT_STATUS_REGISTRY,
     DOCUMENT_TYPE_REGISTRY,
@@ -33,6 +34,10 @@ def test_document_type_and_format_registry_matches_accepted_v726_contract():
     assert DOCUMENT_TYPE_REGISTRY["UNIVERSAL_TRANSFER_DOCUMENT"].formats == (DocumentFormat.XML,)
     assert DOCUMENT_TYPE_REGISTRY["LK_RECEIPT_CSV"].formats == (DocumentFormat.CSV,)
     assert "ADDOPTION" not in {item.value for item in DocumentFormat}
+    assert not hasattr(lifecycle_module, "LocalDocumentCategory")
+    assert not hasattr(lifecycle_module, "LocalProcessingErrorCode")
+    source = Path("src/wbcz/document_lifecycle.py").read_text(encoding="utf-8")
+    assert all(value not in source for value in ("ADDOPTION", "AGENCY", "OTHER", "INVALID_DOCUMENT_ID", "INVALID_DOCUMENT_STATUS", "DOCUMENT_ALREADY_PROCESSED", "CONTRACT_ERROR"))
 
 
 def test_raw_status_registry_preserves_official_inconsistency_and_unknown_values():
@@ -45,46 +50,51 @@ def test_raw_status_registry_preserves_official_inconsistency_and_unknown_values
     assert classify_direct_status("FUTURE_STATUS").value == "UNKNOWN"
 
 
-def test_document_list_typed_wire_filters_and_local_aliases():
+def test_document_list_typed_wire_filters_and_only_document_id_alias():
     payload = {
         "document_id": "doc-1",
-        "did": "search-fragment",
+        "number": "official-number",
         "document_type_code": ["LK_RECEIPT", "LP_RETURN"],
-        "operation": "CHECKED_OK",
+        "document_status_code": "CHECKED_OK",
         "date_from": "2026-09-01T00:00:00+03:00",
         "date_to": "2026-09-17T23:59:59+03:00",
-        "page": {"ordered_column_value": "2026-09-17T12:00:00Z", "direction": "NEXT"},
+        "ordered_column_value": "2026-09-17T12:00:00Z",
+        "page_dir": "NEXT",
         "limit": 1000,
         "order": "DESC",
         "sender_inn": INN,
     }
     canonical = validate_m4_job_payload("DOCUMENT_LIST", payload)
-    assert canonical["document_status_code"] == "CHECKED_OK"
-    assert "operation" not in canonical
+    assert canonical["did"] == "doc-1"
+    assert "document_id" not in canonical
+    assert canonical["number"] == "official-number"
     spec = build_document_read_spec("DOCUMENT_LIST", payload)
     assert spec.method == "GET"
     assert spec.target.startswith("/api/v4/true-api/doc/list?")
     assert "pg=lp" in spec.target
-    assert "number=doc-1" in spec.target
-    assert "did=search-fragment" in spec.target
+    assert "did=doc-1" in spec.target
+    assert "number=official-number" in spec.target
     assert "documentStatus=CHECKED_OK" in spec.target
     assert spec.target.count("documentType=") == 2
     assert "orderedColumnValue=" in spec.target and "pageDir=NEXT" in spec.target
     assert "senderInn=1234567890" in spec.target
-    assert "operation=" not in spec.target
-    assert "page=" not in spec.target
+    assert "operation=" not in spec.target and "page=" not in spec.target
 
 
-def test_document_list_rejects_conflicting_aliases_and_invented_filters():
+def test_document_list_rejects_removed_aliases_and_invented_filters():
     with pytest.raises(DocumentLifecycleContractError):
-        validate_m4_job_payload("DOCUMENT_LIST", {"operation": "CHECKED_OK", "document_status_code": "FAILED"})
+        validate_m4_job_payload("DOCUMENT_LIST", {"operation": "CHECKED_OK"})
+    with pytest.raises(DocumentLifecycleContractError):
+        validate_m4_job_payload("DOCUMENT_LIST", {"page": {"ordered_column_value": "x", "direction": "NEXT"}})
+    with pytest.raises(DocumentLifecycleContractError):
+        validate_m4_job_payload("DOCUMENT_LIST", {"document_id": "doc-1", "did": "doc-1"})
     with pytest.raises(DocumentLifecycleContractError):
         validate_m4_job_payload("DOCUMENT_LIST", {"sender_inn": INN, "receiver_inn": INN})
     with pytest.raises(DocumentLifecycleContractError):
         validate_m4_job_payload("DOCUMENT_LIST", {"cancel": True})
 
 
-def test_document_info_expanded_metadata_errors_and_explicit_generic_stubs():
+def test_document_info_expanded_metadata_errors_without_edo_placeholders():
     payload = {
         "number": "doc-1",
         "docDate": "2026-09-17T10:00:00Z",
@@ -119,10 +129,9 @@ def test_document_info_expanded_metadata_errors_and_explicit_generic_stubs():
     assert parsed["status"]["known"] is False
     assert parsed["errors"] == [{"raw_message": "raw operation error"}]
     assert parsed["commonErrors"][0]["raw_code"] == "INTRO_ERROR"
-    assert parsed["commonErrors"][0]["local_code"] is None
+    assert "local_code" not in parsed["commonErrors"][0]
     assert parsed["commonErrors"][1]["raw_code"] == "ERROR_777"
-    assert parsed["operations"] == [] and parsed["attachments"] == [] and parsed["receipts"] == []
-    assert parsed["generic_capabilities"]["receipts"] == "EDO_SPECIFIC_OPTIONAL_LATER"
+    assert all(key not in parsed for key in ("operations", "attachments", "receipts", "generic_capabilities"))
     assert parsed["raw"]["futureField"] == 42
 
 

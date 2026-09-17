@@ -38,15 +38,6 @@ class DocumentListFormat(StrEnum):
     CSV = "CSV"
 
 
-class LocalDocumentCategory(StrEnum):
-    """Sellari-local categorisation only; these are not True API document_format values."""
-
-    MANUAL = "MANUAL"
-    ADDOPTION = "ADDOPTION"
-    AGENCY = "AGENCY"
-    OTHER = "OTHER"
-
-
 @dataclass(frozen=True, slots=True)
 class DocumentTypeDefinition:
     type_code: str
@@ -183,15 +174,6 @@ def status_display(raw_status: Any) -> str:
     return item.display if item else raw_status
 
 
-class LocalProcessingErrorCode(StrEnum):
-    """Sellari-local error categories; never replace CRPT commonErrors.errorCode."""
-
-    INVALID_DOCUMENT_ID = "INVALID_DOCUMENT_ID"
-    INVALID_DOCUMENT_STATUS = "INVALID_DOCUMENT_STATUS"
-    DOCUMENT_ALREADY_PROCESSED = "DOCUMENT_ALREADY_PROCESSED"
-    CONTRACT_ERROR = "CONTRACT_ERROR"
-
-
 @dataclass(frozen=True, slots=True)
 class OperationProcessingError:
     raw_message: str
@@ -202,7 +184,6 @@ class CommonProcessingError:
     raw_code: str | None
     message: str | None
     error_object: Any
-    local_code: LocalProcessingErrorCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,18 +245,6 @@ def _query(path: str, pairs: Iterable[tuple[str, str]]) -> str:
     return f"{path}?{encoded}" if encoded else path
 
 
-def _page_cursor(value: Any) -> dict[str, str]:
-    item = _expect_object(value, "page")
-    unknown = set(item) - {"ordered_column_value", "direction"}
-    if unknown:
-        raise DocumentLifecycleContractError(f"page has unknown fields: {sorted(unknown)}")
-    cursor = _expect_string(item.get("ordered_column_value"), "page.ordered_column_value")
-    direction = _expect_string(item.get("direction", "NEXT"), "page.direction").upper()
-    if direction not in {"PREV", "NEXT"}:
-        raise DocumentLifecycleContractError("page.direction must be PREV or NEXT")
-    return {"ordered_column_value": cursor, "direction": direction}
-
-
 def validate_m4_job_payload(job_type: str, payload: Any) -> dict[str, Any]:
     if job_type not in M4_READ_JOB_TYPES:
         raise DocumentLifecycleContractError("unsupported M4 read job type")
@@ -283,18 +252,22 @@ def validate_m4_job_payload(job_type: str, payload: Any) -> dict[str, Any]:
 
     if job_type == "DOCUMENT_LIST":
         allowed = {
-            "document_id", "did", "document_type_code", "document_status_code", "operation",
-            "document_format", "date_from", "date_to", "limit", "order", "page",
-            "sender_inn", "receiver_inn",
+            "document_id", "did", "number", "document_type_code", "document_status_code",
+            "document_format", "date_from", "date_to", "limit", "order",
+            "ordered_column_value", "page_dir", "sender_inn", "receiver_inn",
         }
         unknown = set(root) - allowed
         if unknown:
             raise DocumentLifecycleContractError(f"DOCUMENT_LIST has unknown fields: {sorted(unknown)}")
         normalized: dict[str, Any] = {}
         if "document_id" in root and root["document_id"] is not None:
-            normalized["document_id"] = _document_id(root["document_id"])
-        if "did" in root and root["did"] is not None:
+            if "did" in root and root["did"] is not None:
+                raise DocumentLifecycleContractError("document_id is a local alias for did; provide only one")
+            normalized["did"] = _document_id(root["document_id"])
+        elif "did" in root and root["did"] is not None:
             normalized["did"] = _expect_string(root["did"], "did")
+        if "number" in root and root["number"] is not None:
+            normalized["number"] = _expect_string(root["number"], "number")
         if "document_type_code" in root and root["document_type_code"] is not None:
             value = root["document_type_code"]
             values = value if isinstance(value, list) else [value]
@@ -309,10 +282,6 @@ def validate_m4_job_payload(job_type: str, payload: Any) -> dict[str, Any]:
             normalized["document_type_code"] = normalized_types
         if "document_status_code" in root and root["document_status_code"] is not None:
             normalized["document_status_code"] = _expect_string(root["document_status_code"], "document_status_code")
-        if "operation" in root and root["operation"] is not None:
-            if "document_status_code" in normalized:
-                raise DocumentLifecycleContractError("operation and document_status_code are aliases; provide only one")
-            normalized["document_status_code"] = _expect_string(root["operation"], "operation")
         if "document_format" in root and root["document_format"] is not None:
             fmt = _expect_string(root["document_format"], "document_format").upper()
             if fmt not in {item.value for item in DocumentListFormat}:
@@ -330,8 +299,13 @@ def validate_m4_job_payload(job_type: str, payload: Any) -> dict[str, Any]:
         if order not in {"ASC", "DESC"}:
             raise DocumentLifecycleContractError("order must be ASC or DESC")
         normalized["order"] = order
-        if "page" in root and root["page"] is not None:
-            normalized["page"] = _page_cursor(root["page"])
+        if "ordered_column_value" in root and root["ordered_column_value"] is not None:
+            normalized["ordered_column_value"] = _expect_string(root["ordered_column_value"], "ordered_column_value")
+        if "page_dir" in root and root["page_dir"] is not None:
+            page_dir = _expect_string(root["page_dir"], "page_dir").upper()
+            if page_dir not in {"PREV", "NEXT"}:
+                raise DocumentLifecycleContractError("page_dir must be PREV or NEXT")
+            normalized["page_dir"] = page_dir
         if "sender_inn" in root and root["sender_inn"] is not None:
             normalized["sender_inn"] = _inn(root["sender_inn"], "sender_inn")
         if "receiver_inn" in root and root["receiver_inn"] is not None:
@@ -383,11 +357,12 @@ def build_document_read_spec(job_type: str, payload: Any) -> DocumentReadSpec:
         for code in normalized.get("document_type_code", []):
             pairs.append(("documentType", code))
         pairs.extend((("limit", str(normalized["limit"])), ("order", normalized["order"])))
-        if "document_id" in normalized:
-            pairs.append(("number", normalized["document_id"]))
-        if "page" in normalized:
-            pairs.append(("orderedColumnValue", normalized["page"]["ordered_column_value"]))
-            pairs.append(("pageDir", normalized["page"]["direction"]))
+        if "number" in normalized:
+            pairs.append(("number", normalized["number"]))
+        if "ordered_column_value" in normalized:
+            pairs.append(("orderedColumnValue", normalized["ordered_column_value"]))
+        if "page_dir" in normalized:
+            pairs.append(("pageDir", normalized["page_dir"]))
         if "sender_inn" in normalized:
             pairs.append(("senderInn", normalized["sender_inn"]))
         if "receiver_inn" in normalized:
@@ -458,7 +433,6 @@ def _parse_common_errors(value: Any) -> list[CommonProcessingError]:
                 raw_code=str(code) if code is not None else None,
                 message=str(message) if message is not None else None,
                 error_object=item.get("errorObject"),
-                local_code=None,
             )
         )
     return result
@@ -499,10 +473,6 @@ def parse_document_info(payload: Any) -> dict[str, Any]:
     root = _expect_object(payload, "doc/info response")
     errors = [asdict(v) for v in _parse_errors(root.get("errors"))]
     common = [asdict(v) for v in _parse_common_errors(root.get("commonErrors"))]
-    # Generic True API does not expose a chronological operations list,
-    # attachments collection or generic receipts collection. Keep explicit local
-    # stubs so API consumers cannot mistake absent generic capabilities for empty
-    # authoritative history.
     return {
         "number": root.get("number"),
         "docDate": root.get("docDate"),
@@ -527,14 +497,6 @@ def parse_document_info(payload: Any) -> dict[str, Any]:
         "productGroup": root.get("productGroup"),
         "productGroupId": root.get("productGroupId"),
         "eliminationReason": root.get("eliminationReason"),
-        "operations": [],
-        "attachments": [],
-        "receipts": [],
-        "generic_capabilities": {
-            "operations": "NOT_DOCUMENTED_GENERIC_TRUE_API",
-            "attachments": "NOT_DOCUMENTED_GENERIC_TRUE_API",
-            "receipts": "EDO_SPECIFIC_OPTIONAL_LATER",
-        },
         "raw": root,
     }
 

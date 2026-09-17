@@ -16,7 +16,6 @@ from wbcz.document_lifecycle import (
     M4_SOURCE_VERSION,
     DocumentFormat,
     DocumentListFormat,
-    LocalDocumentCategory,
     local_idempotency_key,
     validate_m4_job_payload,
 )
@@ -300,7 +299,6 @@ class DocumentLifecycleService:
             "source_version": M4_SOURCE_VERSION,
             "document_formats": [item.value for item in DocumentFormat],
             "document_list_formats": [item.value for item in DocumentListFormat],
-            "local_document_categories": [item.value for item in LocalDocumentCategory],
             "document_types": [
                 {
                     "type_code": item.type_code,

@@ -20,13 +20,13 @@ All are represented as typed agent jobs. The caller cannot supply an arbitrary m
 
 M4 supports the documented v726.0 filter set used by this product: `pg`, `dateFrom`, `dateTo`, `did`, `documentFormat`, `documentStatus`, repeated `documentType`, `limit`, `number`, `order`, `orderedColumnValue`, `pageDir`, `senderInn`, `receiverInn`.
 
-Local API aliases such as `document_id`, `document_type_code`, `document_status_code`, `operation`, and `page` are local normalization only. They are never forwarded as invented True API wire fields.
+Local `document_id` is the only document-list identifier alias and maps only to official `did`. `operation` and `page` aliases are rejected. Official `number`, `orderedColumnValue`, and `pageDir` remain distinct documented filters and are never synthesized from those removed aliases.
 
 `pg` is fixed to `lp`. `senderInn` and `receiverInn` are not accepted together. M4 does not invent the officially inconsistent rule that one of them must always be present.
 
 ### Document info
 
-M4 can request `body` and `content` and preserves documented metadata, raw status, `errors[]`, and `commonErrors[]`. Generic operations history, attachments, detached-signature download, and generic receipts are not documented by the generic API and are therefore exposed only as explicit local capability stubs, never as authoritative remote data.
+M4 can request `body` and `content` and preserves documented metadata, raw status, `errors[]`, and `commonErrors[]`. Generic operations history, attachments, detached-signature download, and generic receipts are not documented by the generic API and are not emitted by the generic document-info parser.
 
 ### Document CIS list
 
@@ -49,7 +49,7 @@ M4 can request `body` and `content` and preserves documented metadata, raw statu
 
 ## Processing errors
 
-`errors[]` are preserved as raw strings. `commonErrors[]` preserves `errorCode`, `errorMessage`, and `errorObject`. `commonErrors.errorCode` is an arbitrary raw string because v726.0 is internally inconsistent (`ERROR_<number>` vs `INTRO_ERROR`). Sellari-local categories such as `INVALID_DOCUMENT_ID` are UI/backend aliases only and never replace the CRPT raw code.
+`errors[]` are preserved as raw strings. `commonErrors[]` preserves `errorCode`, `errorMessage`, and `errorObject`. `commonErrors.errorCode` is an arbitrary raw string because v726.0 is internally inconsistent (`ERROR_<number>` vs `INTRO_ERROR`). M4 introduces no local processing-error normalization enum.
 
 ## Local audit and idempotency
 
