@@ -27,12 +27,17 @@ jobs:
               if s.count(old)!=1: raise SystemExit(f'{path}: expected exactly one match for {old[:80]!r}, got {s.count(old)}')
               p.write_text(s.replace(old,new,1),encoding='utf-8')
 
+          def rep_all(path, old, new):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              if s.count(old)<1: raise SystemExit(f'{path}: no match for {old[:80]!r}')
+              p.write_text(s.replace(old,new),encoding='utf-8')
+
           p='src/wbcz/windows_agent.py'
           rep(p, 'from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES\n', 'from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES\nfrom wbcz.aggregation import M6_DOCUMENT_TYPES\n')
           rep(p, '    LK_RECEIPT_CANCEL = "LK_RECEIPT_CANCEL"\n    POLL_DOCUMENT = "POLL_DOCUMENT"\n', '    LK_RECEIPT_CANCEL = "LK_RECEIPT_CANCEL"\n    AGGREGATION_DOCUMENT = "AGGREGATION_DOCUMENT"\n    SETS_AGGREGATION = "SETS_AGGREGATION"\n    REAGGREGATION_DOCUMENT = "REAGGREGATION_DOCUMENT"\n    DISAGGREGATION_DOCUMENT = "DISAGGREGATION_DOCUMENT"\n    ATK_AGGREGATION = "ATK_AGGREGATION"\n    ATK_TRANSFORMATION = "ATK_TRANSFORMATION"\n    ATK_DISAGGREGATION = "ATK_DISAGGREGATION"\n    POLL_DOCUMENT = "POLL_DOCUMENT"\n')
           rep(p, '        if self.job_type.value in M5_AGENT_WRITE_JOB_TYPES:\n', '        if self.job_type.value in (M5_AGENT_WRITE_JOB_TYPES | M6_DOCUMENT_TYPES):\n')
           rep(p, '            if self.document_type not in M5_DOCUMENT_TYPES:\n', '            if self.document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):\n')
-          rep(p, '        if document_type not in M5_DOCUMENT_TYPES:\n', '        if document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):\n')
+          rep_all(p, '        if document_type not in M5_DOCUMENT_TYPES:\n', '        if document_type not in (M5_DOCUMENT_TYPES | M6_DOCUMENT_TYPES):\n')
 
           p='src/wbcz_web/models/agent.py'
           old="'WRITE_OFF','LK_RECEIPT_CANCEL')\", name=\"ck_agent_jobs_type\")"
