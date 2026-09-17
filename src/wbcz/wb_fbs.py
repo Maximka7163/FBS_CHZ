@@ -881,3 +881,239 @@ def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
 
 def read_retry_candidate(status_code: int | None, *, network_error: bool = False) -> bool:
     return network_error or status_code == 429 or (status_code is not None and 500 <= status_code <= 599)
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitDecision:
+    allowed: bool
+    retry_after_seconds: float
+
+
+@dataclass(slots=True)
+class _TokenBucket:
+    tokens: float
+    updated_at: float
+
+
+class StatefulWbRateLimiter:
+    """In-process limiter state keyed by rate family, token type and secret reference.
+
+    This is deliberately transport-independent: it never sleeps and never performs HTTP.
+    Callers receive a deterministic allow/delay decision.
+    """
+
+    def __init__(self) -> None:
+        self._buckets: dict[tuple[str, str, str, str], _TokenBucket] = {}
+
+    @staticmethod
+    def _scope_key(family: str, environment: WbEnvironment) -> str:
+        if environment is WbEnvironment.SANDBOX and family == "MARKETPLACE_FBS":
+            return "SANDBOX_MARKETPLACE_GLOBAL_METHOD_FAMILY"
+        return family
+
+    def _bucket_key(
+        self,
+        family: str,
+        token_type: WbTokenType,
+        environment: WbEnvironment,
+        token_secret_ref: str,
+    ) -> tuple[str, str, str, str]:
+        return (
+            self._scope_key(family, environment),
+            token_type.value,
+            environment.value,
+            _opaque(token_secret_ref, "token_secret_ref"),
+        )
+
+    def consume(
+        self,
+        *,
+        family: str,
+        token_type: WbTokenType,
+        environment: WbEnvironment,
+        token_secret_ref: str,
+        now_monotonic: float,
+        weight: int = 1,
+    ) -> RateLimitDecision:
+        if weight <= 0:
+            raise WbContractError("rate-limit weight must be positive")
+        rule = WbRateLimiter().rule(family, token_type, environment)
+        key = self._bucket_key(family, token_type, environment, token_secret_ref)
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = _TokenBucket(float(rule.burst), float(now_monotonic))
+            self._buckets[key] = bucket
+        elapsed = max(0.0, float(now_monotonic) - bucket.updated_at)
+        refill_per_second = rule.limit / rule.period_seconds
+        bucket.tokens = min(float(rule.burst), bucket.tokens + elapsed * refill_per_second)
+        bucket.updated_at = float(now_monotonic)
+        if bucket.tokens >= weight:
+            bucket.tokens -= weight
+            return RateLimitDecision(True, 0.0)
+        missing = weight - bucket.tokens
+        return RateLimitDecision(False, missing / refill_per_second)
+
+    def charge_response(
+        self,
+        *,
+        family: str,
+        token_type: WbTokenType,
+        environment: WbEnvironment,
+        token_secret_ref: str,
+        now_monotonic: float,
+        status_code: int,
+    ) -> RateLimitDecision:
+        total_weight = WbRateLimiter.response_weight(family, status_code, environment)
+        if total_weight <= 1:
+            return RateLimitDecision(True, 0.0)
+        return self.consume(
+            family=family,
+            token_type=token_type,
+            environment=environment,
+            token_secret_ref=token_secret_ref,
+            now_monotonic=now_monotonic,
+            weight=total_weight - 1,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedOrderFeedRow:
+    nm_id: int | None
+    chrt_id: int | None
+    srid: str | None
+    created_at_raw: str | None
+    updated_at_raw: str | None
+    status: RawWbValue
+    cancel_type: RawWbValue
+    warehouse_name: str | None
+    warehouse_region: str | None
+    is_mp: bool | None
+    destination_city: str | None
+    destination_district: str | None
+    seller_price_raw: object | None
+    is_b2b: bool | None
+    source_fingerprint: str
+    raw_sanitized: Mapping[str, object]
+
+
+def _optional_int(value: object) -> int | None:
+    return value if type(value) is int else None
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _optional_bool(value: object) -> bool | None:
+    return value if type(value) is bool else None
+
+
+def normalize_order_feed_row(row: Mapping[str, object]) -> NormalizedOrderFeedRow:
+    safe = redact_mapping(row)
+    return NormalizedOrderFeedRow(
+        nm_id=_optional_int(row.get("nmId")),
+        chrt_id=_optional_int(row.get("chrtId")),
+        srid=_optional_str(row.get("srid")),
+        created_at_raw=_optional_str(row.get("createdAt")),
+        updated_at_raw=_optional_str(row.get("updatedAt")),
+        status=parse_order_feed_status(row.get("status")),
+        cancel_type=parse_order_feed_cancel_type(row.get("cancelType")),
+        warehouse_name=_optional_str(row.get("warehouseName")),
+        warehouse_region=_optional_str(row.get("warehouseRegion")),
+        is_mp=_optional_bool(row.get("isMp")),
+        destination_city=_optional_str(row.get("destinationCity")),
+        destination_district=_optional_str(row.get("destinationDistrict")),
+        seller_price_raw=row.get("sellerPrice"),
+        is_b2b=_optional_bool(row.get("isB2b")),
+        source_fingerprint=stable_hash(safe),
+        raw_sanitized=safe,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MarketplaceOrderStatusEvidence:
+    assembly_order_id: int | None
+    supplier_status_raw: str | None
+    wb_status_raw: str | None
+    is_cancellable: bool | None
+    raw_sanitized: Mapping[str, object]
+
+
+def normalize_marketplace_order_status(row: Mapping[str, object]) -> MarketplaceOrderStatusEvidence:
+    return MarketplaceOrderStatusEvidence(
+        assembly_order_id=_optional_int(row.get("id", row.get("orderId"))),
+        supplier_status_raw=_optional_str(row.get("supplierStatus")),
+        wb_status_raw=_optional_str(row.get("wbStatus")),
+        is_cancellable=_optional_bool(row.get("isCancellable")),
+        raw_sanitized=redact_mapping(row),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class GoodsReturnEvidence:
+    order_id_raw: str | None
+    srid: str | None
+    barcode: str | None
+    nm_id: int | None
+    sticker_id: str | None
+    shk_id: str | None
+    ready_to_return: ParsedTimestamp
+    completed: ParsedTimestamp
+    raw_return_status: str | None
+    raw_return_type: str | None
+    source_fingerprint: str
+    raw_sanitized: Mapping[str, object]
+
+    @property
+    def physically_returned(self) -> bool:
+        return self.completed.raw is not None
+
+
+def normalize_goods_return_row(row: Mapping[str, object]) -> GoodsReturnEvidence:
+    safe = redact_mapping(row)
+    order_id_value = row.get("orderId")
+    return GoodsReturnEvidence(
+        order_id_raw=str(order_id_value) if order_id_value is not None else None,
+        srid=_optional_str(row.get("srid")),
+        barcode=_optional_str(row.get("barcode")),
+        nm_id=_optional_int(row.get("nmId")),
+        sticker_id=_optional_str(row.get("stickerId", row.get("sticker"))),
+        shk_id=_optional_str(row.get("shkId", row.get("shk"))),
+        ready_to_return=parse_goods_return_timestamp(_optional_str(row.get("readyToReturnDt"))),
+        completed=parse_goods_return_timestamp(_optional_str(row.get("completedDt"))),
+        raw_return_status=_optional_str(row.get("status", row.get("returnStatus"))),
+        raw_return_type=_optional_str(row.get("type", row.get("returnType"))),
+        source_fingerprint=stable_hash(safe),
+        raw_sanitized=safe,
+    )
+
+
+def supplier_sales_next_date_from(rows: Sequence[Mapping[str, object]], current_date_from: str) -> str:
+    if not rows:
+        return _opaque(current_date_from, "dateFrom")
+    raw = rows[-1].get("lastChangeDate")
+    if not isinstance(raw, str) or not raw:
+        raise WbContractError("last Supplier Sales row has no exact lastChangeDate")
+    return raw
+
+
+@dataclass(frozen=True, slots=True)
+class AssemblyOrderEvidence:
+    connection_id: int
+    assembly_order_id: int
+    source_family: str
+    fingerprint: str
+
+
+class AssemblyEvidenceMergeState(str, Enum):
+    NEW = "NEW"
+    DUPLICATE = "DUPLICATE"
+    EVIDENCE_CONFLICT = "EVIDENCE_CONFLICT"
+
+
+def compare_assembly_evidence(existing: AssemblyOrderEvidence, incoming: AssemblyOrderEvidence) -> AssemblyEvidenceMergeState:
+    if (existing.connection_id, existing.assembly_order_id) != (incoming.connection_id, incoming.assembly_order_id):
+        return AssemblyEvidenceMergeState.NEW
+    if existing.fingerprint == incoming.fingerprint:
+        return AssemblyEvidenceMergeState.DUPLICATE
+    return AssemblyEvidenceMergeState.EVIDENCE_CONFLICT
