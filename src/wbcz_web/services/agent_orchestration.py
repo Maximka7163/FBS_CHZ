@@ -183,6 +183,9 @@ class AgentOrchestrationBroker:
             self.db,
             artifact_store=store,
             temp_root=Path(self.config.report_temp_root),
+            remote_download_byte_ceiling=self.config.report_remote_download_byte_ceiling,
+            temp_storage_ceiling_bytes=self.config.report_temp_storage_ceiling_bytes,
+            min_free_disk_bytes=self.config.report_min_free_disk_bytes,
         )
 
     def upload_report_artifact(
