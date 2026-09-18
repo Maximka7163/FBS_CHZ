@@ -3,6 +3,7 @@ from .agent import AgentJobRecord, DocumentLifecycleLedgerRecord, TurnoverOperat
 from .edo_lite import EdoLiteAnnualQuotaRecord, EdoLiteLedgerRecord, EdoLiteSchemaRegistryRecord
 from .suz import SuzCodeBlockRecord, SuzConnectionRecord, SuzKmVaultRecord, SuzOrderItemRecord, SuzOrderRecord, SuzReconciliationEventRecord
 from .wb_fbs import WbConnectionRecord, WbOrderRecord, WbMarkingBindingRecord, WbEventRecord, WbReturnRecord, WbSyncCursorRecord, WbReconciliationRecord, WbPaidEvidenceRecord
+from .ozon import OzonConnectionRecord, OzonPostingRecord, OzonItemRecord, OzonMarkingBindingRecord, OzonEventRecord, OzonReturnRecord, OzonSyncCursorRecord, OzonReconciliationRecord, OzonPaidEvidenceRecord
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -13,5 +14,7 @@ __all__ = [
     "SuzOrderRecord", "SuzOrderItemRecord", "SuzCodeBlockRecord", "SuzKmVaultRecord",
     "SuzReconciliationEventRecord", "WbConnectionRecord", "WbOrderRecord",
     "WbMarkingBindingRecord", "WbEventRecord", "WbReturnRecord", "WbSyncCursorRecord",
-    "WbReconciliationRecord", "WbPaidEvidenceRecord",
+    "WbReconciliationRecord", "WbPaidEvidenceRecord", "OzonConnectionRecord",
+    "OzonPostingRecord", "OzonItemRecord", "OzonMarkingBindingRecord", "OzonEventRecord",
+    "OzonReturnRecord", "OzonSyncCursorRecord", "OzonReconciliationRecord", "OzonPaidEvidenceRecord",
 ]
