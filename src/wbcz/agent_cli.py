@@ -145,7 +145,7 @@ class WindowsAgentPreflight:
                 else None
             ),
             "production_write": False,
-            "production_true_api_reports": self.transport.production_true_api_reports,
+            "production_true_api_reports": bool(getattr(self.transport, "production_true_api_reports", False)),
         }
 
 
