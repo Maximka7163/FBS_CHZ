@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from wbcz.m11_reports import (
@@ -956,7 +956,7 @@ class TrueApiReportOrchestrator:
                 self.repo.fail(report.id, code=result.error_code or "REMOTE_DOWNLOAD_FAILED", message_redacted="remote report archive download failed")
                 return
             ready_artifact = self.db.scalar(
-                __import__("sqlalchemy").select(ReportArtifactRecord).where(
+                select(ReportArtifactRecord).where(
                     ReportArtifactRecord.report_job_id == report.id,
                     ReportArtifactRecord.artifact_role == ArtifactRole.REMOTE_TRUE_API_ARCHIVE.value,
                     ReportArtifactRecord.state == "READY",
