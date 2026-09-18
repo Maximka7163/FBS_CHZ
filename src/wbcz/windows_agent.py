@@ -300,6 +300,10 @@ class AgentJob:
                 raise AgentSecurityError(str(exc)) from exc
             if normalized != self.read_payload:
                 raise AgentSecurityError("M11 report read_payload must already be canonical")
+            if self.job_type is AgentJobType.REPORT_CREATE:
+                filters = normalized.get("filters")
+                if not isinstance(filters, Mapping) or filters.get("participant_inn") != self.expected_inn:
+                    raise AgentSecurityError("M11 report participant does not match expected_inn")
         else:
             raise AgentSecurityError("unsupported agent job type")
 
