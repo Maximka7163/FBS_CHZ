@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -13,6 +14,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from wbcz.m11_reports import (
+    REMOTE_CREATE_AMBIGUOUS,
+    ReportArtifactUploadBinding,
     ArtifactIntegrityConflict,
     ArtifactKeyProvider,
     ArtifactRole,
@@ -33,8 +36,12 @@ from wbcz.m11_reports import (
     materialize_jsonl_snapshot,
     safe_filename,
     sanitize_report_evidence,
+    validate_report_agent_payload,
 )
+from wbcz.models import canonical_json
+from wbcz.windows_agent import AgentJob, AgentJobType, AgentResult, P0_PG
 from wbcz_web.models.reports import ReportArtifactRecord, ReportJobRecord, ReportSnapshotRecord
+from wbcz_web.repositories.agent import SqlAlchemyAgentJobStore
 from wbcz_web.repositories.reports import ClaimedReportJob, SqlReportRepository, SqlUploadBindingStore
 
 
@@ -615,3 +622,355 @@ class ReportArtifactIngressService:
         )
         self.db.flush()
         return row
+
+
+REPORT_AGENT_PURPOSE = "REPORTS_EXPORTS"
+
+
+def _stable_report_agent_job_id(job_type: str, report_job_id: str, seed: str) -> str:
+    return "job_" + hashlib.sha256(
+        f"m11-report:v1:{job_type}:{report_job_id}:{seed}".encode("utf-8")
+    ).hexdigest()[:32]
+
+
+class TrueApiReportOrchestrator:
+    """VPS-side durable control plane. Contains no True API HTTP client or bearer token."""
+
+    def __init__(
+        self,
+        db: Session,
+        *,
+        participant_inn: str,
+        agent_lease_seconds: int = 90,
+        reports_enabled: bool = False,
+        poll_delay_seconds: int = 30,
+    ) -> None:
+        self.db = db
+        self.participant_inn = participant_inn
+        self.reports_enabled = bool(reports_enabled)
+        self.poll_delay_seconds = max(5, int(poll_delay_seconds))
+        self.repo = SqlReportRepository(db)
+        self.jobs = SqlAlchemyAgentJobStore(db, lease_seconds=agent_lease_seconds)
+        self.bindings = SqlUploadBindingStore(db)
+
+    def _enqueue(
+        self,
+        *,
+        report_job_id: str,
+        job_type: AgentJobType,
+        payload: Mapping[str, Any],
+        seed: str,
+        attempt: int = 0,
+        delay_seconds: int = 0,
+    ) -> AgentJob:
+        normalized = validate_report_agent_payload(job_type.value, payload)
+        job = AgentJob(
+            job_id=_stable_report_agent_job_id(job_type.value, report_job_id, seed),
+            job_type=job_type,
+            operation_id=report_job_id,
+            pg=P0_PG,
+            expected_inn=self.participant_inn,
+            read_payload=normalized,
+        )
+        available_at = datetime.now(timezone.utc) + timedelta(seconds=max(0, delay_seconds))
+        return self.jobs.enqueue(
+            job,
+            purpose=REPORT_AGENT_PURPOSE,
+            poll_attempt=attempt,
+            available_at=available_at,
+        )
+
+    def request_filtered_cis_report(
+        self,
+        *,
+        product_group_code: str | int,
+        participant_inn: str,
+        package_type: list[str],
+        status: str,
+        include_gtin: list[str] | None = None,
+        requested_by_user_id: str | None = None,
+    ) -> tuple[ReportJobRecord, AgentJob]:
+        if not self.reports_enabled:
+            raise PermissionError("production True API reports are disabled")
+        if participant_inn != self.participant_inn:
+            raise PermissionError("participant isolation mismatch")
+        raw_payload = {
+            "local_report_job_id": "placeholder",
+            "recipe": "FILTERED_CIS_REPORT",
+            "product_group_code": product_group_code,
+            "filters": {
+                "participant_inn": participant_inn,
+                "package_type": list(package_type),
+                "status": status,
+                "include_gtin": list(include_gtin or []),
+            },
+        }
+        # Normalize recipe fields before creating the durable intent.
+        probe = validate_report_agent_payload("REPORT_CREATE", raw_payload)
+        fingerprint = canonical_request_fingerprint(
+            report_type="TRUE_API_FILTERED_CIS_REPORT",
+            report_schema_version="198.0",
+            participant_scope={"participant_inn": participant_inn},
+            normalized_filters={
+                "recipe": probe["recipe"],
+                "product_group_code": probe["product_group_code"],
+                "filters": probe["filters"],
+            },
+            output_format="CSV",
+            sensitivity_mode=ReportSensitivity.MARKING_SENSITIVE.value,
+            snapshot_policy_version="remote-crpt-dispenser-v198",
+        )
+        row = self.repo.create_job(
+            origin="TRUE_API_REMOTE",
+            participant_inn=participant_inn,
+            report_type="TRUE_API_FILTERED_CIS_REPORT",
+            report_schema_version="198.0",
+            output_format="ZIP",
+            sensitivity_class=ReportSensitivity.MARKING_SENSITIVE.value,
+            filters_sanitized={
+                "recipe": probe["recipe"],
+                "product_group_code": probe["product_group_code"],
+                "filters": sanitize_report_evidence(probe["filters"]),
+            },
+            sensitive_filter_ref=None,
+            request_fingerprint_sha256=fingerprint,
+            requested_by_user_id=requested_by_user_id,
+        )
+        self.repo.queue(row.id)
+        payload = dict(probe)
+        payload["local_report_job_id"] = row.id
+        normalized = validate_report_agent_payload("REPORT_CREATE", payload)
+        job = self._enqueue(
+            report_job_id=row.id,
+            job_type=AgentJobType.REPORT_CREATE,
+            payload=normalized,
+            seed=fingerprint,
+        )
+        self.repo.event(row.id, "remote_create_intent_queued", details={"recipe": "FILTERED_CIS_REPORT"})
+        self.db.flush()
+        return row, job
+
+    def _job_row(self, report_job_id: str) -> ReportJobRecord:
+        row = self.db.get(ReportJobRecord, report_job_id)
+        if row is None:
+            raise KeyError(report_job_id)
+        if row.participant_inn != self.participant_inn:
+            raise PermissionError("participant isolation mismatch")
+        return row
+
+    def handle_agent_result(self, metadata: Any, result: AgentResult) -> None:
+        job = metadata.job
+        if job.operation_id != result.operation_id:
+            raise ValueError("report result operation mismatch")
+        report = self._job_row(job.operation_id)
+
+        if result.outcome == REMOTE_CREATE_AMBIGUOUS:
+            self.repo.set_remote_create_ambiguous(report.id)
+            self.repo.fail(
+                report.id,
+                code=REMOTE_CREATE_AMBIGUOUS,
+                message_redacted="remote create outcome is ambiguous; operator evidence required",
+            )
+            return
+
+        if result.outcome == "RETRY_SCHEDULED":
+            retry = 60
+            if isinstance(result.read_result, Mapping):
+                raw_retry = result.read_result.get("retry_after_seconds")
+                if isinstance(raw_retry, (int, float)):
+                    retry = max(1, min(3600, int(raw_retry) + 1))
+            self._enqueue(
+                report_job_id=report.id,
+                job_type=job.job_type,
+                payload=job.read_payload or {},
+                seed=f"retry:{metadata.poll_attempt + 1}:{job.job_id}",
+                attempt=metadata.poll_attempt + 1,
+                delay_seconds=retry,
+            )
+            self.repo.event(report.id, "retry_scheduled", details={"job_type": job.job_type.value, "delay_seconds": retry})
+            return
+
+        if job.job_type is AgentJobType.REPORT_CREATE:
+            if result.outcome != "REPORT_TASK_CREATED" or not isinstance(result.read_result, Mapping):
+                self.repo.fail(report.id, code=result.error_code or "REMOTE_CREATE_FAILED", message_redacted="remote create did not yield deterministic task identity")
+                return
+            task_id = result.read_result.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                self.repo.fail(report.id, code="REMOTE_TASK_ID_MISSING", message_redacted="remote create task identity missing")
+                return
+            self.repo.set_remote_task(
+                report.id,
+                task_id=task_id,
+                raw_status=result.remote_status,
+                metadata=result.read_result,
+            )
+            product_group = str(report.filters_sanitized_json.get("product_group_code") or "")
+            self._enqueue(
+                report_job_id=report.id,
+                job_type=AgentJobType.REPORT_TASK_GET,
+                payload={
+                    "local_report_job_id": report.id,
+                    "task_id": task_id,
+                    "product_group_code": product_group,
+                },
+                seed=f"task:{task_id}:0",
+                attempt=0,
+                delay_seconds=self.poll_delay_seconds,
+            )
+            return
+
+        if job.job_type is AgentJobType.REPORT_TASK_GET:
+            raw_status = result.remote_status
+            report.raw_remote_status = raw_status
+            self.repo.event(report.id, "remote_status_observed", remote_task_id=report.remote_task_id, details={"raw_status": raw_status})
+            if result.outcome not in {"REPORT_TASK_OBSERVED", "REPORT_READ_COMPLETED"}:
+                self.repo.fail(report.id, code=result.error_code or "REMOTE_TASK_GET_FAILED", message_redacted="remote task status request failed")
+                return
+            if raw_status == "PREPARATION":
+                self._enqueue(
+                    report_job_id=report.id,
+                    job_type=AgentJobType.REPORT_TASK_GET,
+                    payload=job.read_payload or {},
+                    seed=f"task:{report.remote_task_id}:{metadata.poll_attempt + 1}",
+                    attempt=metadata.poll_attempt + 1,
+                    delay_seconds=self.poll_delay_seconds,
+                )
+                return
+            if raw_status == "COMPLETED":
+                product_group = str(report.filters_sanitized_json.get("product_group_code") or "")
+                self._enqueue(
+                    report_job_id=report.id,
+                    job_type=AgentJobType.REPORT_RESULTS,
+                    payload={
+                        "local_report_job_id": report.id,
+                        "page": 0,
+                        "size": 100,
+                        "product_group_code": product_group,
+                        "task_ids": [report.remote_task_id],
+                    },
+                    seed=f"results:{report.remote_task_id}:0",
+                    attempt=0,
+                    delay_seconds=0,
+                )
+                return
+            if raw_status in {"CANCELED", "ARCHIVE", "FAILED"}:
+                self.repo.fail(report.id, code=f"REMOTE_TASK_{raw_status}", message_redacted="remote report task reached terminal non-success state")
+                return
+            self.repo.fail(report.id, code="UNKNOWN_REMOTE_TASK_STATUS", message_redacted="unknown remote task status preserved for review")
+            return
+
+        if job.job_type is AgentJobType.REPORT_RESULTS:
+            if result.outcome != "REPORT_RESULTS_OBSERVED" or not isinstance(result.read_result, Mapping):
+                self.repo.fail(report.id, code=result.error_code or "REMOTE_RESULTS_FAILED", message_redacted="remote results request failed")
+                return
+            items = result.read_result.get("results")
+            if not isinstance(items, list):
+                items = []
+            matching = [
+                item for item in items
+                if isinstance(item, Mapping)
+                and item.get("task_id") == report.remote_task_id
+                and item.get("result_id")
+            ]
+            self.repo.event(
+                report.id,
+                "remote_result_observed",
+                remote_task_id=report.remote_task_id,
+                details={"matching_result_count": len(matching)},
+            )
+            if not matching:
+                self._enqueue(
+                    report_job_id=report.id,
+                    job_type=AgentJobType.REPORT_RESULTS,
+                    payload=job.read_payload or {},
+                    seed=f"results:{report.remote_task_id}:{metadata.poll_attempt + 1}",
+                    attempt=metadata.poll_attempt + 1,
+                    delay_seconds=self.poll_delay_seconds,
+                )
+                return
+            unique_ids = {str(item["result_id"]) for item in matching}
+            if len(unique_ids) != 1:
+                self.repo.fail(report.id, code="REMOTE_RESULT_IDENTITY_AMBIGUOUS", message_redacted="multiple remote result identities matched one task")
+                return
+            item = matching[0]
+            availability = item.get("raw_availability") or {}
+            download_status = item.get("raw_download_status") or {}
+            availability_raw = availability.get("raw") if isinstance(availability, Mapping) else None
+            download_raw = download_status.get("raw") if isinstance(download_status, Mapping) else None
+            if availability_raw == "AVAILABLE" and download_raw == "SUCCESS":
+                result_id = str(item["result_id"])
+                parts = item.get("result_file_parts") or []
+                if parts and not isinstance(parts, list):
+                    self.repo.fail(report.id, code="REMOTE_RESULT_PARTS_INVALID", message_redacted="remote result parts contract invalid")
+                    return
+                # A result-level archive is deterministic when no parts are present.
+                if isinstance(parts, list) and len(parts) > 1:
+                    self.repo.fail(report.id, code="REMOTE_RESULT_MULTIPART_REQUIRES_MANIFEST", message_redacted="multi-part remote result requires explicit part orchestration")
+                    return
+                part_id = None
+                if isinstance(parts, list) and len(parts) == 1 and isinstance(parts[0], Mapping):
+                    raw_part = parts[0].get("id")
+                    part_id = str(raw_part) if raw_part is not None else None
+                binding = ReportArtifactUploadBinding(
+                    "upl_" + uuid.uuid4().hex,
+                    report.id,
+                    result_id,
+                    part_id,
+                    str(report.filters_sanitized_json.get("product_group_code") or "") or None,
+                    item.get("archive_size") if isinstance(item.get("archive_size"), int) else None,
+                )
+                self.bindings.put(binding)
+                self._enqueue(
+                    report_job_id=report.id,
+                    job_type=AgentJobType.REPORT_DOWNLOAD,
+                    payload={
+                        "local_report_job_id": report.id,
+                        "result_id": result_id,
+                        "result_part_id": part_id,
+                        "product_group_code": binding.product_group_code,
+                        "artifact_upload_id": binding.artifact_upload_id,
+                        "expected_archive_size": binding.expected_archive_size,
+                        "download_format": None,
+                    },
+                    seed=f"download:{result_id}:{part_id or '-'}",
+                )
+                return
+            if availability_raw == "NOT_AVAILABLE" or download_raw == "PREPARATION":
+                self._enqueue(
+                    report_job_id=report.id,
+                    job_type=AgentJobType.REPORT_RESULTS,
+                    payload=job.read_payload or {},
+                    seed=f"results:{report.remote_task_id}:{metadata.poll_attempt + 1}",
+                    attempt=metadata.poll_attempt + 1,
+                    delay_seconds=self.poll_delay_seconds,
+                )
+                return
+            if download_raw == "FAILED":
+                self.repo.fail(report.id, code="REMOTE_DOWNLOAD_PREPARATION_FAILED", message_redacted="remote result preparation failed")
+                return
+            self.repo.fail(report.id, code="UNKNOWN_REMOTE_RESULT_STATUS", message_redacted="unknown remote result status preserved for review")
+            return
+
+        if job.job_type is AgentJobType.REPORT_DOWNLOAD:
+            if result.outcome != "REPORT_ARTIFACT_UPLOADED":
+                self.repo.fail(report.id, code=result.error_code or "REMOTE_DOWNLOAD_FAILED", message_redacted="remote report archive download failed")
+                return
+            ready_artifact = self.db.scalar(
+                __import__("sqlalchemy").select(ReportArtifactRecord).where(
+                    ReportArtifactRecord.report_job_id == report.id,
+                    ReportArtifactRecord.artifact_role == ArtifactRole.REMOTE_TRUE_API_ARCHIVE.value,
+                    ReportArtifactRecord.state == "READY",
+                ).limit(1)
+            )
+            if ready_artifact is None:
+                self.repo.fail(report.id, code="ARTIFACT_INGRESS_NOT_FINALIZED", message_redacted="agent reported upload but backend artifact is not finalized")
+                return
+            self.repo.mark_ready(report.id)
+            return
+
+        # LIST_TASKS is diagnostics only. Quota calls never bind task identity.
+        self.repo.event(
+            report.id,
+            "remote_read_observed",
+            details={"job_type": job.job_type.value, "outcome": result.outcome},
+        )
