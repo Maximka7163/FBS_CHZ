@@ -62,6 +62,14 @@ class WebConfig:
     report_artifact_root: str | None = None
     report_temp_root: str | None = None
     report_artifact_key_version: str = "m11-v1"
+    report_max_local_rows: int = 1_000_000
+    report_max_artifact_bytes: int = 2 * 1024 * 1024 * 1024
+    report_remote_download_byte_ceiling: int = 2 * 1024 * 1024 * 1024
+    report_db_fetch_batch_size: int = 500
+    report_snapshot_timeout_seconds: int = 900
+    report_worker_timeout_seconds: int = 1800
+    report_temp_storage_ceiling_bytes: int = 2 * 1024 * 1024 * 1024
+    report_min_free_disk_bytes: int = 64 * 1024 * 1024
     organisation_type: OrganisationType | None = None
     activity_fias_id: str | None = None
     activity_kpp: str | None = None
@@ -112,6 +120,25 @@ class WebConfig:
             raise ValueError("WBCZ_REPORT_TEMP_ROOT must be non-empty when configured")
         if not self.report_artifact_key_version.strip():
             raise ValueError("WBCZ_REPORT_ARTIFACT_KEY_VERSION must not be empty")
+        report_limits = {
+            "WBCZ_REPORT_MAX_LOCAL_ROWS": self.report_max_local_rows,
+            "WBCZ_REPORT_MAX_ARTIFACT_BYTES": self.report_max_artifact_bytes,
+            "WBCZ_REPORT_REMOTE_DOWNLOAD_BYTE_CEILING": self.report_remote_download_byte_ceiling,
+            "WBCZ_REPORT_DB_FETCH_BATCH_SIZE": self.report_db_fetch_batch_size,
+            "WBCZ_REPORT_SNAPSHOT_TIMEOUT_SECONDS": self.report_snapshot_timeout_seconds,
+            "WBCZ_REPORT_WORKER_TIMEOUT_SECONDS": self.report_worker_timeout_seconds,
+            "WBCZ_REPORT_TEMP_STORAGE_CEILING_BYTES": self.report_temp_storage_ceiling_bytes,
+            "WBCZ_REPORT_MIN_FREE_DISK_BYTES": self.report_min_free_disk_bytes,
+        }
+        for name, value in report_limits.items():
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.report_db_fetch_batch_size > 100_000:
+            raise ValueError("WBCZ_REPORT_DB_FETCH_BATCH_SIZE is out of range")
+        if self.report_snapshot_timeout_seconds > 24 * 60 * 60:
+            raise ValueError("WBCZ_REPORT_SNAPSHOT_TIMEOUT_SECONDS is out of range")
+        if self.report_worker_timeout_seconds > 7 * 24 * 60 * 60:
+            raise ValueError("WBCZ_REPORT_WORKER_TIMEOUT_SECONDS is out of range")
         if self.organisation_type is None:
             if self.activity_fias_id or self.activity_kpp or self.remote_sale_return_paid is not None:
                 raise ValueError("WBCZ_ORGANISATION_TYPE is required when P0 organisation fields are configured")
@@ -190,6 +217,14 @@ class WebConfig:
             report_artifact_root=os.getenv("WBCZ_REPORT_ARTIFACT_ROOT", "").strip() or None,
             report_temp_root=os.getenv("WBCZ_REPORT_TEMP_ROOT", "").strip() or None,
             report_artifact_key_version=os.getenv("WBCZ_REPORT_ARTIFACT_KEY_VERSION", "m11-v1").strip() or "m11-v1",
+            report_max_local_rows=int(os.getenv("WBCZ_REPORT_MAX_LOCAL_ROWS", "1000000")),
+            report_max_artifact_bytes=int(os.getenv("WBCZ_REPORT_MAX_ARTIFACT_BYTES", str(2 * 1024 * 1024 * 1024))),
+            report_remote_download_byte_ceiling=int(os.getenv("WBCZ_REPORT_REMOTE_DOWNLOAD_BYTE_CEILING", str(2 * 1024 * 1024 * 1024))),
+            report_db_fetch_batch_size=int(os.getenv("WBCZ_REPORT_DB_FETCH_BATCH_SIZE", "500")),
+            report_snapshot_timeout_seconds=int(os.getenv("WBCZ_REPORT_SNAPSHOT_TIMEOUT_SECONDS", "900")),
+            report_worker_timeout_seconds=int(os.getenv("WBCZ_REPORT_WORKER_TIMEOUT_SECONDS", "1800")),
+            report_temp_storage_ceiling_bytes=int(os.getenv("WBCZ_REPORT_TEMP_STORAGE_CEILING_BYTES", str(2 * 1024 * 1024 * 1024))),
+            report_min_free_disk_bytes=int(os.getenv("WBCZ_REPORT_MIN_FREE_DISK_BYTES", str(64 * 1024 * 1024))),
             organisation_type=organisation_type,
             activity_fias_id=fias_id,
             activity_kpp=kpp,
