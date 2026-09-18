@@ -10,6 +10,7 @@ import sqlite3
 from .models import canonical_json, utc_now
 from .windows_agent import (
     AgentJob,
+    AgentJobType,
     AgentProductionWriteDisabled,
     AgentReplayConflict,
     AgentResult,
@@ -156,6 +157,28 @@ class DurableWindowsAgentExecutor(WindowsAgentExecutor):
     def __init__(self, *args, replay_store: WindowsAgentReplayStore, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.replay_store = replay_store
+
+    @staticmethod
+    def _report_create_payload_sha(job: AgentJob) -> str:
+        payload = asdict(job)
+        payload["job_type"] = job.job_type.value
+        return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+    def execute(self, job: AgentJob) -> AgentResult:
+        if job.job_type is AgentJobType.REPORT_CREATE:
+            job.validate()
+            if job.expected_inn != self.participant_inn:
+                from .windows_agent import AgentSecurityError
+                raise AgentSecurityError("expected_inn mismatch")
+            payload_sha = self._report_create_payload_sha(job)
+            replay_operation = "m11-report-create:" + job.operation_id
+            previous = self.replay_store.claim(replay_operation, payload_sha)
+            if previous is not None:
+                return previous
+            result = super().execute(job)
+            self.replay_store.complete(replay_operation, payload_sha, result)
+            return result
+        return super().execute(job)
 
     def _write(self, job: AgentJob) -> AgentResult:
         if not self.production_write:
