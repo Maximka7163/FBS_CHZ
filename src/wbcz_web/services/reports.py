@@ -6,6 +6,8 @@ import hashlib
 import io
 import json
 import os
+import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
@@ -78,14 +80,38 @@ def _fingerprint(value: Any) -> str:
 
 
 class LocalReportSourceRegistry:
-    """Read-only source adapters. No method mutates M1-M10 business tables."""
+    """Read-only, participant-scoped source adapters. No method mutates M1-M10 tables."""
 
-    def __init__(self, participant_inn: str) -> None:
+    def __init__(self, participant_inn: str, *, fetch_batch_size: int = 500) -> None:
         self.participant_inn = participant_inn
+        self.fetch_batch_size = int(fetch_batch_size)
+        if self.fetch_batch_size <= 0:
+            raise ValueError("fetch_batch_size must be positive")
+
+    def _filters(self, report_type: LocalReportType, filters: Mapping[str, Any]) -> dict[str, Any]:
+        definition = LOCAL_REPORT_CATALOG[report_type]
+        if not definition.enabled:
+            raise ReportSecurityError(definition.disabled_reason or "local report source disabled")
+        unknown = set(filters) - set(definition.allowed_filters)
+        if unknown:
+            raise ReportContractError("unsupported report filters")
+        value = filters.get("participant_inn")
+        if value is not None and value != self.participant_inn:
+            raise ReportSecurityError("participant filter does not match report scope")
+        return {str(k): v for k, v in filters.items() if k != "participant_inn"}
+
+    def _execute(self, connection: Any, query: Any, params: Mapping[str, Any] | None = None):
+        streamed = connection.execution_options(
+            stream_results=True,
+            yield_per=self.fetch_batch_size,
+            max_row_buffer=self.fetch_batch_size,
+        )
+        return streamed.execute(query, dict(params or {})).mappings()
 
     def rows(self, connection: Any, report_type: LocalReportType, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+        normalized = self._filters(report_type, filters)
         method = getattr(self, "_rows_" + report_type.value.lower())
-        yield from method(connection, filters=filters)
+        yield from method(connection, filters=normalized)
 
     def _rows_cis_inventory_stored_snapshot(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
         query = text("""
@@ -93,9 +119,10 @@ class LocalReportSourceRegistry:
             FROM agent_jobs
             WHERE job_type IN ('CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY')
               AND state='COMPLETED'
+              AND payload_json ->> 'expected_inn' = :inn
             ORDER BY updated_at, job_id
         """)
-        for row in connection.execute(query).mappings():
+        for row in self._execute(connection, query, {"inn": self.participant_inn}):
             result = row["result_json"] or {}
             cises = result.get("cises") if isinstance(result, dict) else None
             if not isinstance(cises, list):
@@ -107,61 +134,107 @@ class LocalReportSourceRegistry:
                 if not isinstance(item, Mapping):
                     continue
                 cis = item.get("cis")
+                fingerprint = _fingerprint(cis)
+                state = item.get("status")
+                if filters.get("cis_fingerprint") is not None and filters["cis_fingerprint"] != fingerprint:
+                    continue
+                if filters.get("state") is not None and filters["state"] != state:
+                    continue
                 yield {
                     "participant_inn": self.participant_inn,
                     "cis_masked": _mask(cis),
-                    "cis_fingerprint": _fingerprint(cis),
-                    "raw_state": item.get("status"),
+                    "cis_fingerprint": fingerprint,
+                    "raw_state": state,
                     "observed_at": format_timestamp_preserving_unknown(row["updated_at"]),
                     "observation_semantics": "LATEST_STORED_OBSERVATION",
                 }
 
     def _rows_product_reference_readiness(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+        if filters.get("product_group") is not None and filters["product_group"] != "lp":
+            return
         query = text("""
-            SELECT job_id, result_json, updated_at, payload_json
+            SELECT job_id, updated_at, payload_json
             FROM agent_jobs
-            WHERE purpose='REFERENCE_PRODUCTS' AND state='COMPLETED'
+            WHERE purpose='REFERENCE_PRODUCTS'
+              AND state='COMPLETED'
+              AND payload_json ->> 'expected_inn' = :inn
             ORDER BY updated_at, job_id
         """)
-        for row in connection.execute(query).mappings():
+        for row in self._execute(connection, query, {"inn": self.participant_inn}):
             payload = row["payload_json"] or {}
-            result = row["result_json"] or {}
-            gtins = []
             read_payload = payload.get("read_payload") if isinstance(payload, dict) else None
-            if isinstance(read_payload, dict):
-                gtins = read_payload.get("gtins") or []
+            gtins = read_payload.get("gtins") if isinstance(read_payload, dict) else None
             for gtin in gtins if isinstance(gtins, list) else []:
+                gtin_text = str(gtin)
+                if filters.get("gtin") is not None and filters["gtin"] != gtin_text:
+                    continue
                 yield {
                     "participant_inn": self.participant_inn,
-                    "gtin": str(gtin),
+                    "gtin": gtin_text,
                     "product_group": "lp",
                     "readiness": "STORED_EVIDENCE_PRESENT",
                     "source_fingerprint": _fingerprint(row["job_id"]),
                     "observed_at": format_timestamp_preserving_unknown(row["updated_at"]),
                 }
 
+    @staticmethod
+    def _linked_document_id(payload: Any, result: Any) -> str | None:
+        read_payload = payload.get("read_payload") if isinstance(payload, Mapping) else None
+        if isinstance(read_payload, Mapping):
+            value = read_payload.get("document_id") or read_payload.get("did")
+            if value is not None:
+                return str(value)
+        read_result = result.get("read_result") if isinstance(result, Mapping) else None
+        if isinstance(read_result, Mapping):
+            value = read_result.get("number") or read_result.get("documentId")
+            if value is not None:
+                return str(value)
+        return None
+
     def _rows_document_lifecycle(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
         query = text("""
-            SELECT operation_id, remote_document_id, request_json, created_at, updated_at
-            FROM document_lifecycle_ledger ORDER BY created_at, operation_id
+            SELECT d.operation_id, d.request_json, d.created_at, d.updated_at,
+                   a.state AS agent_state, a.payload_json, a.result_json
+            FROM document_lifecycle_ledger d
+            JOIN agent_jobs a ON a.job_id=d.request_id
+            WHERE a.payload_json ->> 'expected_inn' = :inn
+            ORDER BY d.created_at, d.operation_id
         """)
-        for row in connection.execute(query).mappings():
-            request = row["request_json"] or {}
+        for row in self._execute(connection, query, {"inn": self.participant_inn}):
+            payload = row["payload_json"] or {}
+            result = row["result_json"] or {}
+            document_id = self._linked_document_id(payload, result)
+            if filters.get("document_id") is not None and filters["document_id"] != document_id:
+                continue
+            if filters.get("state") is not None and filters["state"] != row["agent_state"]:
+                continue
+            read_result = result.get("read_result") if isinstance(result, Mapping) else None
+            status = read_result.get("status") if isinstance(read_result, Mapping) else None
+            raw_remote_state = status.get("raw") if isinstance(status, Mapping) else result.get("remote_status") if isinstance(result, Mapping) else None
+            errors = read_result.get("errors") if isinstance(read_result, Mapping) else None
             yield {
                 "participant_inn": self.participant_inn,
-                "document_id": row["remote_document_id"],
-                "raw_remote_state": request.get("raw_status") if isinstance(request, dict) else None,
-                "local_project_state": "STORED_LIFECYCLE_EVIDENCE",
-                "errors": None,
+                "document_id": document_id,
+                "raw_remote_state": raw_remote_state,
+                "local_project_state": row["agent_state"],
+                "errors": errors,
                 "observed_at": format_timestamp_preserving_unknown(row["updated_at"]),
             }
 
     def _rows_turnover_operations(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
         query = text("""
-            SELECT operation_id, operation_kind, remote_document_id, reconciliation_state, updated_at
-            FROM turnover_operation_ledger ORDER BY created_at, operation_id
+            SELECT t.operation_id, t.operation_kind, t.remote_document_id,
+                   t.reconciliation_state, t.updated_at
+            FROM turnover_operation_ledger t
+            JOIN agent_jobs a ON a.job_id=t.request_id
+            WHERE a.payload_json ->> 'expected_inn' = :inn
+            ORDER BY t.created_at, t.operation_id
         """)
-        for row in connection.execute(query).mappings():
+        for row in self._execute(connection, query, {"inn": self.participant_inn}):
+            if filters.get("operation_kind") is not None and filters["operation_kind"] != row["operation_kind"]:
+                continue
+            if filters.get("state") is not None and filters["state"] != row["reconciliation_state"]:
+                continue
             yield {
                 "participant_inn": self.participant_inn,
                 "operation_id": row["operation_id"],
@@ -173,10 +246,18 @@ class LocalReportSourceRegistry:
 
     def _rows_aggregation_operations(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
         query = text("""
-            SELECT operation_id, operation_kind, relation_delta, reconciliation_state, updated_at
-            FROM aggregation_operation_ledger ORDER BY created_at, operation_id
+            SELECT g.operation_id, g.operation_kind, g.relation_delta,
+                   g.reconciliation_state, g.updated_at
+            FROM aggregation_operation_ledger g
+            JOIN agent_jobs a ON a.job_id=g.request_id
+            WHERE a.payload_json ->> 'expected_inn' = :inn
+            ORDER BY g.created_at, g.operation_id
         """)
-        for row in connection.execute(query).mappings():
+        for row in self._execute(connection, query, {"inn": self.participant_inn}):
+            if filters.get("operation_kind") is not None and filters["operation_kind"] != row["operation_kind"]:
+                continue
+            if filters.get("state") is not None and filters["state"] != row["reconciliation_state"]:
+                continue
             yield {
                 "participant_inn": self.participant_inn,
                 "operation_id": row["operation_id"],
@@ -215,13 +296,18 @@ class LocalReportSourceRegistry:
             WHERE c.participant_inn=:inn
             ORDER BY r.observed_at, r.id
         """)
-        for row in connection.execute(query, {"inn": self.participant_inn}).mappings():
+        for row in self._execute(connection, query, {"inn": self.participant_inn}):
+            conflict = "CONFLICT" if row["decision"] == "MANUAL_REVIEW" else None
+            if filters.get("state") is not None and filters["state"] != row["state"]:
+                continue
+            if filters.get("conflict_state") is not None and filters["conflict_state"] != conflict:
+                continue
             yield {
                 "participant_inn": self.participant_inn,
                 "assembly_order_id": str(row["assembly_order_id"]) if row["assembly_order_id"] is not None else None,
                 "raw_remote_state": row["raw_status"],
                 "local_project_state": row["state"],
-                "conflict_state": "CONFLICT" if row["decision"] == "MANUAL_REVIEW" else None,
+                "conflict_state": conflict,
                 "source_fingerprint": row["source_fingerprint"] or row["event_fingerprint"],
                 "observed_at": format_timestamp_preserving_unknown(row["observed_at"]),
             }
@@ -235,40 +321,40 @@ class LocalReportSourceRegistry:
         }
 
     def _rows_manual_review_and_conflicts(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
-        wb = text("""
-            SELECT r.reason, r.state, r.evidence_redacted, r.observed_at
-            FROM wb_reconciliation r JOIN wb_connections c ON c.id=r.connection_id
-            WHERE c.participant_inn=:inn AND (r.state='MANUAL_REVIEW' OR r.decision='MANUAL_REVIEW')
-            ORDER BY r.observed_at, r.id
-        """)
-        for row in connection.execute(wb, {"inn": self.participant_inn}).mappings():
-            yield {
-                "participant_inn": self.participant_inn,
-                "domain": "WB",
-                "remote_raw_state": None,
-                "local_project_state": row["state"],
-                "final_reconciliation_result": LocalReconciliationResult.MANUAL_REVIEW.value,
-                "reason": row["reason"],
-                "evidence_fingerprint": _fingerprint(row["evidence_redacted"]),
-            }
-        ozon = text("""
-            SELECT r.reason, r.state, r.evidence_redacted, r.observed_at
-            FROM ozon_reconciliation r JOIN ozon_connections c ON c.id=r.connection_id
-            WHERE c.participant_inn=:inn AND (r.state='MANUAL_REVIEW' OR r.decision='MANUAL_REVIEW')
-            ORDER BY r.observed_at, r.id
-        """)
-        for row in connection.execute(ozon, {"inn": self.participant_inn}).mappings():
-            yield {
-                "participant_inn": self.participant_inn,
-                "domain": "OZON_FOUNDATION",
-                "remote_raw_state": None,
-                "local_project_state": row["state"],
-                "final_reconciliation_result": LocalReconciliationResult.MANUAL_REVIEW.value,
-                "reason": row["reason"],
-                "evidence_fingerprint": _fingerprint(row["evidence_redacted"]),
-            }
+        sources = (
+            ("WB", text("""
+                SELECT r.reason, r.state, r.evidence_redacted
+                FROM wb_reconciliation r JOIN wb_connections c ON c.id=r.connection_id
+                WHERE c.participant_inn=:inn AND (r.state='MANUAL_REVIEW' OR r.decision='MANUAL_REVIEW')
+                ORDER BY r.observed_at, r.id
+            """)),
+            ("OZON_FOUNDATION", text("""
+                SELECT r.reason, r.state, r.evidence_redacted
+                FROM ozon_reconciliation r JOIN ozon_connections c ON c.id=r.connection_id
+                WHERE c.participant_inn=:inn AND (r.state='MANUAL_REVIEW' OR r.decision='MANUAL_REVIEW')
+                ORDER BY r.observed_at, r.id
+            """)),
+        )
+        for domain, query in sources:
+            if filters.get("domain") is not None and filters["domain"] != domain:
+                continue
+            for row in self._execute(connection, query, {"inn": self.participant_inn}):
+                if filters.get("reason") is not None and filters["reason"] != row["reason"]:
+                    continue
+                yield {
+                    "participant_inn": self.participant_inn,
+                    "domain": domain,
+                    "remote_raw_state": None,
+                    "local_project_state": row["state"],
+                    "final_reconciliation_result": LocalReconciliationResult.MANUAL_REVIEW.value,
+                    "reason": row["reason"],
+                    "evidence_fingerprint": _fingerprint(row["evidence_redacted"]),
+                }
 
     def _rows_end_to_end_reconciliation(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+        domain = "WB_FBS"
+        if filters.get("domain") is not None and filters["domain"] != domain:
+            return
         query = text("""
             SELECT r.state, r.decision, r.reason, r.observed_at,
                    o.assembly_order_id, o.source, o.source_fingerprint
@@ -278,7 +364,7 @@ class LocalReportSourceRegistry:
             WHERE c.participant_inn=:inn
             ORDER BY r.observed_at, r.id
         """)
-        for row in connection.execute(query, {"inn": self.participant_inn}).mappings():
+        for row in self._execute(connection, query, {"inn": self.participant_inn}):
             final = (
                 LocalReconciliationResult.MANUAL_REVIEW
                 if row["state"] == "MANUAL_REVIEW" or row["decision"] == "MANUAL_REVIEW"
@@ -286,9 +372,11 @@ class LocalReportSourceRegistry:
                 if row["state"] not in {"DISTANCE_RECONCILED", "REMOTE_RETURN_RECONCILED"}
                 else LocalReconciliationResult.MATCHED
             )
+            if filters.get("result") is not None and filters["result"] != final.value:
+                continue
             yield build_reconciliation_row(
                 participant_inn=self.participant_inn,
-                domain="WB_FBS",
+                domain=domain,
                 source=row["source"] or "WB",
                 source_fingerprint=row["source_fingerprint"],
                 local_operation_id=None,
@@ -302,23 +390,7 @@ class LocalReportSourceRegistry:
             )
 
     def _rows_p0_import_control_quality(self, connection: Any, *, filters: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
-        query = text("""
-            SELECT i.id AS import_id, ir.row_number, c.decision, c.reason, c.checked_at, ir.error
-            FROM imports i
-            JOIN import_rows ir ON ir.import_id=i.id
-            LEFT JOIN checks c ON c.event_id=ir.event_id
-            ORDER BY i.imported_at, ir.row_number, c.checked_at
-        """)
-        for row in connection.execute(query).mappings():
-            yield {
-                "participant_inn": self.participant_inn,
-                "import_id": row["import_id"],
-                "row_index": row["row_number"],
-                "decision": row["decision"] or ("REJECTED" if row["error"] else "UNCHECKED"),
-                "reason": row["reason"] or row["error"],
-                "source_fingerprint": _fingerprint((row["import_id"], row["row_number"])),
-                "observed_at": format_timestamp_preserving_unknown(row["checked_at"]),
-            }
+        raise ReportSecurityError("SOURCE_PARTICIPANT_SCOPE_NOT_PROVABLE")
 
 
 @dataclass(frozen=True, slots=True)
