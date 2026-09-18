@@ -343,7 +343,8 @@ def test_csv_formula_protection_unicode_quotes_newlines_and_no_truncation(tmp_pa
         columns=("id", "text", "formula", "at", "tab", "cr", "long"),
         output_format=ReportOutputFormat.CSV,
     )
-    raw = artifact.path.read_text(encoding="utf-8")
+    with artifact.path.open("r", encoding="utf-8", newline="") as handle:
+        raw = handle.read()
     assert "00000000000000001234" in raw
     assert "Кириллица" in raw
     assert "'=2+2" in raw and "'@cmd" in raw and "'\tcmd" in raw and "'\rcmd" in raw
@@ -983,4 +984,4 @@ def test_no_generic_true_api_proxy_arbitrary_url_or_user_download_surface() -> N
     assert "report-artifacts/{artifact_upload_id}" in routes
     assert "request.stream()" in routes
     assert "request.body()" not in routes[routes.find("agent_report_artifact_ingress"):]
-    assert "base64.b64encode" not in windows[windows.find("execute_report_download"):windows.find("def _cis_check")]
+    assert "base64.b64encode" not in windows[windows.find("def execute_report_download"):windows.find("def _cis_check")]
