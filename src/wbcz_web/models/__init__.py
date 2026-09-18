@@ -4,6 +4,7 @@ from .edo_lite import EdoLiteAnnualQuotaRecord, EdoLiteLedgerRecord, EdoLiteSche
 from .suz import SuzCodeBlockRecord, SuzConnectionRecord, SuzKmVaultRecord, SuzOrderItemRecord, SuzOrderRecord, SuzReconciliationEventRecord
 from .wb_fbs import WbConnectionRecord, WbOrderRecord, WbMarkingBindingRecord, WbEventRecord, WbReturnRecord, WbSyncCursorRecord, WbReconciliationRecord, WbPaidEvidenceRecord
 from .ozon import OzonConnectionRecord, OzonPostingRecord, OzonItemRecord, OzonMarkingBindingRecord, OzonEventRecord, OzonReturnRecord, OzonSyncCursorRecord, OzonReconciliationRecord, OzonPaidEvidenceRecord
+from .reports import ReportJobRecord, ReportSnapshotRecord, ReportArtifactRecord, ReportJobEventRecord, ReportArtifactUploadRecord
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -17,4 +18,6 @@ __all__ = [
     "WbReconciliationRecord", "WbPaidEvidenceRecord", "OzonConnectionRecord",
     "OzonPostingRecord", "OzonItemRecord", "OzonMarkingBindingRecord", "OzonEventRecord",
     "OzonReturnRecord", "OzonSyncCursorRecord", "OzonReconciliationRecord", "OzonPaidEvidenceRecord",
+    "ReportJobRecord", "ReportSnapshotRecord", "ReportArtifactRecord", "ReportJobEventRecord",
+    "ReportArtifactUploadRecord",
 ]
