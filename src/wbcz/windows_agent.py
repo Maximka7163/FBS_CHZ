@@ -14,6 +14,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import time
 from typing import Any, Callable, Mapping, Protocol
 
 from wbcz.cis_inventory import (
@@ -46,6 +47,25 @@ from wbcz.turnover import M5_AGENT_WRITE_JOB_TYPES, M5_DOCUMENT_TYPES
 from wbcz.edo_lite import M7_READ_JOB_TYPES, capture_edo_read_success, validate_edo_read_payload
 from wbcz.aggregation import M6_DOCUMENT_TYPES
 from wbcz.models import Decision, KiState, canonical_json, utc_now
+from wbcz.m11_reports import (
+    DEFAULT_REMOTE_DOWNLOAD_BYTE_CEILING,
+    DISPENSER_CAPABILITIES,
+    M11_AGENT_JOB_TYPES,
+    DispenserCapabilityName,
+    DispenserRateLimiter,
+    ReportContractError,
+    ReportRateLimitExceeded,
+    ReportSecurityError,
+    REMOTE_CREATE_AMBIGUOUS,
+    build_dispenser_spec,
+    normalize_remote_availability,
+    normalize_remote_download_status,
+    normalize_remote_task_status,
+    parse_result_evidence,
+    parse_task_evidence,
+    sanitize_report_evidence,
+    validate_report_agent_payload,
+)
 from wbcz.true_api import normalize_cises
 from wbcz.write_pipeline import (
     CreateCategory,
@@ -155,6 +175,13 @@ class AgentJobType(StrEnum):
     EDO_OUTGOING_MCHD = "EDO_OUTGOING_MCHD"
     EDO_INCOMING_MCHD = "EDO_INCOMING_MCHD"
     EDO_GIS_PROCESSING = "EDO_GIS_PROCESSING"
+    REPORT_CREATE = "REPORT_CREATE"
+    REPORT_TASK_GET = "REPORT_TASK_GET"
+    REPORT_TASK_LIST = "REPORT_TASK_LIST"
+    REPORT_RESULTS = "REPORT_RESULTS"
+    REPORT_DOWNLOAD = "REPORT_DOWNLOAD"
+    REPORT_QUOTA_TYPE = "REPORT_QUOTA_TYPE"
+    REPORT_QUOTA_ID = "REPORT_QUOTA_ID"
 
 
 class AgentJobState(StrEnum):
@@ -262,6 +289,17 @@ class AgentJob:
                 raise AgentSecurityError(str(exc)) from exc
             if normalized != self.read_payload:
                 raise AgentSecurityError("M7 EDO read_payload must already be canonical")
+        elif self.job_type.value in M11_AGENT_JOB_TYPES:
+            if self.read_payload is None:
+                raise AgentSecurityError("M11 report job misses typed read_payload")
+            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):
+                raise AgentSecurityError("M11 report job contains unrelated P0/write fields")
+            try:
+                normalized = validate_report_agent_payload(self.job_type.value, self.read_payload)
+            except (ReportContractError, ReportSecurityError) as exc:
+                raise AgentSecurityError(str(exc)) from exc
+            if normalized != self.read_payload:
+                raise AgentSecurityError("M11 report read_payload must already be canonical")
         else:
             raise AgentSecurityError("unsupported agent job type")
 
@@ -316,6 +354,14 @@ class AgentBackendChannel(Protocol):
     def submit_result(self, machine_token: str, result: AgentResult) -> None:
         ...
 
+    def upload_report_artifact(
+        self,
+        machine_token: str,
+        metadata: Mapping[str, Any],
+        path: Path,
+    ) -> None:
+        ...
+
 
 AGENT_FETCH_PATH = "/api/agent/v1/jobs/next"
 AGENT_RESULT_PATH = "/api/agent/v1/jobs/{job_id}/result"
@@ -339,12 +385,22 @@ class ProductionAgentTrueApiTransport:
         timeout: float = 30.0,
         connection_factory: Callable[..., http.client.HTTPConnection] = http.client.HTTPConnection,
         rate_limiter: SharedRateLimiter | None = None,
+        report_rate_limiter: DispenserRateLimiter | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        production_true_api_reports: bool = False,
+        remote_download_byte_ceiling: int = DEFAULT_REMOTE_DOWNLOAD_BYTE_CEILING,
     ) -> None:
         self.tunnel = tunnel or CryptoProGostTlsTunnel()
         self.audit = audit or JsonlLiveAudit("windows_agent_true_api.jsonl")
         self.timeout = timeout
         self._connection_factory = connection_factory
         self.rate_limiter = rate_limiter or SharedRateLimiter()
+        self.report_rate_limiter = report_rate_limiter or DispenserRateLimiter()
+        self._monotonic_clock = monotonic_clock
+        self.production_true_api_reports = bool(production_true_api_reports)
+        self.remote_download_byte_ceiling = int(remote_download_byte_ceiling)
+        if self.remote_download_byte_ceiling <= 0:
+            raise ValueError("remote_download_byte_ceiling must be positive")
         self._read_only = ReadOnlyTrueApiTransport(
             tunnel=self.tunnel,
             audit=self.audit,
@@ -542,6 +598,163 @@ class ProductionAgentTrueApiTransport:
                 http_status=None, error=type(exc).__name__,
             )
             raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _m11_rate_admit(self, capability_name: DispenserCapabilityName, *, scope_key: str) -> None:
+        capability = DISPENSER_CAPABILITIES[capability_name]
+        decision = self.report_rate_limiter.consume(
+            capability,
+            scope_key=scope_key,
+            now_monotonic=self._monotonic_clock(),
+        )
+        if not decision.allowed:
+            raise ReportRateLimitExceeded(capability.rate_family, decision.retry_after_seconds)
+
+    def m11_report(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        *,
+        bearer_token: str,
+        rate_scope: str,
+    ) -> AgentHttpResponse:
+        if job_type == "REPORT_DOWNLOAD":
+            raise AgentSecurityError("binary report download requires streaming transport")
+        if not self.production_true_api_reports:
+            raise AgentProductionWriteDisabled("production_true_api_reports=false")
+        if not bearer_token:
+            raise AgentSecurityError("True API bearer token is required")
+        try:
+            spec = build_dispenser_spec(job_type, payload)
+        except (ReportContractError, ReportSecurityError) as exc:
+            raise AgentSecurityError(str(exc)) from exc
+        self._m11_rate_admit(spec.capability, scope_key=rate_scope)
+        headers = {
+            "Accept": "application/json",
+            "Host": PRODUCTION_HOST,
+            "Connection": "close",
+            "Authorization": "Bearer " + bearer_token,
+        }
+        data: bytes | None = None
+        if spec.json_body is not None:
+            headers["Content-Type"] = "application/json; charset=UTF-8"
+            data = json.dumps(spec.json_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            headers["Content-Length"] = str(len(data))
+        connection: http.client.HTTPConnection | None = None
+        try:
+            marker = self.tunnel.session_marker()
+            connection = self._connection_factory("127.0.0.1", self.tunnel.local_port, timeout=self.timeout)
+            connection.putrequest(spec.method, spec.target, skip_host=True)
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            connection.endheaders(data)
+            response = connection.getresponse()
+            status = int(response.status)
+            raw = response.read()
+            self.tunnel.assert_gost_session(marker)
+            self.audit.record(
+                method=spec.method,
+                endpoint=spec.audit_endpoint,
+                cis_count=0,
+                http_status=status,
+                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+            )
+            return AgentHttpResponse(status, raw, {str(k): str(v) for k, v in response.headers.items()})
+        except GostTlsUnavailable:
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            self.audit.record(
+                method=spec.method,
+                endpoint=spec.audit_endpoint,
+                cis_count=0,
+                http_status=None,
+                error=type(exc).__name__,
+            )
+            raise TrueApiError("CryptoPro GOST TLS report transport error") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def m11_report_download(
+        self,
+        payload: dict[str, Any],
+        *,
+        bearer_token: str,
+        rate_scope: str,
+        sink: BinaryIO,
+    ) -> dict[str, Any]:
+        if not self.production_true_api_reports:
+            raise AgentProductionWriteDisabled("production_true_api_reports=false")
+        if not bearer_token:
+            raise AgentSecurityError("True API bearer token is required")
+        try:
+            spec = build_dispenser_spec("REPORT_DOWNLOAD", payload)
+        except (ReportContractError, ReportSecurityError) as exc:
+            raise AgentSecurityError(str(exc)) from exc
+        self._m11_rate_admit(spec.capability, scope_key=rate_scope)
+        headers = {
+            "Accept": "application/zip, application/octet-stream",
+            "Host": PRODUCTION_HOST,
+            "Connection": "close",
+            "Authorization": "Bearer " + bearer_token,
+        }
+        connection: http.client.HTTPConnection | None = None
+        try:
+            marker = self.tunnel.session_marker()
+            connection = self._connection_factory("127.0.0.1", self.tunnel.local_port, timeout=self.timeout)
+            connection.putrequest(spec.method, spec.target, skip_host=True)
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            connection.endheaders()
+            response = connection.getresponse()
+            status = int(response.status)
+            content_type = next((str(v) for k, v in response.headers.items() if str(k).casefold() == "content-type"), None)
+            digest = hashlib.sha256()
+            total = 0
+            if 200 <= status < 300:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > self.remote_download_byte_ceiling:
+                        raise AgentSecurityError("remote report download byte ceiling exceeded")
+                    digest.update(chunk)
+                    sink.write(chunk)
+            else:
+                # Error bodies are bounded and never forwarded as an artifact.
+                raw_error = response.read(1024 * 1024 + 1)
+                if len(raw_error) > 1024 * 1024:
+                    raise AgentSecurityError("remote report error body too large")
+                digest.update(raw_error)
+                total = len(raw_error)
+            self.tunnel.assert_gost_session(marker)
+            self.audit.record(
+                method=spec.method,
+                endpoint=spec.audit_endpoint,
+                cis_count=0,
+                http_status=status,
+                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+            )
+            return {
+                "http_status": status,
+                "byte_size": total,
+                "sha256": digest.hexdigest(),
+                "content_type": content_type,
+            }
+        except GostTlsUnavailable:
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            self.audit.record(
+                method=spec.method,
+                endpoint=spec.audit_endpoint,
+                cis_count=0,
+                http_status=None,
+                error=type(exc).__name__,
+            )
+            raise TrueApiError("CryptoPro GOST TLS report download transport error") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -860,6 +1073,10 @@ class WindowsAgentExecutor:
             return self._m4_read(job)
         if job.job_type.value in M7_READ_JOB_TYPES:
             return self._m7_read(job)
+        if job.job_type.value in M11_AGENT_JOB_TYPES:
+            if job.job_type is AgentJobType.REPORT_DOWNLOAD:
+                raise AgentSecurityError("REPORT_DOWNLOAD requires execute_report_download")
+            return self._m11_report(job)
         if job.job_type is AgentJobType.POLL_DOCUMENT:
             return self._poll(job)
         return self._write(job)
@@ -983,6 +1200,160 @@ class WindowsAgentExecutor:
             error_message=safe.safe_error_message,
             read_result={"transport_error": asdict(safe), "raw_body_base64": base64.b64encode(response.body).decode("ascii")},
         )
+
+    def _m11_report(self, job: AgentJob) -> AgentResult:
+        assert job.read_payload is not None
+        bearer = self.session_manager.bearer_token()
+        try:
+            response = self.transport.m11_report(
+                job.job_type.value,
+                job.read_payload,
+                bearer_token=bearer,
+                rate_scope=self.participant_inn,
+            )
+        except ReportRateLimitExceeded as exc:
+            return AgentResult(
+                job.job_id, job.operation_id, "RETRY_SCHEDULED",
+                error_code="LOCAL_RATE_LIMIT",
+                read_result={"retry_after_seconds": exc.retry_after_seconds, "rate_family": exc.family},
+            )
+        except TrueApiError:
+            if job.job_type is AgentJobType.REPORT_CREATE:
+                return AgentResult(
+                    job.job_id, job.operation_id, REMOTE_CREATE_AMBIGUOUS,
+                    error_code=REMOTE_CREATE_AMBIGUOUS,
+                )
+            return AgentResult(
+                job.job_id, job.operation_id, "MANUAL_REVIEW",
+                error_code="TRUE_API_TRANSPORT_ERROR",
+            )
+        getattr(self.session_manager, "observe_http_status", lambda _status: None)(response.status)
+        body_sha = hashlib.sha256(response.body).hexdigest()
+        content_type = self._content_type(response.headers)
+        if not (200 <= response.status < 300):
+            return AgentResult(
+                job.job_id, job.operation_id, "READ_FAILED",
+                http_status=response.status,
+                body_sha256=body_sha,
+                content_type=content_type,
+                error_code=f"HTTP_{response.status}",
+            )
+        try:
+            raw = json.loads(response.body.decode("utf-8")) if response.body else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return AgentResult(
+                job.job_id, job.operation_id, "MANUAL_REVIEW",
+                http_status=response.status, body_sha256=body_sha,
+                content_type=content_type, error_code="REPORT_JSON_CONTRACT_INVALID",
+            )
+        safe = sanitize_report_evidence(raw)
+        if job.job_type is AgentJobType.REPORT_CREATE:
+            task = parse_task_evidence(raw)
+            if not task.task_id:
+                return AgentResult(
+                    job.job_id, job.operation_id, "MANUAL_REVIEW",
+                    http_status=response.status, body_sha256=body_sha,
+                    content_type=content_type, error_code="REPORT_CREATE_TASK_ID_MISSING",
+                    read_result={"remote_status": asdict(task.raw_status), "payload": safe},
+                )
+            return AgentResult(
+                job.job_id, job.operation_id, "REPORT_TASK_CREATED",
+                http_status=response.status, body_sha256=body_sha, content_type=content_type,
+                remote_status=task.raw_status.raw,
+                read_result={"task_id": task.task_id, "remote_status": asdict(task.raw_status), "payload": safe},
+            )
+        if job.job_type is AgentJobType.REPORT_TASK_GET:
+            task = parse_task_evidence(raw)
+            return AgentResult(
+                job.job_id, job.operation_id, "REPORT_TASK_OBSERVED",
+                http_status=response.status, body_sha256=body_sha, content_type=content_type,
+                remote_status=task.raw_status.raw,
+                read_result={"task_id": task.task_id, "remote_status": asdict(task.raw_status), "payload": safe},
+            )
+        if job.job_type is AgentJobType.REPORT_RESULTS:
+            items = raw.get("list") if isinstance(raw, dict) else None
+            if not isinstance(items, list):
+                items = raw.get("items") if isinstance(raw, dict) else None
+            parsed = [asdict(parse_result_evidence(item)) for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
+            return AgentResult(
+                job.job_id, job.operation_id, "REPORT_RESULTS_OBSERVED",
+                http_status=response.status, body_sha256=body_sha, content_type=content_type,
+                read_result={"results": parsed, "payload": safe},
+            )
+        return AgentResult(
+            job.job_id, job.operation_id, "REPORT_READ_COMPLETED",
+            http_status=response.status, body_sha256=body_sha, content_type=content_type,
+            read_result={"payload": safe},
+        )
+
+    def execute_report_download(
+        self,
+        job: AgentJob,
+        *,
+        upload: Callable[[dict[str, Any], Path], None],
+    ) -> AgentResult:
+        job.validate()
+        if job.job_type is not AgentJobType.REPORT_DOWNLOAD or job.read_payload is None:
+            raise AgentSecurityError("not a REPORT_DOWNLOAD job")
+        if job.expected_inn != self.participant_inn:
+            raise AgentSecurityError("expected_inn mismatch")
+        payload = job.read_payload
+        with tempfile.TemporaryDirectory(prefix="wbcz-report-download-") as directory:
+            path = Path(directory) / "result.zip"
+            with path.open("wb") as sink:
+                try:
+                    metadata = self.transport.m11_report_download(
+                        payload,
+                        bearer_token=self.session_manager.bearer_token(),
+                        rate_scope=self.participant_inn,
+                        sink=sink,
+                    )
+                except ReportRateLimitExceeded as exc:
+                    return AgentResult(
+                        job.job_id, job.operation_id, "RETRY_SCHEDULED",
+                        error_code="LOCAL_RATE_LIMIT",
+                        read_result={"retry_after_seconds": exc.retry_after_seconds, "rate_family": exc.family},
+                    )
+                except TrueApiError:
+                    return AgentResult(
+                        job.job_id, job.operation_id, "MANUAL_REVIEW",
+                        error_code="TRUE_API_TRANSPORT_ERROR",
+                    )
+            getattr(self.session_manager, "observe_http_status", lambda _status: None)(metadata["http_status"])
+            if not (200 <= metadata["http_status"] < 300):
+                path.unlink(missing_ok=True)
+                return AgentResult(
+                    job.job_id, job.operation_id, "READ_FAILED",
+                    http_status=metadata["http_status"],
+                    body_sha256=metadata["sha256"],
+                    content_type=metadata["content_type"],
+                    error_code=f"HTTP_{metadata['http_status']}",
+                )
+            upload(
+                {
+                    "artifact_upload_id": payload["artifact_upload_id"],
+                    "local_report_job_id": payload["local_report_job_id"],
+                    "result_id": payload["result_id"],
+                    "result_part_id": payload.get("result_part_id"),
+                    "byte_size": metadata["byte_size"],
+                    "sha256": metadata["sha256"],
+                    "content_type": metadata["content_type"],
+                },
+                path,
+            )
+            return AgentResult(
+                job.job_id, job.operation_id, "REPORT_ARTIFACT_UPLOADED",
+                http_status=metadata["http_status"],
+                body_sha256=metadata["sha256"],
+                content_type=metadata["content_type"],
+                read_result={
+                    "artifact_upload_id": payload["artifact_upload_id"],
+                    "result_id": payload["result_id"],
+                    "result_part_id": payload.get("result_part_id"),
+                    "byte_size": metadata["byte_size"],
+                    "sha256": metadata["sha256"],
+                },
+            )
 
     def _cis_check(self, job: AgentJob) -> AgentResult:
         try:
@@ -1396,7 +1767,15 @@ class WindowsOutboundAgent:
         if job is None:
             return False
         try:
-            result = self.executor.execute(job)
+            if job.job_type is AgentJobType.REPORT_DOWNLOAD:
+                result = self.executor.execute_report_download(
+                    job,
+                    upload=lambda metadata, path: self.backend.upload_report_artifact(
+                        self._machine_token, metadata, path
+                    ),
+                )
+            else:
+                result = self.executor.execute(job)
         except AgentProductionWriteDisabled:
             result = AgentResult(
                 job.job_id,
