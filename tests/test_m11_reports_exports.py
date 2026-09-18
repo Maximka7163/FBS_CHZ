@@ -88,6 +88,7 @@ from wbcz.windows_agent_runtime import (
     WindowsAgentReplayStore,
 )
 from wbcz_ui.live_true_api import TrueApiError
+from wbcz_web.models import Base
 from wbcz_web.models.reports import (
     ReportArtifactRecord,
     ReportArtifactUploadRecord,
@@ -884,9 +885,19 @@ def test_download_executor_uploads_file_and_result_json_contains_no_binary_base6
     assert result.outcome == "REPORT_ARTIFACT_UPLOADED"
 
 
+def _ensure_m11_report_tables(engine) -> None:
+    names = (
+        "report_snapshots", "report_jobs", "report_artifacts",
+        "report_job_events", "report_artifact_uploads",
+    )
+    tables = [Base.metadata.tables[name] for name in names]
+    Base.metadata.create_all(engine, tables=tables, checkfirst=True)
+
+
 @pytest.mark.skipif(not os.getenv("WBCZ_TEST_DATABASE_URL"), reason="PostgreSQL integration database not configured")
 def test_db_backed_report_claim_lease_recovery_bounded_attempts_and_no_double_worker() -> None:
     engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"])
+    _ensure_m11_report_tables(engine)
     with Session(engine) as db:
         repo = SqlReportRepository(db)
         row = repo.create_job(
@@ -917,6 +928,7 @@ def test_db_backed_report_claim_lease_recovery_bounded_attempts_and_no_double_wo
 @pytest.mark.skipif(not os.getenv("WBCZ_TEST_DATABASE_URL"), reason="PostgreSQL integration database not configured")
 def test_synchronous_local_worker_generates_ready_artifact_without_business_mutation(tmp_path: Path) -> None:
     engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"])
+    _ensure_m11_report_tables(engine)
     with Session(engine) as db:
         repo = SqlReportRepository(db)
         row = repo.create_job(
