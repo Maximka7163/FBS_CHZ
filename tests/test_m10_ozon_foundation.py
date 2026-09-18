@@ -21,6 +21,7 @@ from wbcz.ozon_foundation import (
     GLOBAL_OZON_LIMIT_RPS,
     INVENTED_BURST_CAPACITY,
     MARK_VALUE_EXTRACTION_ENABLED,
+    M10_EXECUTABLE_READ_CAPABILITIES,
     M10_WIRE_READY,
     M5LocalOperation,
     M5TypedLocalDecisionReference,
@@ -116,6 +117,7 @@ def test_hard_safe_foundation_gates_are_closed() -> None:
     assert not CIS_LOGGING_ALLOWED
     assert FRONTEND_FREEZE_ACTIVE
     assert OZON_EXECUTABLE_REMOTE_CAPABILITIES == ()
+    assert M10_EXECUTABLE_READ_CAPABILITIES == ()
 
 
 def test_connection_preserves_client_id_and_uses_secret_ref_only() -> None:
@@ -356,6 +358,32 @@ def test_recursive_sanitizer_removes_nested_products_exemplars_marks_canary() ->
     assert safe["products"][0]["exemplars"][0]["marks"] == "REDACTED"
     assert safe["products"][0]["exemplars"][0]["futureNonSensitive"] == {"ok": True}
     assert safe["futureRoot"] == {"keep": 7}
+
+
+def test_exemplar_context_codes_and_values_are_treated_as_sensitive() -> None:
+    payload = {
+        "products": [
+            {
+                "product_id": "P-1",
+                "exemplars": [
+                    {
+                        "exemplar_id": "E-1",
+                        "codes": ["CIS-CODES-CANARY"],
+                        "value": "CIS-VALUE-CANARY",
+                        "status": "future-status",
+                    }
+                ],
+            }
+        ]
+    }
+    safe = sanitize_ozon_evidence(payload)
+    rendered = repr(safe)
+    assert "CIS-CODES-CANARY" not in rendered
+    assert "CIS-VALUE-CANARY" not in rendered
+    exemplar = safe["products"][0]["exemplars"][0]
+    assert exemplar["codes"] == "REDACTED"
+    assert exemplar["value"] == "REDACTED"
+    assert exemplar["status"] == "future-status"
 
 
 def test_recursive_sanitizer_direct_and_discriminator_forms() -> None:
