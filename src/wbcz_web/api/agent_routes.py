@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, Response
 import os
+import shutil
 from pathlib import Path
 import tempfile
 from sqlalchemy.orm import Session
@@ -102,6 +103,13 @@ async def agent_report_artifact_ingress(
 
         temp_root = Path(config.report_temp_root)
         temp_root.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(temp_root).free < config.report_min_free_disk_bytes:
+            raise AgentSecurityError("minimum free disk requirement not met")
+        ingress_limit = min(
+            config.report_remote_download_byte_ceiling,
+            config.report_temp_storage_ceiling_bytes,
+            config.report_max_artifact_bytes,
+        )
         fd, raw_path = tempfile.mkstemp(prefix="m11-agent-ingress-", suffix=".upload", dir=temp_root)
         os.close(fd)
         path = Path(raw_path)
@@ -116,7 +124,7 @@ async def agent_report_artifact_ingress(
                     if not chunk:
                         continue
                     total += len(chunk)
-                    if total > 2 * 1024 * 1024 * 1024:
+                    if total > ingress_limit:
                         raise AgentSecurityError("agent artifact upload byte ceiling exceeded")
                     out.write(chunk)
                 out.flush()
