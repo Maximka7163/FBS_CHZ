@@ -692,8 +692,19 @@ class ChunkedAeadArtifactCipher:
             target.write(struct.pack(">I", len(sealed)))
             target.write(sealed)
             index += 1
+        plaintext_sha256 = digest.hexdigest()
+        footer_plain = _canonical({
+            "byte_size": total,
+            "plaintext_sha256": plaintext_sha256,
+            "chunk_count": index,
+        }).encode("utf-8")
+        footer_nonce = base_nonce + index.to_bytes(4, "big")
+        footer_aad = _canonical({"header": header, "footer": True, "context": aad_context}).encode("utf-8")
+        footer_sealed = aes.encrypt(footer_nonce, footer_plain, footer_aad)
         target.write(struct.pack(">I", 0))
-        return total, digest.hexdigest(), {**header, "chunk_count": index}
+        target.write(struct.pack(">I", len(footer_sealed)))
+        target.write(footer_sealed)
+        return total, plaintext_sha256, {**header, "chunk_count": index}
 
     def decrypt_stream(self, source: BinaryIO, target: BinaryIO, *, aad_context: Mapping[str, Any]) -> tuple[int, str]:
         if source.read(len(_ARTIFACT_MAGIC)) != _ARTIFACT_MAGIC:
@@ -724,6 +735,29 @@ class ChunkedAeadArtifactCipher:
                 raise ReportSecurityError("artifact frame truncated")
             sealed_len = struct.unpack(">I", raw_len)[0]
             if sealed_len == 0:
+                raw_footer_len = source.read(4)
+                if len(raw_footer_len) != 4:
+                    raise ReportSecurityError("artifact footer missing")
+                footer_len = struct.unpack(">I", raw_footer_len)[0]
+                footer_sealed = source.read(footer_len)
+                if len(footer_sealed) != footer_len:
+                    raise ReportSecurityError("artifact footer truncated")
+                footer_nonce = base_nonce + index.to_bytes(4, "big")
+                footer_aad = _canonical({"header": header, "footer": True, "context": aad_context}).encode("utf-8")
+                try:
+                    footer_plain = aes.decrypt(footer_nonce, footer_sealed, footer_aad)
+                except InvalidTag as exc:
+                    raise ReportSecurityError("artifact footer authentication failed") from exc
+                try:
+                    footer = json.loads(footer_plain.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ReportSecurityError("artifact footer invalid") from exc
+                if (
+                    footer.get("byte_size") != total
+                    or footer.get("plaintext_sha256") != digest.hexdigest()
+                    or footer.get("chunk_count") != index
+                ):
+                    raise ReportSecurityError("artifact authenticated summary mismatch")
                 break
             sealed = source.read(sealed_len)
             if len(sealed) != sealed_len:
@@ -738,8 +772,6 @@ class ChunkedAeadArtifactCipher:
             digest.update(plain)
             total += len(plain)
             index += 1
-        if index != int(header.get("chunk_count", index)):
-            raise ReportSecurityError("artifact chunk count mismatch")
         return total, digest.hexdigest()
 
 
