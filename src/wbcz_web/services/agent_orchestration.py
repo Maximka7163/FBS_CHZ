@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
+from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy.orm import Session
@@ -25,6 +26,13 @@ from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentJobRecord, CheckRecord, ControlRun
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
+from wbcz.m11_reports import FilesystemReportArtifactStore
+from wbcz_web.services.reports import (
+    EnvironmentArtifactKeyProvider,
+    REPORT_AGENT_PURPOSE,
+    ReportArtifactIngressService,
+    TrueApiReportOrchestrator,
+)
 
 
 CONTROL_CIS = "CONTROL_CIS"
@@ -163,6 +171,43 @@ class AgentOrchestrationBroker:
     def fetch_one(self, machine_token: str) -> AgentJob | None:
         return self.core.fetch_one(machine_token)
 
+    def _report_artifact_ingress(self) -> ReportArtifactIngressService:
+        if not self.config.report_artifact_root or not self.config.report_temp_root:
+            raise InvalidWriteOperation("M11 report artifact storage is not configured")
+        store = FilesystemReportArtifactStore(
+            Path(self.config.report_artifact_root),
+            key_provider=EnvironmentArtifactKeyProvider(),
+            key_version=self.config.report_artifact_key_version,
+        )
+        return ReportArtifactIngressService(
+            self.db,
+            artifact_store=store,
+            temp_root=Path(self.config.report_temp_root),
+        )
+
+    def upload_report_artifact(
+        self,
+        machine_token: str,
+        *,
+        artifact_upload_id: str,
+        report_job_id: str,
+        remote_result_id: str,
+        remote_result_part_id: str | None,
+        chunks,
+        observed_mime: str | None,
+    ):
+        self.machine_auth.verify(machine_token)
+        artifact = self._report_artifact_ingress().ingest_stream(
+            artifact_upload_id=artifact_upload_id,
+            report_job_id=report_job_id,
+            remote_result_id=remote_result_id,
+            remote_result_part_id=remote_result_part_id,
+            chunks=chunks,
+            observed_mime=observed_mime,
+        )
+        self.db.flush()
+        return artifact
+
     def submit_result(self, machine_token: str, result: AgentResult) -> None:
         self.machine_auth.verify(machine_token)
         metadata = self.job_store.metadata(result.job_id, lock=True)
@@ -179,6 +224,19 @@ class AgentOrchestrationBroker:
             ).hexdigest()
             if row is None or row.result_sha256 != digest:
                 raise AgentReplayConflict("incompatible duplicate agent result")
+            return
+
+        if metadata.purpose == REPORT_AGENT_PURPOSE:
+            # M11 report jobs never touch P0 write/document state. Complete the
+            # durable agent delivery first, then advance only report control state.
+            self.job_store.complete(result)
+            TrueApiReportOrchestrator(
+                self.db,
+                participant_inn=self.config.own_inn,
+                agent_lease_seconds=self.config.agent_job_lease_seconds,
+                reports_enabled=self.config.true_api_reports_enabled,
+            ).handle_agent_result(metadata, result)
+            self.db.flush()
             return
 
         # Core applies write/poll state transitions before the application-level
