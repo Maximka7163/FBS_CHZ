@@ -41,6 +41,7 @@ class WindowsAgentConfig:
     error_backoff_max_seconds: float = 60.0
     production_write: bool = False
     production_true_api_reports: bool = False
+    report_remote_download_byte_ceiling: int = 2 * 1024 * 1024 * 1024
 
     @classmethod
     def from_env(cls) -> "WindowsAgentConfig":
@@ -69,10 +70,13 @@ class WindowsAgentConfig:
         idle = float(os.getenv("WBCZ_AGENT_IDLE_POLL_SECONDS", "3"))
         backoff = float(os.getenv("WBCZ_AGENT_ERROR_BACKOFF_MAX_SECONDS", "60"))
         reports_enabled = os.getenv("WBCZ_AGENT_TRUE_API_REPORTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        report_download_ceiling = int(os.getenv("WBCZ_REPORT_REMOTE_DOWNLOAD_BYTE_CEILING", str(2 * 1024 * 1024 * 1024)))
         if idle < 0.5 or idle > 300:
             raise ValueError("WBCZ_AGENT_IDLE_POLL_SECONDS is out of range")
         if backoff < idle or backoff > 3600:
             raise ValueError("WBCZ_AGENT_ERROR_BACKOFF_MAX_SECONDS is out of range")
+        if report_download_ceiling <= 0:
+            raise ValueError("WBCZ_REPORT_REMOTE_DOWNLOAD_BYTE_CEILING must be positive")
         return cls(
             backend_url=backend,
             machine_token=token,
@@ -86,6 +90,7 @@ class WindowsAgentConfig:
             error_backoff_max_seconds=backoff,
             production_write=False,
             production_true_api_reports=reports_enabled,
+            report_remote_download_byte_ceiling=report_download_ceiling,
         )
 
 
@@ -160,6 +165,7 @@ class WindowsAgentRuntime:
             tunnel=self.tunnel,
             audit=self.audit,
             production_true_api_reports=config.production_true_api_reports,
+            remote_download_byte_ceiling=config.report_remote_download_byte_ceiling,
         )
         self.inspector = WindowsCryptoProCertificateInspector(
             config.certificate_thumbprint,
