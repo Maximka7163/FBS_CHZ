@@ -58,6 +58,10 @@ class WebConfig:
     agent_poll_max_seconds: int = 120
     agent_poll_max_attempts: int = 60
     true_api_write_enabled: bool = False
+    true_api_reports_enabled: bool = False
+    report_artifact_root: str | None = None
+    report_temp_root: str | None = None
+    report_artifact_key_version: str = "m11-v1"
     organisation_type: OrganisationType | None = None
     activity_fias_id: str | None = None
     activity_kpp: str | None = None
@@ -100,6 +104,14 @@ class WebConfig:
             raise ValueError("WBCZ_AGENT_POLL_MAX_ATTEMPTS is out of range")
         if self.true_api_write_enabled:
             raise ValueError("Production True API write remains disabled pending runtime contract tests")
+        if self.true_api_reports_enabled and not self.agent_enabled:
+            raise ValueError("True API reports require the Windows agent boundary")
+        if self.report_artifact_root is not None and not self.report_artifact_root.strip():
+            raise ValueError("WBCZ_REPORT_ARTIFACT_ROOT must be non-empty when configured")
+        if self.report_temp_root is not None and not self.report_temp_root.strip():
+            raise ValueError("WBCZ_REPORT_TEMP_ROOT must be non-empty when configured")
+        if not self.report_artifact_key_version.strip():
+            raise ValueError("WBCZ_REPORT_ARTIFACT_KEY_VERSION must not be empty")
         if self.organisation_type is None:
             if self.activity_fias_id or self.activity_kpp or self.remote_sale_return_paid is not None:
                 raise ValueError("WBCZ_ORGANISATION_TYPE is required when P0 organisation fields are configured")
@@ -174,6 +186,10 @@ class WebConfig:
             agent_poll_max_seconds=int(os.getenv("WBCZ_AGENT_POLL_MAX_SECONDS", "120")),
             agent_poll_max_attempts=int(os.getenv("WBCZ_AGENT_POLL_MAX_ATTEMPTS", "60")),
             true_api_write_enabled=_env_bool("WBCZ_TRUE_API_WRITE_ENABLED", False),
+            true_api_reports_enabled=_env_bool("WBCZ_TRUE_API_REPORTS_ENABLED", False),
+            report_artifact_root=os.getenv("WBCZ_REPORT_ARTIFACT_ROOT", "").strip() or None,
+            report_temp_root=os.getenv("WBCZ_REPORT_TEMP_ROOT", "").strip() or None,
+            report_artifact_key_version=os.getenv("WBCZ_REPORT_ARTIFACT_KEY_VERSION", "m11-v1").strip() or "m11-v1",
             organisation_type=organisation_type,
             activity_fias_id=fias_id,
             activity_kpp=kpp,
