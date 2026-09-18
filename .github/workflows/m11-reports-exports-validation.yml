@@ -1,0 +1,265 @@
+name: M11 reports exports validation
+
+on:
+  push:
+    branches:
+      - m11/reports-exports-001
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  M11_BASE_SHA: 7ca6681557e3a3c7c6488e2471393baf8f4998fb
+  FROZEN_P0_SHA: 395701f1757711b5a11b9348d929182d40f51f0a
+  WBCZ_ENV: test
+  WBCZ_OWN_INN: "1234567890"
+  WBCZ_TRUE_API_WRITE_ENABLED: "false"
+  WBCZ_TRUE_API_REPORTS_ENABLED: "false"
+  WBCZ_WB_WRITE_ENABLED: "false"
+  WBCZ_OZON_WRITE_ENABLED: "false"
+
+jobs:
+  linux-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_m11
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_m11"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m11
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m11
+      WBCZ_REPORT_ARTIFACT_KEY_HEX: "1111111111111111111111111111111111111111111111111111111111111111"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove exact base, frozen P0, M9/M10 preservation, historical migrations and frontend freeze
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$M11_BASE_SHA")" = "$M11_BASE_SHA"
+          test "$(git rev-parse "$M11_BASE_SHA")" = "$M11_BASE_SHA"
+          test "$(git rev-parse origin/p0/test-candidate-001)" = "$FROZEN_P0_SHA"
+
+          if git diff --name-only "$M11_BASE_SHA"...HEAD | grep '^frontend/'; then
+            echo 'FRONTEND_SOURCE_CHANGES must remain NONE in M11' >&2; exit 1
+          fi
+          if git diff --name-only "$M11_BASE_SHA"...HEAD | grep -E '^migrations/versions/00(0[1-9]|10|11)_'; then
+            echo 'historical migration changed in M11' >&2; exit 1
+          fi
+
+          git diff --quiet "$M11_BASE_SHA"...HEAD --             src/wbcz/wb_fbs.py             src/wbcz_web/models/wb_fbs.py             migrations/versions/0010_m9_wb.py             docs/M9_WB_FBS_READONLY_CONTRACT.md             tests/test_m9_wb_fbs.py             .github/workflows/m9-wb-fbs-readonly-validation.yml
+
+          git diff --quiet "$M11_BASE_SHA"...HEAD --             src/wbcz/ozon_foundation.py             src/wbcz_web/models/ozon.py             migrations/versions/0011_m10_ozon.py             docs/M10_OZON_SAFE_FOUNDATION_CONTRACT.md             tests/test_m10_ozon_foundation.py             .github/workflows/m10-ozon-foundation-validation.yml
+
+          if git diff --name-only "$M11_BASE_SHA"...HEAD | grep -Ei '(^|/)(m12)(_|/|\.)'; then
+            echo 'M12 must not start in M11' >&2; exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install backend dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: Build deterministic WB regression workbook
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python scripts/generate_regression_workbook.py /mnt/data/REF_WB_archive_9.xlsx
+          test -s /mnt/data/REF_WB_archive_9.xlsx
+
+      - name: Migration head is M11
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(alembic heads | tr -d '\r')" = '0012_m11_reports (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          e=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with e.begin() as c:
+              c.exec_driver_sql('DROP SCHEMA public CASCADE')
+              c.exec_driver_sql('CREATE SCHEMA public')
+          e.dispose()
+          PY
+          alembic upgrade head
+          test "$(alembic current | tr -d '\r')" = '0012_m11_reports (head)'
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          e=create_engine(os.environ['WBCZ_TEST_DATABASE_URL'])
+          with e.connect() as c:
+              tables={r[0] for r in c.execute(text("select table_name from information_schema.tables where table_schema='public'"))}
+              expected={'report_jobs','report_snapshots','report_artifacts','report_job_events','report_artifact_uploads'}
+              assert expected <= tables
+
+              jobs={r[0].lower() for r in c.execute(text("select column_name from information_schema.columns where table_name='report_jobs'"))}
+              assert {'request_fingerprint_sha256','lease_owner','lease_expires_at','remote_task_id','remote_create_ambiguous'} <= jobs
+              forbidden={'bearer','bearer_token','uuidtoken','token','machine_token','pin','private_key','cis','kiz','sgtin'}
+              assert not forbidden & jobs
+
+              artifacts={r[0].lower() for r in c.execute(text("select column_name from information_schema.columns where table_name='report_artifacts'"))}
+              assert {'storage_key','byte_size','sha256','encryption_metadata','encryption_version'} <= artifacts
+              assert not forbidden & artifacts
+
+              checks=[r[0] for r in c.execute(text("""
+                select pg_get_constraintdef(oid) from pg_constraint
+                where conname='ck_agent_jobs_type'
+              """))]
+              assert len(checks)==1
+              for value in ('REPORT_CREATE','REPORT_TASK_GET','REPORT_TASK_LIST','REPORT_RESULTS','REPORT_DOWNLOAD','REPORT_QUOTA_TYPE','REPORT_QUOTA_ID'):
+                  assert value in checks[0]
+              for value in ('TRUE_API_HTTP','REPORT_HTTP','ARBITRARY_REQUEST'):
+                  assert value not in checks[0]
+          e.dispose()
+          PY
+
+      - name: Focused M11 tests
+        run: python -m pytest -q tests/test_m11_reports_exports.py
+
+      - name: M10 through M1 regressions
+        run: |
+          python -m pytest -q tests/test_m10_ozon_foundation.py
+          python -m pytest -q tests/test_m9_wb_fbs.py
+          python -m pytest -q tests/test_m8_suz_foundation.py
+          python -m pytest -q tests/test_m7_edo_lite_foundation.py
+          python -m pytest -q tests/test_m6_aggregation.py
+          python -m pytest -q tests/test_m5_turnover.py
+          python -m pytest -q tests/test_m4_document_lifecycle.py
+          python -m pytest -q tests/test_m3_auth_signing.py
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+
+      - name: P0 regressions
+        run: |
+          python -m pytest -q tests/test_p0_document_assembler.py
+          python -m pytest -q tests/test_write_pipeline.py
+          python -m pytest -q tests/test_p0_endtoend_wiring.py
+
+      - name: Full PostgreSQL backend regression
+        run: python -m pytest -q
+
+      - name: Frontend regression
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm run typecheck
+          npm test
+          npm run build
+          if grep -R -Ei 'dispenser/|report-artifacts|WBCZ_TRUE_API_REPORTS|WBCZ_REPORT_|api-seller\.ozon\.ru|wildberries\.ru|markirovka\.crpt\.ru|WBCZ_AGENT_MACHINE_TOKEN|/api/agent/' dist; then
+            echo 'backend/report production boundary leaked into browser bundle' >&2; exit 1
+          fi
+
+      - name: M11 security and contract assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R -E 'GenericTrueApiReportProxy|GENERIC_TRUE_API_REPORT_PROXY *= *True|ARBITRARY_REMOTE_URL_DOWNLOAD *= *True' src/wbcz/m11_reports.py
+          ! grep -R -E -- '-----BEGIN .*PRIVATE KEY-----' src frontend migrations
+          ! grep -Ei 'Column\("bearer"|Column\("bearer_token"|Column\("uuidtoken"|Column\("machine_token"|Column\("pin"|Column\("private_key"|Column\("cis"|Column\("kiz"|Column\("sgtin"' migrations/versions/0012_m11_reports.py
+          ! grep -R -E 'base64\.b64encode\(.*report|ZIP.*base64|result_json.*ZIP' src/wbcz src/wbcz_web
+          ! grep -R -E '@(router|agent_router)\.(get|post).*reports/.*/download|@(router|agent_router)\.get.*report-artifacts' src/wbcz_web/api
+
+          python - <<'PY'
+          import inspect
+          from wbcz.m11_reports import (
+              ARBITRARY_REMOTE_URL_DOWNLOAD, CALLER_CONTROLLED_FILESYSTEM_PATH,
+              CALLER_CONTROLLED_STORAGE_KEY, CALLER_CONTROLLED_TRUE_API_HOST,
+              CALLER_CONTROLLED_TRUE_API_METHOD, CALLER_CONTROLLED_TRUE_API_PATH,
+              DISPENSER_CAPABILITIES, DispenserCapabilityName,
+              FRONTEND_FREEZE_ACTIVE, GENERIC_TRUE_API_REPORT_PROXY,
+              PRODUCTION_TRUE_API_REPORTS_ENABLED, REMOTE_RESULT_DELETE_ENABLED,
+              USER_REPORT_DOWNLOAD_ENABLED, enabled_remote_recipes,
+          )
+          from wbcz.ozon_foundation import M10_WIRE_READY, M10_EXECUTABLE_READ_CAPABILITIES
+          from wbcz.wb_fbs import PRODUCTION_WB_WRITE_ENABLED
+          from wbcz_web.models.reports import ReportJobRecord, ReportArtifactRecord
+
+          assert not GENERIC_TRUE_API_REPORT_PROXY
+          assert not ARBITRARY_REMOTE_URL_DOWNLOAD
+          assert not CALLER_CONTROLLED_TRUE_API_HOST
+          assert not CALLER_CONTROLLED_TRUE_API_PATH
+          assert not CALLER_CONTROLLED_TRUE_API_METHOD
+          assert not CALLER_CONTROLLED_FILESYSTEM_PATH
+          assert not CALLER_CONTROLLED_STORAGE_KEY
+          assert not REMOTE_RESULT_DELETE_ENABLED
+          assert not USER_REPORT_DOWNLOAD_ENABLED
+          assert FRONTEND_FREEZE_ACTIVE
+          assert not PRODUCTION_TRUE_API_REPORTS_ENABLED
+          assert not DISPENSER_CAPABILITIES[DispenserCapabilityName.REMOTE_RESULT_DELETE].enabled
+          assert enabled_remote_recipes() == ('FILTERED_CIS_REPORT',)
+          assert not M10_WIRE_READY
+          assert M10_EXECUTABLE_READ_CAPABILITIES == ()
+          assert not PRODUCTION_WB_WRITE_ENABLED
+          forbidden={'bearer','bearer_token','uuidtoken','token','machine_token','pin','private_key','cis','kiz','sgtin'}
+          assert not forbidden & set(ReportJobRecord.__table__.columns.keys())
+          assert not forbidden & set(ReportArtifactRecord.__table__.columns.keys())
+          PY
+
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove exact M10 base, frozen P0 and frontend freeze
+        shell: pwsh
+        run: |
+          $base=(git merge-base HEAD $env:M11_BASE_SHA).Trim()
+          if ($base -ne $env:M11_BASE_SHA) { throw "wrong M11 base: $base" }
+          $frozen=(git rev-parse origin/p0/test-candidate-001).Trim()
+          if ($frozen -ne $env:FROZEN_P0_SHA) { throw "frozen P0 changed: $frozen" }
+          $frontend=(git diff --name-only "$env:M11_BASE_SHA...HEAD" | Select-String '^frontend/')
+          if ($frontend) { throw 'frontend source changed in M11' }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install -e ".[ui,test,web]"
+
+      - name: M11 M10 M9 M8 M7 M6 M5 focused tests
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m11_reports_exports.py
+          python -m pytest -q tests/test_m10_ozon_foundation.py
+          python -m pytest -q tests/test_m9_wb_fbs.py
+          python -m pytest -q tests/test_m8_suz_foundation.py
+          python -m pytest -q tests/test_m7_edo_lite_foundation.py
+          python -m pytest -q tests/test_m6_aggregation.py
+          python -m pytest -q tests/test_m5_turnover.py
+
+      - name: M4 M3 M2 M1 Windows regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_m4_document_lifecycle.py
+          python -m pytest -q tests/test_m3_auth_signing.py
+          python -m pytest -q tests/test_m2_reference_products.py
+          python -m pytest -q tests/test_m1_cis_inventory.py
+          python -m pytest -q tests/test_windows_agent.py
+
+      - name: P0 Windows safety regressions
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_p0_document_assembler.py
+          python -m pytest -q `
+            tests/test_p0_endtoend_wiring.py::test_windows_runtime_and_outbound_agent_have_no_listener `
+            tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
