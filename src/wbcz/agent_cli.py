@@ -40,6 +40,7 @@ class WindowsAgentConfig:
     idle_poll_seconds: float = 3.0
     error_backoff_max_seconds: float = 60.0
     production_write: bool = False
+    production_true_api_reports: bool = False
 
     @classmethod
     def from_env(cls) -> "WindowsAgentConfig":
@@ -67,6 +68,7 @@ class WindowsAgentConfig:
         cryptcp_raw = os.getenv("WBCZ_CRYPTOPRO_CRYPTCP", "").strip()
         idle = float(os.getenv("WBCZ_AGENT_IDLE_POLL_SECONDS", "3"))
         backoff = float(os.getenv("WBCZ_AGENT_ERROR_BACKOFF_MAX_SECONDS", "60"))
+        reports_enabled = os.getenv("WBCZ_AGENT_TRUE_API_REPORTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
         if idle < 0.5 or idle > 300:
             raise ValueError("WBCZ_AGENT_IDLE_POLL_SECONDS is out of range")
         if backoff < idle or backoff > 3600:
@@ -83,6 +85,7 @@ class WindowsAgentConfig:
             idle_poll_seconds=idle,
             error_backoff_max_seconds=backoff,
             production_write=False,
+            production_true_api_reports=reports_enabled,
         )
 
 
@@ -142,6 +145,7 @@ class WindowsAgentPreflight:
                 else None
             ),
             "production_write": False,
+            "production_true_api_reports": self.transport.production_true_api_reports,
         }
 
 
@@ -152,7 +156,11 @@ class WindowsAgentRuntime:
         config.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.tunnel = CryptoProGostTlsTunnel(config.stunnel_path)
         self.audit = JsonlLiveAudit(config.audit_log_path)
-        self.transport = ProductionAgentTrueApiTransport(tunnel=self.tunnel, audit=self.audit)
+        self.transport = ProductionAgentTrueApiTransport(
+            tunnel=self.tunnel,
+            audit=self.audit,
+            production_true_api_reports=config.production_true_api_reports,
+        )
         self.inspector = WindowsCryptoProCertificateInspector(
             config.certificate_thumbprint,
             cryptcp_path=config.cryptcp_path,
