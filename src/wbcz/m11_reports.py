@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import struct
 import tempfile
 import time
@@ -185,6 +186,8 @@ class ReportTypeDefinition:
     output_formats: tuple[ReportOutputFormat, ...]
     snapshot_strategy: SnapshotStrategy
     fixed_labels: Mapping[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    disabled_reason: str | None = None
 
 
 LOCAL_REPORT_CATALOG: Mapping[LocalReportType, ReportTypeDefinition] = {
@@ -271,10 +274,12 @@ LOCAL_REPORT_CATALOG: Mapping[LocalReportType, ReportTypeDefinition] = {
     ),
     LocalReportType.P0_IMPORT_CONTROL_QUALITY: ReportTypeDefinition(
         LocalReportType.P0_IMPORT_CONTROL_QUALITY, "1.0", "P0ImportQualityAdapter", True,
-        ("participant_inn", "import_id", "decision"),
+        (),
         ("participant_inn", "import_id", "row_index", "decision", "reason", "source_fingerprint", "observed_at"),
         ReportSensitivity.BUSINESS_SENSITIVE, (ReportOutputFormat.CSV, ReportOutputFormat.XLSX, ReportOutputFormat.JSON),
         SnapshotStrategy.APPEND_ONLY_HIGH_WATER,
+        enabled=False,
+        disabled_reason="SOURCE_PARTICIPANT_SCOPE_NOT_PROVABLE",
     ),
 }
 
@@ -972,6 +977,14 @@ class DispenserRateLimiter:
         return DispenserRateDecision(True, 0.0)
 
 
+LP_PRODUCT_GROUP_CODE = "1"
+FILTERED_CIS_LP_PACKAGE_TYPES = frozenset({"UNIT", "SET", "BUNDLE", "BOX", "ATK"})
+FILTERED_CIS_LP_STATUSES = frozenset({
+    "EMITTED", "APPLIED", "INTRODUCED", "WRITTEN_OFF", "RETIRED", "DISAGGREGATION",
+})
+SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES = "SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES"
+
+
 @dataclass(frozen=True, slots=True)
 class FilteredCisFilters:
     participant_inn: str
@@ -982,12 +995,12 @@ class FilteredCisFilters:
     def validate(self) -> None:
         if not re.fullmatch(r"\d{10}|\d{12}", self.participant_inn or ""):
             raise ReportContractError("participant_inn must be 10 or 12 digits")
-        if not self.package_type or any(not isinstance(x, str) or not x for x in self.package_type):
+        if not self.package_type:
             raise ReportContractError("packageType is required")
-        if self.status is None:
-            raise ReportContractError("status is required by this restricted M11 FILTERED_CIS_REPORT recipe")
-        if not isinstance(self.status, str) or not self.status:
-            raise ReportContractError("status invalid")
+        if any(type(value) is not str or value not in FILTERED_CIS_LP_PACKAGE_TYPES for value in self.package_type):
+            raise ReportContractError("packageType is not request-safe for LP")
+        if self.status not in FILTERED_CIS_LP_STATUSES:
+            raise ReportContractError("status is not allowed for LP FILTERED_CIS_REPORT")
         if len(self.include_gtin) > 1000:
             raise ReportContractError("includeGtin max 1000")
         for gtin in self.include_gtin:
@@ -1073,13 +1086,11 @@ def _opaque_id(value: str, label: str) -> str:
 
 
 def _product_group_code(value: Any) -> str:
-    if isinstance(value, int):
-        if value <= 0:
-            raise ReportContractError("product_group_code must be positive")
-        return str(value)
-    if isinstance(value, str) and re.fullmatch(r"\d{1,6}", value) and int(value) > 0:
-        return value
-    raise ReportContractError("product_group_code must be an exact positive numeric code")
+    if type(value) is int and value == 1:
+        return LP_PRODUCT_GROUP_CODE
+    if value == LP_PRODUCT_GROUP_CODE:
+        return LP_PRODUCT_GROUP_CODE
+    raise ReportContractError("FILTERED_CIS_REPORT is fixed to LP productGroupCode=1")
 
 
 def build_filtered_cis_create_body(
@@ -1095,7 +1106,7 @@ def build_filtered_cis_create_body(
         "format": "CSV",
         "name": "FILTERED_CIS_REPORT",
         "periodicity": "SINGLE",
-        "productGroupCode": _product_group_code(product_group_code),
+        "productGroupCode": LP_PRODUCT_GROUP_CODE,
         "params": _canonical(params),
     }
 
@@ -1460,12 +1471,22 @@ class BinaryArtifactIngress:
         artifact_store: ReportArtifactStore,
         temp_root: Path,
         remote_download_byte_ceiling: int = DEFAULT_REMOTE_DOWNLOAD_BYTE_CEILING,
+        temp_storage_ceiling_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
+        min_free_disk_bytes: int = 1,
         finalized_lookup: Callable[[str], IngressArtifact | None] | None = None,
     ) -> None:
         self.binding_store = binding_store
         self.artifact_store = artifact_store
         self.temp_root = temp_root
-        self.remote_download_byte_ceiling = remote_download_byte_ceiling
+        self.remote_download_byte_ceiling = int(remote_download_byte_ceiling)
+        if self.remote_download_byte_ceiling <= 0:
+            raise ValueError("remote_download_byte_ceiling must be positive")
+        self.temp_storage_ceiling_bytes = int(temp_storage_ceiling_bytes)
+        self.min_free_disk_bytes = int(min_free_disk_bytes)
+        if self.temp_storage_ceiling_bytes <= 0:
+            raise ValueError("temp_storage_ceiling_bytes must be positive")
+        if self.min_free_disk_bytes <= 0:
+            raise ValueError("min_free_disk_bytes must be positive")
         self.finalized_lookup = finalized_lookup
         self.temp_root.mkdir(parents=True, exist_ok=True)
         self._finalized: dict[str, IngressArtifact] = {}
@@ -1511,6 +1532,8 @@ class BinaryArtifactIngress:
         if binding.remote_result_part_id != remote_result_part_id:
             raise ReportSecurityError("artifact upload result part mismatch")
 
+        if shutil.disk_usage(self.temp_root).free < self.min_free_disk_bytes:
+            raise ArtifactLimitExceeded("minimum free disk requirement not met")
         fd, raw_path = tempfile.mkstemp(prefix="m11-agent-upload-", suffix=".zip", dir=self.temp_root)
         os.close(fd)
         path = Path(raw_path)
@@ -1530,6 +1553,8 @@ class BinaryArtifactIngress:
                     size += len(chunk)
                     if size > self.remote_download_byte_ceiling:
                         raise ArtifactLimitExceeded("remote download byte ceiling exceeded")
+                    if size > self.temp_storage_ceiling_bytes:
+                        raise ArtifactLimitExceeded("temporary storage byte ceiling exceeded")
                     digest.update(chunk)
                     out.write(chunk)
                 out.flush()
