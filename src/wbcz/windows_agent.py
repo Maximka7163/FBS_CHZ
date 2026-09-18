@@ -15,7 +15,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, BinaryIO, Callable, Mapping, Protocol
 
 from wbcz.cis_inventory import (
     M1_READ_JOB_TYPES,
