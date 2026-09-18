@@ -227,6 +227,7 @@ OZON_REMOTE_CAPABILITIES: Mapping[OzonCapabilityName, OzonRemoteCapability] = {
 OZON_EXECUTABLE_REMOTE_CAPABILITIES = tuple(
     cap.name for cap in OZON_REMOTE_CAPABILITIES.values() if cap.enabled
 )
+M10_EXECUTABLE_READ_CAPABILITIES = OZON_EXECUTABLE_REMOTE_CAPABILITIES
 
 DEPRECATED_OR_FORBIDDEN_REMOTE_PATHS = frozenset(
     {
@@ -363,6 +364,7 @@ _SENSITIVE_DISCRIMINATOR_FIELDS = frozenset({"key", "type", "name", "field", "ki
 _SENSITIVE_ASSOCIATED_FIELDS = frozenset(
     {"value", "values", "data", "code", "codes", "mark", "marks", "sgtin", "sgtins", "cis", "cises", "kiz", "kizes"}
 )
+_MARKING_CONTEXT_CONTAINER_KEYS = frozenset({"exemplar", "exemplars"})
 _SECRET_KEYS = frozenset(
     {"apikey", "api_key", "authorization", "secret", "rawsecret", "token", "accesstoken", "clientsecret", "privatekey", "pin", "signature"}
 )
@@ -414,7 +416,8 @@ def sanitize_ozon_evidence(value: object, *, marking_context: bool = False) -> o
             elif discriminator_sensitive and compact in {_compact(x) for x in _SENSITIVE_ASSOCIATED_FIELDS}:
                 out[key] = "REDACTED"
             else:
-                out[key] = sanitize_ozon_evidence(item, marking_context=discriminator_sensitive)
+                child_marking_context = discriminator_sensitive or compact in _MARKING_CONTEXT_CONTAINER_KEYS
+                out[key] = sanitize_ozon_evidence(item, marking_context=child_marking_context)
         return out
     if isinstance(value, (list, tuple)):
         return [sanitize_ozon_evidence(item, marking_context=marking_context) for item in value]
