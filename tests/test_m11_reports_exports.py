@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -27,6 +28,10 @@ from wbcz.m11_reports import (
     KNOWN_REMOTE_DOWNLOAD_STATUSES,
     KNOWN_REMOTE_TASK_STATUSES,
     LOCAL_REPORT_CATALOG,
+    LP_PRODUCT_GROUP_CODE,
+    FILTERED_CIS_LP_PACKAGE_TYPES,
+    FILTERED_CIS_LP_STATUSES,
+    SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES,
     M11_AGENT_JOB_TYPES,
     M12_DEPENDENCY_FOR_DOWNLOAD_AUTH,
     PATH_TRAVERSAL_ALLOWED,
@@ -88,7 +93,17 @@ from wbcz.windows_agent_runtime import (
     WindowsAgentReplayStore,
 )
 from wbcz_ui.live_true_api import TrueApiError
-from wbcz_web.models import Base
+from wbcz_web.models import (
+    Base,
+    AgentJobRecord,
+    DocumentLifecycleLedgerRecord,
+    TurnoverOperationLedgerRecord,
+    AggregationOperationLedgerRecord,
+    WbConnectionRecord,
+    WbOrderRecord,
+    WbEventRecord,
+    WbReconciliationRecord,
+)
 from wbcz_web.models.reports import (
     ReportArtifactRecord,
     ReportArtifactUploadRecord,
@@ -97,7 +112,12 @@ from wbcz_web.models.reports import (
     ReportSnapshotRecord,
 )
 from wbcz_web.repositories.reports import SqlReportRepository
-from wbcz_web.services.reports import SynchronousReportExecutor
+from wbcz_web.config import WebConfig
+from wbcz_web.services.reports import (
+    LocalReportSourceRegistry,
+    ReportJobService,
+    SynchronousReportExecutor,
+)
 
 
 NOW = datetime(2026, 9, 18, 0, 0, tzinfo=timezone.utc)
@@ -477,7 +497,7 @@ def test_filtered_cis_recipe_is_only_enabled_create_recipe_and_has_no_raw_params
     assert enabled_remote_recipes() == ("FILTERED_CIS_REPORT",)
     assert "DOCUMENTS_ERRORS" in disabled_remote_recipes()
     filters = FilteredCisFilters(
-        "1234567890", ("UNIT", "LEVEL1"), "INTRODUCED",
+        "1234567890", ("UNIT", "SET"), "INTRODUCED",
         ("00000000000001",),
     )
     body = build_filtered_cis_create_body(product_group_code="1", filters=filters)
@@ -486,7 +506,7 @@ def test_filtered_cis_recipe_is_only_enabled_create_recipe_and_has_no_raw_params
         "name": "FILTERED_CIS_REPORT",
         "periodicity": "SINGLE",
         "productGroupCode": "1",
-        "params": '{"includeGtin":["00000000000001"],"packageType":["UNIT","LEVEL1"],"participantInn":"1234567890","status":"INTRODUCED"}',
+        "params": '{"includeGtin":["00000000000001"],"packageType":["UNIT","SET"],"participantInn":"1234567890","status":"INTRODUCED"}',
     }
     with pytest.raises(ReportContractError):
         validate_report_agent_payload(
@@ -997,3 +1017,441 @@ def test_no_generic_true_api_proxy_arbitrary_url_or_user_download_surface() -> N
     assert "request.stream()" in routes
     assert "request.body()" not in routes[routes.find("agent_report_artifact_ingress"):]
     assert "base64.b64encode" not in windows[windows.find("def execute_report_download"):windows.find("def _cis_check")]
+
+
+# M11 acceptance FIX-01: tenant isolation, effective filters, LP recipe and configurable limits.
+
+def test_filtered_cis_lp_contract_is_fail_closed_before_network() -> None:
+    assert LP_PRODUCT_GROUP_CODE == "1"
+    assert FILTERED_CIS_LP_PACKAGE_TYPES == {"UNIT", "SET", "BUNDLE", "BOX", "ATK"}
+    assert FILTERED_CIS_LP_STATUSES == {
+        "EMITTED", "APPLIED", "INTRODUCED", "WRITTEN_OFF", "RETIRED", "DISAGGREGATION",
+    }
+    assert SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES == "SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES"
+    for package_type in FILTERED_CIS_LP_PACKAGE_TYPES:
+        FilteredCisFilters("1234567890", (package_type,), "INTRODUCED").validate()
+    for package_type in ("GROUP", "LEVEL1", "LEVEL2", "LEVEL3", "LEVEL4", "LEVEL5", "FUTURE"):
+        with pytest.raises(ReportContractError):
+            FilteredCisFilters("1234567890", (package_type,), "INTRODUCED").validate()
+    for status in FILTERED_CIS_LP_STATUSES:
+        FilteredCisFilters("1234567890", ("UNIT",), status).validate()
+    for status in ("WITHDRAWN", "DISAGGREGATED", "APPLIED_NOT_PAID", "FUTURE"):
+        with pytest.raises(ReportContractError):
+            FilteredCisFilters("1234567890", ("UNIT",), status).validate()
+    for pg in (2, 3, 999, "2", "999"):
+        with pytest.raises(ReportContractError):
+            build_filtered_cis_create_body(
+                product_group_code=pg,
+                filters=FilteredCisFilters("1234567890", ("UNIT",), "INTRODUCED"),
+            )
+
+    factory = FakeConnectionFactory()
+    tx = transport(factory)
+    invalids = [
+        {**create_payload(), "product_group_code": "2"},
+        {**create_payload(), "filters": {**create_payload()["filters"], "package_type": ["LEVEL1"]}},
+        {**create_payload(), "filters": {**create_payload()["filters"], "package_type": ["GROUP"]}},
+        {**create_payload(), "filters": {**create_payload()["filters"], "package_type": ["FUTURE"]}},
+        {**create_payload(), "filters": {**create_payload()["filters"], "status": "WITHDRAWN"}},
+        {**create_payload(), "filters": {**create_payload()["filters"], "status": "FUTURE"}},
+    ]
+    for payload in invalids:
+        with pytest.raises(Exception):
+            tx.m11_report("REPORT_CREATE", payload, bearer_token="B", rate_scope="1234567890")
+    assert factory.calls == []
+
+
+def test_agent_report_create_participant_must_equal_expected_inn() -> None:
+    payload = create_payload()
+    payload["filters"]["participant_inn"] = "9999999999"
+    payload = validate_report_agent_payload("REPORT_CREATE", payload)
+    job = AgentJob(
+        job_id="job_report_participant_mismatch",
+        job_type=AgentJobType.REPORT_CREATE,
+        operation_id="rpt_participant_mismatch",
+        pg="lp",
+        expected_inn="1234567890",
+        read_payload=payload,
+    )
+    with pytest.raises(Exception):
+        job.validate()
+
+
+def test_p0_report_is_disabled_when_participant_scope_cannot_be_proved() -> None:
+    definition = LOCAL_REPORT_CATALOG[LocalReportType.P0_IMPORT_CONTROL_QUALITY]
+    assert not definition.enabled
+    assert definition.disabled_reason == "SOURCE_PARTICIPANT_SCOPE_NOT_PROVABLE"
+    assert definition.allowed_filters == ()
+
+
+def test_report_config_limits_are_typed_positive_and_route_has_no_hardcoded_2gib() -> None:
+    config = WebConfig(
+        database_url="postgresql+psycopg://u:p@localhost/db",
+        own_inn="1234567890",
+        environment="test",
+        report_max_local_rows=17,
+        report_max_artifact_bytes=1000,
+        report_remote_download_byte_ceiling=900,
+        report_db_fetch_batch_size=7,
+        report_snapshot_timeout_seconds=8,
+        report_worker_timeout_seconds=9,
+        report_temp_storage_ceiling_bytes=800,
+        report_min_free_disk_bytes=1,
+    ).validate_for_startup()
+    assert config.report_max_local_rows == 17
+    assert config.report_db_fetch_batch_size == 7
+    for field in (
+        "report_max_local_rows", "report_max_artifact_bytes", "report_remote_download_byte_ceiling",
+        "report_db_fetch_batch_size", "report_snapshot_timeout_seconds", "report_worker_timeout_seconds",
+        "report_temp_storage_ceiling_bytes", "report_min_free_disk_bytes",
+    ):
+        kwargs = {field: 0}
+        with pytest.raises(ValueError):
+            WebConfig(
+                database_url="postgresql+psycopg://u:p@localhost/db",
+                own_inn="1234567890",
+                environment="test",
+                **kwargs,
+            ).validate_for_startup()
+    route = Path("src/wbcz_web/api/agent_routes.py").read_text(encoding="utf-8")
+    assert "total > 2 * 1024 * 1024 * 1024" not in route
+    assert "report_remote_download_byte_ceiling" in route
+    assert "report_temp_storage_ceiling_bytes" in route
+    assert "report_min_free_disk_bytes" in route
+
+
+def test_binary_ingress_honors_temp_ceiling_and_min_free_disk(tmp_path: Path) -> None:
+    bindings = InMemoryUploadBindingStore()
+    store = FilesystemReportArtifactStore(tmp_path / "store", key_provider=KeyProvider(), key_version="v1")
+    ingress = BinaryArtifactIngress(
+        binding_store=bindings,
+        artifact_store=store,
+        temp_root=tmp_path / "tmp",
+        remote_download_byte_ceiling=100,
+        temp_storage_ceiling_bytes=4,
+        min_free_disk_bytes=1,
+    )
+    binding = ingress.prepare(
+        report_job_id="rpt_limit",
+        remote_result_id="res-limit",
+        remote_result_part_id=None,
+        product_group_code="1",
+        expected_archive_size=None,
+    )
+    with pytest.raises(ArtifactLimitExceeded):
+        ingress.ingest(
+            artifact_upload_id=binding.artifact_upload_id,
+            report_job_id="rpt_limit",
+            remote_result_id="res-limit",
+            remote_result_part_id=None,
+            chunks=[b"12345"],
+            observed_mime="application/zip",
+        )
+    assert not list((tmp_path / "tmp").glob("m11-agent-upload-*"))
+
+    impossible = BinaryArtifactIngress(
+        binding_store=InMemoryUploadBindingStore(),
+        artifact_store=store,
+        temp_root=tmp_path / "tmp2",
+        remote_download_byte_ceiling=100,
+        temp_storage_ceiling_bytes=100,
+        min_free_disk_bytes=2**63 - 1,
+    )
+    b2 = impossible.prepare(
+        report_job_id="rpt_disk",
+        remote_result_id="res-disk",
+        remote_result_part_id=None,
+        product_group_code="1",
+        expected_archive_size=None,
+    )
+    with pytest.raises(ArtifactLimitExceeded):
+        impossible.ingest(
+            artifact_upload_id=b2.artifact_upload_id,
+            report_job_id="rpt_disk",
+            remote_result_id="res-disk",
+            remote_result_part_id=None,
+            chunks=[b"x"],
+            observed_mime=None,
+        )
+
+
+def _seed_agent_job(
+    db: Session,
+    *,
+    job_id: str,
+    job_type: str,
+    purpose: str,
+    inn: str,
+    result_json: dict | None = None,
+    read_payload: dict | None = None,
+    state: str = "COMPLETED",
+) -> None:
+    payload = {
+        "job_id": job_id,
+        "job_type": job_type,
+        "operation_id": "op_" + job_id,
+        "pg": "lp",
+        "expected_inn": inn,
+        "document_type": None,
+        "document_sha256": None,
+        "product_document_base64": None,
+        "cises": [],
+        "document_id": None,
+        "read_payload": read_payload,
+    }
+    db.add(AgentJobRecord(
+        job_id=job_id,
+        job_type=job_type,
+        operation_id="op_" + job_id,
+        purpose=purpose,
+        event_id=None,
+        control_run_id=None,
+        poll_attempt=0,
+        payload_sha256=hashlib.sha256(job_id.encode()).hexdigest(),
+        payload_json=payload,
+        state=state,
+        delivery_count=0,
+        result_json=result_json,
+    ))
+    db.flush()
+
+
+@pytest.mark.skipif(not os.getenv("WBCZ_TEST_DATABASE_URL"), reason="PostgreSQL integration database not configured")
+def test_mixed_tenant_m1_m2_and_filters_are_effective() -> None:
+    engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"])
+    Base.metadata.create_all(engine, checkfirst=True)
+    with Session(engine) as db:
+        for table in (AgentJobRecord,):
+            db.query(table).delete()
+        _seed_agent_job(
+            db, job_id="m1-a", job_type="CIS_INFO", purpose="CIS_INVENTORY", inn="1234567890",
+            result_json={"read_result": {"cises": [{"cis": "CIS-A", "status": "INTRODUCED"}, {"cis": "CIS-A2", "status": "EMITTED"}]}},
+            read_payload={"cises": ["CIS-A"]},
+        )
+        _seed_agent_job(
+            db, job_id="m1-b", job_type="CIS_INFO", purpose="CIS_INVENTORY", inn="9999999999",
+            result_json={"read_result": {"cises": [{"cis": "CIS-B-SECRET", "status": "INTRODUCED"}]}},
+            read_payload={"cises": ["CIS-B-SECRET"]},
+        )
+        _seed_agent_job(
+            db, job_id="m2-a", job_type="PRODUCT_INFO", purpose="REFERENCE_PRODUCTS", inn="1234567890",
+            result_json={"read_result": {}}, read_payload={"gtins": ["0001", "0002"]},
+        )
+        _seed_agent_job(
+            db, job_id="m2-b", job_type="PRODUCT_INFO", purpose="REFERENCE_PRODUCTS", inn="9999999999",
+            result_json={"read_result": {}}, read_payload={"gtins": ["9999"]},
+        )
+        db.commit()
+        registry = LocalReportSourceRegistry("1234567890", fetch_batch_size=2)
+        with engine.connect() as connection:
+            m1 = list(registry.rows(connection, LocalReportType.CIS_INVENTORY_STORED_SNAPSHOT, filters={}))
+            rendered = json.dumps(m1)
+            assert "CIS-B-SECRET" not in rendered
+            assert _fingerprint_for_test("CIS-B-SECRET") not in rendered
+            wanted_fp = _fingerprint_for_test("CIS-A")
+            assert [r["cis_fingerprint"] for r in registry.rows(
+                connection, LocalReportType.CIS_INVENTORY_STORED_SNAPSHOT,
+                filters={"participant_inn": "1234567890", "cis_fingerprint": wanted_fp},
+            )] == [wanted_fp]
+            assert all(r["raw_state"] == "EMITTED" for r in registry.rows(
+                connection, LocalReportType.CIS_INVENTORY_STORED_SNAPSHOT,
+                filters={"state": "EMITTED"},
+            ))
+            m2 = list(registry.rows(connection, LocalReportType.PRODUCT_REFERENCE_READINESS, filters={}))
+            assert {r["gtin"] for r in m2} == {"0001", "0002"}
+            assert [r["gtin"] for r in registry.rows(
+                connection, LocalReportType.PRODUCT_REFERENCE_READINESS, filters={"gtin": "0002"},
+            )] == ["0002"]
+            assert list(registry.rows(
+                connection, LocalReportType.PRODUCT_REFERENCE_READINESS, filters={"product_group": "other"},
+            )) == []
+            with pytest.raises(ReportSecurityError):
+                list(registry.rows(
+                    connection, LocalReportType.PRODUCT_REFERENCE_READINESS,
+                    filters={"participant_inn": "9999999999"},
+                ))
+    engine.dispose()
+
+
+def _fingerprint_for_test(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.skipif(not os.getenv("WBCZ_TEST_DATABASE_URL"), reason="PostgreSQL integration database not configured")
+def test_m4_m5_m6_are_join_scoped_and_filters_are_effective() -> None:
+    engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"])
+    Base.metadata.create_all(engine, checkfirst=True)
+    with Session(engine) as db:
+        for table in (DocumentLifecycleLedgerRecord, TurnoverOperationLedgerRecord, AggregationOperationLedgerRecord, AgentJobRecord):
+            db.query(table).delete()
+        _seed_agent_job(db, job_id="m4-a", job_type="DOCUMENT_INFO", purpose="DOCUMENT_LIFECYCLE", inn="1234567890",
+                        read_payload={"document_id": "doc-a", "body": False, "content": False},
+                        result_json={"outcome": "READ_COMPLETED", "read_result": {"number": "doc-a", "status": {"raw": "CHECKED_OK"}}})
+        _seed_agent_job(db, job_id="m4-b", job_type="DOCUMENT_INFO", purpose="DOCUMENT_LIFECYCLE", inn="9999999999",
+                        read_payload={"document_id": "doc-b", "body": False, "content": False},
+                        result_json={"outcome": "READ_COMPLETED", "read_result": {"number": "doc-b", "status": {"raw": "CHECKED_OK"}}})
+        for suffix in ("a", "b"):
+            db.add(DocumentLifecycleLedgerRecord(
+                operation_id=f"m4-op-{suffix}", request_id=f"m4-{suffix}", job_type="DOCUMENT_INFO",
+                request_sha256=("1" if suffix == "a" else "2") * 64,
+                idempotency_key=f"idem-m4-{suffix}",
+                request_json={"document_id": f"doc-{suffix}"},
+            ))
+        for prefix, model, kind1, kind2 in (
+            ("m5", TurnoverOperationLedgerRecord, "WITHDRAW_DISTANCE", "REMOTE_SALE_RETURN"),
+            ("m6", AggregationOperationLedgerRecord, "FORM_SET", "DISAGGREGATE_PACKAGE"),
+        ):
+            for suffix, inn, kind, state in (
+                ("a1", "1234567890", kind1, "RECONCILED"),
+                ("a2", "1234567890", kind2, "MANUAL_REVIEW"),
+                ("b", "9999999999", kind1, "RECONCILED"),
+            ):
+                job_type = "LK_RECEIPT" if prefix == "m5" else "SETS_AGGREGATION"
+                _seed_agent_job(db, job_id=f"{prefix}-{suffix}", job_type=job_type, purpose=prefix.upper(), inn=inn,
+                                read_payload=None, result_json={})
+                common = dict(
+                    operation_id=f"{prefix}-op-{suffix}", request_id=f"{prefix}-{suffix}",
+                    operation_kind=kind, document_type=job_type, document_sha256=(suffix[0] * 64),
+                    request_sha256=(suffix[-1] * 64), idempotency_key=f"idem-{prefix}-{suffix}",
+                    reconciliation_state=state, remote_document_id=f"remote-{prefix}-{suffix}",
+                )
+                if prefix == "m5":
+                    db.add(model(
+                        **common, raw_business_reason=None, precondition_snapshot={}, expected_postcondition={},
+                        reconciliation_json={}, cancellation_reference=None,
+                    ))
+                else:
+                    db.add(model(
+                        **common, parent_cis=None, discovered_parent_cis=None, child_set_hash="c" * 64,
+                        relation_delta="FORM" if "FORM" in kind else "DISAGGREGATE",
+                        precondition_snapshot={}, expected_relation_delta={}, reconciliation_json={},
+                        raw_history_evidence=[],
+                    ))
+        db.commit()
+        registry = LocalReportSourceRegistry("1234567890")
+        with engine.connect() as connection:
+            m4 = list(registry.rows(connection, LocalReportType.DOCUMENT_LIFECYCLE, filters={}))
+            assert [r["document_id"] for r in m4] == ["doc-a"]
+            assert list(registry.rows(connection, LocalReportType.DOCUMENT_LIFECYCLE, filters={"document_id": "doc-b"})) == []
+            assert len(list(registry.rows(connection, LocalReportType.DOCUMENT_LIFECYCLE, filters={"state": "COMPLETED"}))) == 1
+            for report_type, prefix, kind in (
+                (LocalReportType.TURNOVER_OPERATIONS, "m5", "REMOTE_SALE_RETURN"),
+                (LocalReportType.AGGREGATION_OPERATIONS, "m6", "DISAGGREGATE_PACKAGE"),
+            ):
+                rows = list(registry.rows(connection, report_type, filters={}))
+                assert len(rows) == 2
+                assert all("-b" not in r["operation_id"] for r in rows)
+                filtered = list(registry.rows(connection, report_type, filters={"operation_kind": kind}))
+                assert len(filtered) == 1 and filtered[0]["operation_kind"] == kind
+                manual = list(registry.rows(connection, report_type, filters={"state": "MANUAL_REVIEW"}))
+                assert len(manual) == 1 and manual[0]["reconciliation_state"] == "MANUAL_REVIEW"
+    engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("WBCZ_TEST_DATABASE_URL"), reason="PostgreSQL integration database not configured")
+def test_wb_mixed_tenant_manual_end_to_end_and_filters() -> None:
+    engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"])
+    Base.metadata.create_all(engine, checkfirst=True)
+    with Session(engine) as db:
+        db.query(WbReconciliationRecord).delete()
+        db.query(WbEventRecord).delete()
+        db.query(WbOrderRecord).delete()
+        db.query(WbConnectionRecord).delete()
+        connections = {}
+        for label, inn in (("a", "1234567890"), ("b", "9999999999")):
+            conn = WbConnectionRecord(
+                environment="PRODUCTION", participant_inn=inn, wb_sid=None, wb_tin=inn,
+                token_type="PERSONAL", token_categories=[], token_scopes=[], secret_ref=f"secret-{label}",
+                rate_profile=None, connection_state="HEALTHY",
+            )
+            db.add(conn); db.flush()
+            connections[label] = conn
+            order = WbOrderRecord(
+                connection_id=conn.id, assembly_order_id=1 if label == "a" else 999,
+                skus=[], fulfillment_model="FBS", source="WB_API", source_fingerprint=(label * 64),
+                raw_evidence_hash=(label.upper() * 64), observed_at=NOW,
+            )
+            db.add(order); db.flush()
+            event = WbEventRecord(
+                connection_id=conn.id, source="WB_API", source_family="ORDER_FEED",
+                source_fingerprint=(label + "e") * 32, assembly_order_id=order.assembly_order_id,
+                raw_status="sold", raw_evidence_sanitized={}, raw_evidence_hash=(label + "h") * 32,
+                observed_at=NOW,
+            )
+            db.add(event)
+            db.add(WbReconciliationRecord(
+                connection_id=conn.id, order_id=order.id,
+                state="MANUAL_REVIEW" if label == "a" else "DISTANCE_RECONCILED",
+                decision="MANUAL_REVIEW" if label == "a" else "MATCHED",
+                reason="A_REASON" if label == "a" else "B_SECRET_REASON",
+                evidence_redacted={"tenant": label}, observed_at=NOW,
+            ))
+        db.commit()
+        registry = LocalReportSourceRegistry("1234567890")
+        with engine.connect() as connection:
+            wb = list(registry.rows(connection, LocalReportType.WB_RECONCILIATION_EVIDENCE, filters={}))
+            assert len(wb) == 1 and wb[0]["assembly_order_id"] == "1"
+            assert "999" not in json.dumps(wb)
+            assert len(list(registry.rows(connection, LocalReportType.WB_RECONCILIATION_EVIDENCE,
+                                          filters={"state": "MANUAL_REVIEW"}))) == 1
+            assert len(list(registry.rows(connection, LocalReportType.WB_RECONCILIATION_EVIDENCE,
+                                          filters={"conflict_state": "CONFLICT"}))) == 1
+            manual = list(registry.rows(connection, LocalReportType.MANUAL_REVIEW_AND_CONFLICTS,
+                                        filters={"domain": "WB", "reason": "A_REASON"}))
+            assert len(manual) == 1
+            end = list(registry.rows(connection, LocalReportType.END_TO_END_RECONCILIATION,
+                                     filters={"domain": "WB_FBS", "result": "MANUAL_REVIEW"}))
+            assert len(end) == 1
+            assert "B_SECRET_REASON" not in json.dumps(manual + end)
+    engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("WBCZ_TEST_DATABASE_URL"), reason="PostgreSQL integration database not configured")
+def test_every_enabled_local_report_adapter_executes_against_current_postgres_schema() -> None:
+    engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"])
+    Base.metadata.create_all(engine, checkfirst=True)
+    registry = LocalReportSourceRegistry("1234567890", fetch_batch_size=3)
+    with engine.connect() as connection:
+        for report_type, definition in LOCAL_REPORT_CATALOG.items():
+            if not definition.enabled:
+                continue
+            rows = registry.rows(
+                connection,
+                report_type,
+                filters={"participant_inn": "1234567890"} if "participant_inn" in definition.allowed_filters else {},
+            )
+            list(rows)
+    engine.dispose()
+
+
+def test_declared_filters_are_exactly_the_implemented_enabled_set() -> None:
+    enabled_filters = {
+        report_type.value: definition.allowed_filters
+        for report_type, definition in LOCAL_REPORT_CATALOG.items()
+        if definition.enabled
+    }
+    assert sum(len(filters) for filters in enabled_filters.values()) == 27
+    assert LOCAL_REPORT_CATALOG[LocalReportType.P0_IMPORT_CONTROL_QUALITY].allowed_filters == ()
+    assert all("participant_inn" in filters for filters in enabled_filters.values())
+
+
+def test_report_job_service_rejects_participant_mismatch_and_disabled_report(monkeypatch) -> None:
+    class DummyRepo:
+        def create_job(self, **kwargs):
+            raise AssertionError("must reject before persistence")
+    service = object.__new__(ReportJobService)
+    service.db = None
+    service.participant_inn = "1234567890"
+    service.repo = DummyRepo()
+    with pytest.raises(ReportSecurityError):
+        service.request_local(
+            report_type=LocalReportType.CIS_INVENTORY_STORED_SNAPSHOT,
+            output_format=ReportOutputFormat.CSV,
+            filters={"participant_inn": "9999999999"},
+        )
+    with pytest.raises(ReportSecurityError):
+        service.request_local(
+            report_type=LocalReportType.P0_IMPORT_CONTROL_QUALITY,
+            output_format=ReportOutputFormat.CSV,
+            filters={},
+        )
