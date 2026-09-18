@@ -19,6 +19,7 @@ from wbcz.m11_reports import (
     REMOTE_CREATE_AMBIGUOUS,
     ReportArtifactUploadBinding,
     ArtifactIntegrityConflict,
+    ArtifactLimitExceeded,
     ArtifactKeyProvider,
     ArtifactRole,
     BinaryArtifactIngress,
