@@ -186,10 +186,16 @@ jobs:
               FRONTEND_FREEZE_ACTIVE, GENERIC_TRUE_API_REPORT_PROXY,
               PRODUCTION_TRUE_API_REPORTS_ENABLED, REMOTE_RESULT_DELETE_ENABLED,
               USER_REPORT_DOWNLOAD_ENABLED, enabled_remote_recipes,
+              FILTERED_CIS_LP_PACKAGE_TYPES, FILTERED_CIS_LP_STATUSES,
+              LP_PRODUCT_GROUP_CODE, LOCAL_REPORT_CATALOG, LocalReportType,
+              SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES,
           )
           from wbcz.ozon_foundation import M10_WIRE_READY, M10_EXECUTABLE_READ_CAPABILITIES
           from wbcz.wb_fbs import PRODUCTION_WB_WRITE_ENABLED
           from wbcz_web.models.reports import ReportJobRecord, ReportArtifactRecord
+          from wbcz_web.config import WebConfig
+          from wbcz_web.services.reports import LocalReportSourceRegistry
+          from wbcz_web.api import agent_routes
 
           assert not GENERIC_TRUE_API_REPORT_PROXY
           assert not ARBITRARY_REMOTE_URL_DOWNLOAD
@@ -204,6 +210,27 @@ jobs:
           assert not PRODUCTION_TRUE_API_REPORTS_ENABLED
           assert not DISPENSER_CAPABILITIES[DispenserCapabilityName.REMOTE_RESULT_DELETE].enabled
           assert enabled_remote_recipes() == ('FILTERED_CIS_REPORT',)
+          assert LP_PRODUCT_GROUP_CODE == '1'
+          assert FILTERED_CIS_LP_PACKAGE_TYPES == {'UNIT','SET','BUNDLE','BOX','ATK'}
+          assert FILTERED_CIS_LP_STATUSES == {'EMITTED','APPLIED','INTRODUCED','WRITTEN_OFF','RETIRED','DISAGGREGATION'}
+          assert SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES == 'SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES'
+          assert not LOCAL_REPORT_CATALOG[LocalReportType.P0_IMPORT_CONTROL_QUALITY].enabled
+          assert LOCAL_REPORT_CATALOG[LocalReportType.P0_IMPORT_CONTROL_QUALITY].disabled_reason == 'SOURCE_PARTICIPANT_SCOPE_NOT_PROVABLE'
+          enabled_defs=[definition for definition in LOCAL_REPORT_CATALOG.values() if definition.enabled]
+          assert sum(len(definition.allowed_filters) for definition in enabled_defs) == 27
+          assert all('participant_inn' in definition.allowed_filters for definition in enabled_defs)
+          source=inspect.getsource(LocalReportSourceRegistry)
+          assert source.count("payload_json ->> 'expected_inn' = :inn") >= 5
+          m4=inspect.getsource(LocalReportSourceRegistry._rows_document_lifecycle)
+          assert 'd.remote_document_id' not in m4
+          route_source=inspect.getsource(agent_routes.agent_report_artifact_ingress)
+          assert '2 * 1024 * 1024 * 1024' not in route_source
+          for name in (
+              'report_max_local_rows','report_max_artifact_bytes','report_remote_download_byte_ceiling',
+              'report_db_fetch_batch_size','report_snapshot_timeout_seconds','report_worker_timeout_seconds',
+              'report_temp_storage_ceiling_bytes','report_min_free_disk_bytes',
+          ):
+              assert hasattr(WebConfig, name)
           assert not M10_WIRE_READY
           assert M10_EXECUTABLE_READ_CAPABILITIES == ()
           assert not PRODUCTION_WB_WRITE_ENABLED
