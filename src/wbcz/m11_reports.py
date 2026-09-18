@@ -1101,6 +1101,7 @@ def build_filtered_cis_create_body(
     recipe = REMOTE_RECIPE_REGISTRY["FILTERED_CIS_REPORT"]
     if not recipe.enabled:
         raise ReportSecurityError(recipe.disabled_reason or "recipe disabled")
+    _product_group_code(product_group_code)
     params = filters.to_params()
     return {
         "format": "CSV",
