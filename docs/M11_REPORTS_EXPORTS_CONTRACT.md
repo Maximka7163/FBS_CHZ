@@ -381,3 +381,25 @@ M11 does not implement:
 - M15 queue/broker/autoscaling/priorities/dead-letter/HA platform
 
 M11 history is operational `report_job_events` only.
+
+
+## Acceptance FIX-01 — participant scope, effective filters and LP dispenser contract
+
+All enabled data-backed local report adapters are participant-scoped at their durable source. M1/M2 evidence is selected only when `agent_jobs.payload_json.expected_inn` equals the configured participant. M4/M5/M6 ledgers are joined to their exact durable `agent_jobs.request_id` relation and then constrained by the same `expected_inn`. WB/Ozon evidence continues to use participant-owned connection rows. A globally stored source that cannot prove participant ownership is not relabelled: `P0_IMPORT_CONTROL_QUALITY` is disabled with `SOURCE_PARTICIPANT_SCOPE_NOT_PROVABLE`.
+
+Every filter advertised by an enabled `ReportTypeDefinition.allowed_filters` is effective. A supplied `participant_inn` must equal the configured service participant before report persistence or source extraction. Unsupported or cross-participant filters fail locally. M4 document lifecycle does not reference a `document_lifecycle_ledger.remote_document_id` column; an optional document identity is derived only from the deterministically linked typed agent request/result evidence.
+
+`FILTERED_CIS_REPORT` remains enabled only under the fail-closed LP recipe:
+- `productGroupCode="1"` is fixed internally for `lp`; arbitrary product groups are rejected before the agent/network boundary.
+- `participantInn` is the configured/expected participant only.
+- request package types are exactly `UNIT`, `SET`, `BUNDLE`, `BOX`, `ATK`.
+- `GROUP`, `LEVEL1`…`LEVEL5`, and unknown package types are rejected.
+- allowed LP/non-tobacco status filters are exactly `EMITTED`, `APPLIED`, `INTRODUCED`, `WRITTEN_OFF`, `RETIRED`, `DISAGGREGATION`.
+- tobacco-scoped or unknown status values are rejected for CREATE.
+- the conflict between the FILTERED_CIS example containing LEVEL1 and the current package directory semantics is recorded as `SOURCE_AMBIGUITY_PACKAGE_LEVEL_VALUES`; M11 follows the stricter current request-capable directory rule.
+
+The following are Sellari project limits, not CRPT limits, and are typed/configurable with positive startup validation:
+`report_max_local_rows`, `report_max_artifact_bytes`, `report_remote_download_byte_ceiling`,
+`report_db_fetch_batch_size`, `report_snapshot_timeout_seconds`, `report_worker_timeout_seconds`,
+`report_temp_storage_ceiling_bytes`, `report_min_free_disk_bytes`.
+The agent ingress no longer owns a hard-coded 2 GiB policy; it uses the configured minimum of applicable artifact/download/temp ceilings. Local PostgreSQL extraction uses streamed/server-side result options with the configured fetch batch size, and snapshot/worker/temp/disk limits fail closed without publishing a READY artifact.
