@@ -28,6 +28,8 @@ from wbcz.m11_reports import (
     LocalReportType,
     ReportOutputFormat,
     ReportSensitivity,
+    ReportContractError,
+    ReportSecurityError,
     SnapshotStrategy,
     StreamingReportRenderer,
     artifact_reuse_allowed,
@@ -415,36 +417,68 @@ class SynchronousReportExecutor:
         participant_inn: str,
         max_rows: int = 1_000_000,
         max_artifact_bytes: int = 2 * 1024 * 1024 * 1024,
+        db_fetch_batch_size: int = 500,
+        snapshot_timeout_seconds: int = 900,
+        worker_timeout_seconds: int = 1800,
+        temp_storage_ceiling_bytes: int = 2 * 1024 * 1024 * 1024,
+        min_free_disk_bytes: int = 1,
     ) -> None:
         self.db = db
         self.repo = SqlReportRepository(db)
         self.artifact_store = artifact_store
         self.temp_root = temp_root
         self.participant_inn = participant_inn
+        self.snapshot_timeout_seconds = int(snapshot_timeout_seconds)
+        self.worker_timeout_seconds = int(worker_timeout_seconds)
+        self.temp_storage_ceiling_bytes = int(temp_storage_ceiling_bytes)
+        self.min_free_disk_bytes = int(min_free_disk_bytes)
+        for label, value in (
+            ("db_fetch_batch_size", db_fetch_batch_size),
+            ("snapshot_timeout_seconds", self.snapshot_timeout_seconds),
+            ("worker_timeout_seconds", self.worker_timeout_seconds),
+            ("temp_storage_ceiling_bytes", self.temp_storage_ceiling_bytes),
+            ("min_free_disk_bytes", self.min_free_disk_bytes),
+        ):
+            if int(value) <= 0:
+                raise ValueError(f"{label} must be positive")
         self.renderer = StreamingReportRenderer(
             temp_root=temp_root,
             max_rows=max_rows,
             max_bytes=max_artifact_bytes,
         )
-        self.sources = LocalReportSourceRegistry(participant_inn)
+        self.sources = LocalReportSourceRegistry(participant_inn, fetch_batch_size=db_fetch_batch_size)
 
     def _materialize_source(self, claimed: ClaimedReportJob, definition: Any) -> tuple[Any, Any]:
         engine = self.db.get_bind()
+        self.temp_root.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(self.temp_root).free < self.min_free_disk_bytes:
+            raise ArtifactLimitExceeded("minimum free disk requirement not met")
+        started = time.monotonic()
         with engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection:
             transaction = connection.begin()
             try:
                 connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                connection.exec_driver_sql(
+                    f"SET LOCAL statement_timeout = {self.snapshot_timeout_seconds * 1000}"
+                )
                 snapshot_at = datetime.now(timezone.utc)
-                rows = self.sources.rows(
+                source_rows = self.sources.rows(
                     connection,
                     LocalReportType(claimed.report_type),
                     filters=claimed.filters_sanitized,
                 )
+
+                def bounded_rows():
+                    for item in source_rows:
+                        if time.monotonic() - started > self.worker_timeout_seconds:
+                            raise ArtifactLimitExceeded("report worker timeout exceeded")
+                        yield item
+
                 materialized = materialize_jsonl_snapshot(
-                    rows,
+                    bounded_rows(),
                     temp_root=self.temp_root,
                     max_rows=self.renderer.max_rows,
-                    max_bytes=self.renderer.max_bytes,
+                    max_bytes=min(self.renderer.max_bytes, self.temp_storage_ceiling_bytes),
                 )
                 transaction.commit()
             except BaseException:
@@ -585,12 +619,19 @@ class ReportJobService:
         sensitivity_mode: str | None = None,
     ) -> ReportJobRecord:
         definition = LOCAL_REPORT_CATALOG[report_type]
+        if not definition.enabled:
+            raise ReportSecurityError(definition.disabled_reason or "local report source disabled")
         if output_format not in definition.output_formats:
             raise ValueError("unsupported report output format")
         filters = dict(filters or {})
         unknown = set(filters) - set(definition.allowed_filters)
         if unknown:
             raise ValueError("unsupported report filters")
+        participant_filter = filters.get("participant_inn")
+        if participant_filter is not None and participant_filter != self.participant_inn:
+            raise ReportSecurityError("participant filter does not match report scope")
+        if sensitivity_mode is not None and sensitivity_mode != definition.sensitivity.value:
+            raise ReportSecurityError("caller cannot change report sensitivity mode")
         safe_filters = sanitize_report_evidence(filters)
         fingerprint = canonical_request_fingerprint(
             report_type=report_type.value,
@@ -623,6 +664,9 @@ class ReportArtifactIngressService:
         *,
         artifact_store: FilesystemReportArtifactStore,
         temp_root: Path,
+        remote_download_byte_ceiling: int = 2 * 1024 * 1024 * 1024,
+        temp_storage_ceiling_bytes: int = 2 * 1024 * 1024 * 1024,
+        min_free_disk_bytes: int = 1,
     ) -> None:
         self.db = db
         self.repo = SqlReportRepository(db)
@@ -632,6 +676,9 @@ class ReportArtifactIngressService:
             binding_store=self.bindings,
             artifact_store=artifact_store,
             temp_root=temp_root,
+            remote_download_byte_ceiling=remote_download_byte_ceiling,
+            temp_storage_ceiling_bytes=temp_storage_ceiling_bytes,
+            min_free_disk_bytes=min_free_disk_bytes,
             finalized_lookup=self._lookup_finalized_artifact,
         )
 
@@ -777,9 +824,9 @@ class TrueApiReportOrchestrator:
     def request_filtered_cis_report(
         self,
         *,
-        product_group_code: str | int,
         participant_inn: str,
         package_type: list[str],
+        product_group_code: str | int = 1,
         status: str,
         include_gtin: list[str] | None = None,
         requested_by_user_id: str | None = None,
