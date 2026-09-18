@@ -1214,11 +1214,19 @@ def validate_report_agent_payload(job_type: str, payload: Mapping[str, Any]) -> 
         return {
             "local_report_job_id": raw["local_report_job_id"],
             "task_type_short_name": task_type,
-            "product_group_code": _product_group_code(raw.get("product_group_code")),
+            "product_group_code": _product_group_code(raw["product_group_code"]) if raw.get("product_group_code") is not None else None,
         }
 
     if job_type == "REPORT_QUOTA_ID":
-        raise ReportContractError("no enabled reportId recipe is registered in M11")
+        allowed = allowed_common | {"report_id", "product_group_code"}
+        if set(raw) - allowed:
+            raise ReportContractError("REPORT_QUOTA_ID contains unsupported fields")
+        report_id = _opaque_id(raw.get("report_id"), "report_id")
+        return {
+            "local_report_job_id": raw["local_report_job_id"],
+            "report_id": report_id,
+            "product_group_code": _product_group_code(raw["product_group_code"]) if raw.get("product_group_code") is not None else None,
+        }
 
     raise ReportContractError("unsupported report agent job type")
 
@@ -1272,11 +1280,17 @@ def build_dispenser_spec(job_type: str, payload: Mapping[str, Any]) -> Dispenser
         return DispenserRequestSpec(cap.name, cap.method, target, None, "/dispenser/results/{resultId}/file", cap.rate_family)
     if job_type == "REPORT_QUOTA_TYPE":
         cap = DISPENSER_CAPABILITIES[DispenserCapabilityName.QUOTA_BY_TASK_TYPE]
-        target = cap.path_template + "?" + urlencode({
-            "taskTypeShortName": p["task_type_short_name"],
-            "pg": p["product_group_code"],
-        })
+        params = [("taskTypeShortName", p["task_type_short_name"])]
+        if p["product_group_code"] is not None:
+            params.append(("pg", p["product_group_code"]))
+        target = cap.path_template + "?" + urlencode(params)
         return DispenserRequestSpec(cap.name, cap.method, target, None, "/dispenser/tasktypes/available_count", cap.rate_family)
+    if job_type == "REPORT_QUOTA_ID":
+        cap = DISPENSER_CAPABILITIES[DispenserCapabilityName.QUOTA_BY_REPORT]
+        target = cap.path_template.replace("{report_id}", p["report_id"])
+        if p["product_group_code"] is not None:
+            target += "?" + urlencode({"pg": p["product_group_code"]})
+        return DispenserRequestSpec(cap.name, cap.method, target, None, "/dispenser/tasktypes/reports/{report_id}/available_count", cap.rate_family)
     raise ReportContractError("job type has no executable dispenser spec")
 
 
