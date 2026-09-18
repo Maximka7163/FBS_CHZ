@@ -1101,7 +1101,7 @@ def build_filtered_cis_create_body(
 
 
 def sanitize_report_evidence(value: Any, *, sensitive_context: bool = False) -> Any:
-    direct = {"cis", "cises", "kiz", "kizes", "sgtin", "sgtins", "mark", "marks", "marking", "markingcode", "apikey", "authorization", "bearer", "token", "machine_token", "pin", "privatekey", "signature"}
+    direct = {"cis", "cises", "kiz", "kizes", "sgtin", "sgtins", "mark", "marks", "marking", "markingcode", "apikey", "authorization", "bearer", "token", "machinetoken", "pin", "privatekey", "signature"}
     associated = {"value", "values", "data", "codes", "code"}
     discriminators = {"key", "type", "kind", "name", "field"}
     if isinstance(value, Mapping):
