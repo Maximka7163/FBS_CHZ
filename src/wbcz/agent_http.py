@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 import http.client
 import json
 import re
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlsplit
 
@@ -21,6 +22,8 @@ from .windows_agent import (
 
 
 _RESULT_PATH_RE = re.compile(r"^/api/agent/v1/jobs/([A-Za-z0-9._:-]{1,128})/result$")
+_REPORT_ARTIFACT_PATH_RE = re.compile(r"^/api/agent/v1/report-artifacts/(upl_[A-Fa-f0-9]{32})$")
+REPORT_ARTIFACT_INGRESS_PATH = "/api/agent/v1/report-artifacts/{artifact_upload_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +41,15 @@ class AgentHttpSender(Protocol):
         *,
         headers: Mapping[str, str],
         body: bytes | None = None,
+    ) -> AgentProtocolResponse:
+        ...
+
+    def upload_file(
+        self,
+        path: str,
+        *,
+        headers: Mapping[str, str],
+        source_path: Path,
     ) -> AgentProtocolResponse:
         ...
 
@@ -114,7 +126,9 @@ class StdlibHttpsAgentSender:
     def _allowed(method: str, path: str) -> bool:
         if method in {"HEAD", "GET"} and path == AGENT_FETCH_PATH:
             return True
-        return method == "POST" and _RESULT_PATH_RE.fullmatch(path) is not None
+        if method == "POST" and _RESULT_PATH_RE.fullmatch(path) is not None:
+            return True
+        return method == "PUT" and _REPORT_ARTIFACT_PATH_RE.fullmatch(path) is not None
 
     def request(
         self,
@@ -132,6 +146,36 @@ class StdlibHttpsAgentSender:
         )
         try:
             connection.request(method, path, body=body, headers=dict(headers))
+            response = connection.getresponse()
+            return AgentProtocolResponse(
+                int(response.status),
+                response.read(),
+                {str(k): str(v) for k, v in response.headers.items()},
+            )
+        finally:
+            connection.close()
+
+    def upload_file(
+        self,
+        path: str,
+        *,
+        headers: Mapping[str, str],
+        source_path: Path,
+    ) -> AgentProtocolResponse:
+        if not self._allowed("PUT", path):
+            raise AgentSecurityError("arbitrary VPS upload endpoint denied")
+        if not source_path.is_file():
+            raise AgentSecurityError("report artifact source is not a file")
+        size = source_path.stat().st_size
+        connection = self._connection_factory(self.host, self.port, timeout=self.timeout)
+        try:
+            connection.putrequest("PUT", path)
+            for name, value in {**dict(headers), "Content-Length": str(size)}.items():
+                connection.putheader(name, value)
+            connection.endheaders()
+            with source_path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    connection.send(chunk)
             response = connection.getresponse()
             return AgentProtocolResponse(
                 int(response.status),
@@ -202,6 +246,42 @@ class OutboundAgentHttpClient(AgentBackendChannel):
                 "agent backend rejected result"
                 if response.status in (401, 403)
                 else f"agent backend result HTTP {response.status}"
+            )
+
+    def upload_report_artifact(
+        self,
+        machine_token: str,
+        metadata: Mapping[str, Any],
+        path: Path,
+    ) -> None:
+        upload_id = metadata.get("artifact_upload_id")
+        if not isinstance(upload_id, str) or _REPORT_ARTIFACT_PATH_RE.fullmatch(
+            REPORT_ARTIFACT_INGRESS_PATH.format(artifact_upload_id=upload_id)
+        ) is None:
+            raise AgentSecurityError("invalid artifact upload id")
+        report_job_id = metadata.get("local_report_job_id")
+        result_id = metadata.get("result_id")
+        if not isinstance(report_job_id, str) or not isinstance(result_id, str):
+            raise AgentSecurityError("report artifact binding metadata missing")
+        headers = {
+            **self._headers(machine_token),
+            "Content-Type": str(metadata.get("content_type") or "application/zip"),
+            "X-Report-Job-Id": report_job_id,
+            "X-Remote-Result-Id": result_id,
+        }
+        part = metadata.get("result_part_id")
+        if part is not None:
+            headers["X-Remote-Result-Part-Id"] = str(part)
+        response = self.sender.upload_file(
+            REPORT_ARTIFACT_INGRESS_PATH.format(artifact_upload_id=upload_id),
+            headers=headers,
+            source_path=path,
+        )
+        if response.status not in (202, 204):
+            raise AgentAuthError(
+                "agent backend rejected artifact"
+                if response.status in (401, 403)
+                else f"agent backend artifact HTTP {response.status}"
             )
 
 
