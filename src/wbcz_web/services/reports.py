@@ -555,11 +555,33 @@ class ReportArtifactIngressService:
         self.db = db
         self.repo = SqlReportRepository(db)
         self.bindings = SqlUploadBindingStore(db)
+        self.artifact_store = artifact_store
         self.ingress = BinaryArtifactIngress(
             binding_store=self.bindings,
             artifact_store=artifact_store,
             temp_root=temp_root,
+            finalized_lookup=self._lookup_finalized_artifact,
         )
+
+    def _lookup_finalized_artifact(self, artifact_id: str):
+        from wbcz.m11_reports import ArtifactWriteResult, IngressArtifact
+        row = self.db.get(ReportArtifactRecord, artifact_id)
+        if row is None or row.state != "READY":
+            return None
+        try:
+            stored_size, _ = self.artifact_store.inspect(row.storage_key)
+        except (FileNotFoundError, OSError):
+            return None
+        storage = ArtifactWriteResult(
+            row.storage_backend,
+            row.storage_key,
+            row.byte_size,
+            row.sha256,
+            stored_size,
+            row.encryption_version,
+            dict(row.encryption_metadata or {}),
+        )
+        return IngressArtifact(row.artifact_id, storage, row.byte_size, row.sha256, row.mime)
 
     def prepare_download(
         self,
