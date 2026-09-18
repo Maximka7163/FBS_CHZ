@@ -167,6 +167,7 @@ jobs:
               AUTO_REMOTE_SALE_RETURN_READY_ENABLED,
               GLOBAL_OZON_LIMIT_RPS,
               INVENTED_BURST_CAPACITY,
+              M10_EXECUTABLE_READ_CAPABILITIES,
               M10_WIRE_READY,
               OZON_API_CIS_AUTOBIND_ENABLED,
               OZON_EXECUTABLE_REMOTE_CAPABILITIES,
@@ -194,6 +195,7 @@ jobs:
           assert GLOBAL_OZON_LIMIT_RPS == 50
           assert not INVENTED_BURST_CAPACITY
           assert OZON_EXECUTABLE_REMOTE_CAPABILITIES == ()
+          assert M10_EXECUTABLE_READ_CAPABILITIES == ()
           assert len(OZON_REMOTE_CAPABILITIES) == 8
           for cap in OZON_REMOTE_CAPABILITIES.values():
               assert not cap.enabled
@@ -213,8 +215,9 @@ jobs:
           assert not {'cis','sgtin','kiz','plaintext','full_marking','marking_code'} & mark
 
           canary='CIS-CI-M10-CANARY'
-          safe=sanitize_ozon_evidence({'products':[{'exemplars':[{'marks':[{'value':canary}]}]}]})
+          safe=sanitize_ozon_evidence({'products':[{'exemplars':[{'codes':[canary],'value':canary,'status':'future'}]}]})
           assert canary not in repr(safe)
+          assert safe['products'][0]['exemplars'][0]['status'] == 'future'
           PY
 
   windows-agent:
