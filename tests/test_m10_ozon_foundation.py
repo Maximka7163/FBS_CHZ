@@ -253,7 +253,7 @@ def test_rate_foundation_is_global_50_per_second_per_client_id_without_burst_met
 
 def test_rate_limiter_has_no_remote_adapter_attachment() -> None:
     sig = inspect.signature(OzonClientIdRateLimiter.consume)
-    assert set(sig.parameters) == {"client_id", "now_monotonic"}
+    assert set(sig.parameters) == {"self", "client_id", "now_monotonic"}
     assert "adapter" not in sig.parameters
     assert "capability" not in sig.parameters
     for cap in OZON_REMOTE_CAPABILITIES.values():
