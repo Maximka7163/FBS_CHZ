@@ -449,6 +449,29 @@ class SynchronousReportExecutor:
         )
         self.sources = LocalReportSourceRegistry(participant_inn, fetch_batch_size=db_fetch_batch_size)
 
+    @classmethod
+    def from_config(
+        cls,
+        db: Session,
+        *,
+        artifact_store: FilesystemReportArtifactStore,
+        temp_root: Path,
+        config: Any,
+    ) -> "SynchronousReportExecutor":
+        return cls(
+            db,
+            artifact_store=artifact_store,
+            temp_root=temp_root,
+            participant_inn=config.own_inn,
+            max_rows=config.report_max_local_rows,
+            max_artifact_bytes=config.report_max_artifact_bytes,
+            db_fetch_batch_size=config.report_db_fetch_batch_size,
+            snapshot_timeout_seconds=config.report_snapshot_timeout_seconds,
+            worker_timeout_seconds=config.report_worker_timeout_seconds,
+            temp_storage_ceiling_bytes=config.report_temp_storage_ceiling_bytes,
+            min_free_disk_bytes=config.report_min_free_disk_bytes,
+        )
+
     def _materialize_source(self, claimed: ClaimedReportJob, definition: Any) -> tuple[Any, Any]:
         engine = self.db.get_bind()
         self.temp_root.mkdir(parents=True, exist_ok=True)
@@ -532,6 +555,8 @@ class SynchronousReportExecutor:
         if claimed.participant_inn != self.participant_inn:
             raise PermissionError("participant isolation mismatch")
         definition = LOCAL_REPORT_CATALOG[LocalReportType(claimed.report_type)]
+        if not definition.enabled:
+            raise ReportSecurityError(definition.disabled_reason or "local report source disabled")
         if claimed.report_schema_version != definition.schema_version:
             raise ValueError("report schema version mismatch")
         fmt = ReportOutputFormat(claimed.output_format)
