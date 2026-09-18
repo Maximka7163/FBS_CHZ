@@ -93,12 +93,14 @@ from wbcz.windows_agent_runtime import (
     WindowsAgentReplayStore,
 )
 from wbcz_ui.live_true_api import TrueApiError
-from wbcz_web.models import (
-    Base,
+from wbcz_web.models import Base
+from wbcz_web.models.agent import (
     AgentJobRecord,
     DocumentLifecycleLedgerRecord,
     TurnoverOperationLedgerRecord,
     AggregationOperationLedgerRecord,
+)
+from wbcz_web.models.wb_fbs import (
     WbConnectionRecord,
     WbOrderRecord,
     WbEventRecord,
