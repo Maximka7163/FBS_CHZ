@@ -1122,6 +1122,81 @@ def test_report_config_limits_are_typed_positive_and_route_has_no_hardcoded_2gib
     assert "report_min_free_disk_bytes" in route
 
 
+def test_configured_local_row_artifact_and_executor_limits_are_honored(tmp_path: Path) -> None:
+    renderer = StreamingReportRenderer(temp_root=tmp_path / "rows", max_rows=1, max_bytes=10_000)
+    with pytest.raises(ArtifactLimitExceeded):
+        renderer.render(
+            [{"x": "one"}, {"x": "two"}],
+            columns=("x",),
+            output_format=ReportOutputFormat.CSV,
+        )
+    assert not list((tmp_path / "rows").glob("m11-report-*"))
+
+    renderer = StreamingReportRenderer(temp_root=tmp_path / "bytes", max_rows=10, max_bytes=8)
+    with pytest.raises(ArtifactLimitExceeded):
+        renderer.render(
+            [{"x": "0123456789"}],
+            columns=("x",),
+            output_format=ReportOutputFormat.CSV,
+        )
+    assert not list((tmp_path / "bytes").glob("m11-report-*"))
+
+    config = WebConfig(
+        database_url="postgresql+psycopg://u:p@localhost/db",
+        own_inn="1234567890",
+        environment="test",
+        report_max_local_rows=17,
+        report_max_artifact_bytes=1000,
+        report_remote_download_byte_ceiling=900,
+        report_db_fetch_batch_size=7,
+        report_snapshot_timeout_seconds=8,
+        report_worker_timeout_seconds=9,
+        report_temp_storage_ceiling_bytes=800,
+        report_min_free_disk_bytes=1,
+    )
+    store = FilesystemReportArtifactStore(tmp_path / "store")
+    executor = SynchronousReportExecutor.from_config(
+        None, artifact_store=store, temp_root=tmp_path / "exec", config=config,
+    )
+    assert executor.renderer.max_rows == 17
+    assert executor.renderer.max_bytes == 1000
+    assert executor.sources.fetch_batch_size == 7
+    assert executor.snapshot_timeout_seconds == 8
+    assert executor.worker_timeout_seconds == 9
+    assert executor.temp_storage_ceiling_bytes == 800
+    assert executor.min_free_disk_bytes == 1
+
+
+def test_binary_ingress_honors_remote_download_ceiling(tmp_path: Path) -> None:
+    bindings = InMemoryUploadBindingStore()
+    store = FilesystemReportArtifactStore(tmp_path / "store", key_provider=KeyProvider(), key_version="v1")
+    ingress = BinaryArtifactIngress(
+        binding_store=bindings,
+        artifact_store=store,
+        temp_root=tmp_path / "tmp",
+        remote_download_byte_ceiling=4,
+        temp_storage_ceiling_bytes=100,
+        min_free_disk_bytes=1,
+    )
+    binding = ingress.prepare(
+        report_job_id="rpt_remote_limit",
+        remote_result_id="res-remote-limit",
+        remote_result_part_id=None,
+        product_group_code="1",
+        expected_archive_size=None,
+    )
+    with pytest.raises(ArtifactLimitExceeded):
+        ingress.ingest(
+            artifact_upload_id=binding.artifact_upload_id,
+            report_job_id="rpt_remote_limit",
+            remote_result_id="res-remote-limit",
+            remote_result_part_id=None,
+            chunks=[b"12345"],
+            observed_mime="application/zip",
+        )
+    assert not list((tmp_path / "tmp").glob("m11-agent-upload-*"))
+
+
 def test_binary_ingress_honors_temp_ceiling_and_min_free_disk(tmp_path: Path) -> None:
     bindings = InMemoryUploadBindingStore()
     store = FilesystemReportArtifactStore(tmp_path / "store", key_provider=KeyProvider(), key_version="v1")
