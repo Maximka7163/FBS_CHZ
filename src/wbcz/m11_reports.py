@@ -1414,11 +1414,13 @@ class BinaryArtifactIngress:
         artifact_store: ReportArtifactStore,
         temp_root: Path,
         remote_download_byte_ceiling: int = DEFAULT_REMOTE_DOWNLOAD_BYTE_CEILING,
+        finalized_lookup: Callable[[str], IngressArtifact | None] | None = None,
     ) -> None:
         self.binding_store = binding_store
         self.artifact_store = artifact_store
         self.temp_root = temp_root
         self.remote_download_byte_ceiling = remote_download_byte_ceiling
+        self.finalized_lookup = finalized_lookup
         self.temp_root.mkdir(parents=True, exist_ok=True)
         self._finalized: dict[str, IngressArtifact] = {}
 
@@ -1490,6 +1492,8 @@ class BinaryArtifactIngress:
 
             if binding.state == "COMPLETED":
                 existing = self._finalized.get(artifact_upload_id)
+                if existing is None and binding.finalized_artifact_id and self.finalized_lookup is not None:
+                    existing = self.finalized_lookup(binding.finalized_artifact_id)
                 if existing is None:
                     raise ArtifactIntegrityConflict("completed binding lacks finalized artifact")
                 if existing.byte_size == size and existing.sha256 == plain_sha:
