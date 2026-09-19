@@ -364,6 +364,13 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _storage_utc(value: datetime) -> datetime:
+    """Normalize timestamps read from DBs that may drop tzinfo (legacy SQLite tests)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def rfc3339_microseconds(value: datetime) -> str:
     return _utc(value).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -1100,7 +1107,7 @@ class AuditService:
             .limit(1)
         )
         due_count = event.sequence % 10_000 == 0
-        due_day = last is None or _utc(last.created_at).date() < _utc(event.occurred_at).date()
+        due_day = last is None or _storage_utc(last.created_at).date() < _storage_utc(event.occurred_at).date()
         if not (due_count or due_day):
             return None
         checkpoint_id = str(uuid4())
@@ -1254,7 +1261,7 @@ class AuditService:
                 through_sequence=row.through_sequence,
                 head_event_hash=row.head_event_hash,
                 previous_checkpoint_hash=row.previous_checkpoint_hash,
-                created_at=row.created_at,
+                created_at=_storage_utc(row.created_at),
             )
             computed = sha256_hex(jcs_bytes(payload))
             if computed != row.checkpoint_hash:
