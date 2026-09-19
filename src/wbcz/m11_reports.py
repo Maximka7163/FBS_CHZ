@@ -666,7 +666,7 @@ class ChunkedAeadArtifactCipher:
         self.chunk_bytes = chunk_bytes
 
     def encrypt_stream(self, source: BinaryIO, target: BinaryIO, *, aad_context: Mapping[str, Any]) -> tuple[int, str, Mapping[str, Any]]:
-        key = self.key_provider.get_key(stored_key_version)
+        key = self.key_provider.get_key(self.key_version)
         if len(key) != 32:
             raise ReportSecurityError("AES-256 artifact key required")
         base_nonce = os.urandom(8)
@@ -728,7 +728,7 @@ class ChunkedAeadArtifactCipher:
         if header.get("aad_context_sha256") != expected_context_hash:
             raise ReportSecurityError("artifact AAD context mismatch")
         base_nonce = bytes.fromhex(header["base_nonce_hex"])
-        key = self.key_provider.get_key(self.key_version)
+        key = self.key_provider.get_key(stored_key_version)
         if len(key) != 32:
             raise ReportSecurityError("AES-256 artifact key required")
         aes = AESGCM(key)
