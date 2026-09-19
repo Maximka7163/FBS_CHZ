@@ -64,6 +64,13 @@ jobs:
       - run: python -m pip install -e ".[ui,test,web]"
       - run: python -m compileall -q src migrations
 
+      - name: M13 contract documentation present
+        run: |
+          test -f docs/M13_AUDIT_HISTORY_CONTRACT.md
+          grep -q "APPEND_ONLY=YES" docs/M13_AUDIT_HISTORY_CONTRACT.md
+          grep -q "TAMPER_EVIDENT=YES" docs/M13_AUDIT_HISTORY_CONTRACT.md
+          grep -q "NOT_EXTERNALLY_ANCHORED" docs/M13_AUDIT_HISTORY_CONTRACT.md
+
       - name: Migration head is M13
         shell: bash
         run: |
@@ -74,6 +81,9 @@ jobs:
 
       - name: Full Python regression
         run: python -m pytest -q tests
+
+      - name: Focused M13 hash-chain JCS sanitizer tenant concurrency tests
+        run: python -m pytest -q tests/test_m13_audit_history.py
 
       - name: Frontend regression
         working-directory: frontend
@@ -137,6 +147,7 @@ jobs:
       - name: Verify legacy seal and append-only guards
         run: |
           python - <<'PY'
+          from uuid import uuid4
           from sqlalchemy import create_engine,text
           url="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m13_upgrade"
           engine=create_engine(url,future=True)
@@ -146,12 +157,28 @@ jobs:
               assert db.scalar(text("select count(*) from audit_events where event_type='LEGACY_HISTORY_IMPORTED'"))==2
               assert db.scalar(text("select count(*) from audit_log"))==1
               event_id=db.scalar(text("select event_id from audit_events limit 1"))
+              chain_id=db.scalar(text("select chain_id from audit_chain_heads where scope_kind='SYSTEM'"))
+              head_hash=db.scalar(text("select event_hash from audit_events where chain_id=:c and sequence=1"),{"c":chain_id})
+              checkpoint_id=str(uuid4())
+              db.execute(text("""
+                insert into audit_checkpoints(
+                  id,chain_id,through_sequence,head_event_hash,previous_checkpoint_hash,
+                  checkpoint_hash,checkpoint_format_version,created_at
+                ) values(:id,:c,1,:h,:z,:x,'SELLARI_AUDIT_CHECKPOINT_V1',now())
+              """),{"id":checkpoint_id,"c":chain_id,"h":head_hash,"z":"0"*64,"x":"1"*64})
+
+          def must_reject(sql,params):
               try:
-                  db.execute(text("update audit_events set action='X' where event_id=:id"),{"id":event_id})
+                  with engine.begin() as db:
+                      db.execute(text(sql),params)
               except Exception:
-                  pass
-              else:
-                  raise AssertionError("audit_events UPDATE guard failed")
+                  return
+              raise AssertionError("append-only guard failed: "+sql)
+
+          must_reject("update audit_events set action='X' where event_id=:id",{"id":event_id})
+          must_reject("delete from audit_events where event_id=:id",{"id":event_id})
+          must_reject("update audit_checkpoints set checkpoint_hash=:h where id=:id",{"id":checkpoint_id,"h":"2"*64})
+          must_reject("delete from audit_checkpoints where id=:id",{"id":checkpoint_id})
           engine.dispose()
           PY
       - name: Downgrade M13
