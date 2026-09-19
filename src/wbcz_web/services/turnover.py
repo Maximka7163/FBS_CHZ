@@ -26,6 +26,10 @@ from wbcz_web.config import WebConfig
 from wbcz_web.models import AuditLog, TurnoverOperationLedgerRecord
 from wbcz_web.services.tenant import active_tenant, tenant_operation_id
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
+from wbcz_web.services.audit_history import (
+    ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
+    AuthorizationDecision,SubjectRef,SubjectType,TraceContext,
+)
 
 
 TURNOVER_PURPOSE = "TURNOVER_M5"
@@ -108,6 +112,47 @@ class TurnoverApplicationService:
             )
         )
 
+    def _immutable(
+        self,
+        event_type: str,
+        operation_id: str,
+        *,
+        actor_kind: ActorKind,
+        machine_principal: str | None,
+        outcome: AuditOutcome,
+        metadata: Mapping[str, Any],
+        evidence_hashes: tuple[str, ...] = (),
+        event_key_suffix: str,
+    ) -> None:
+        scope=active_tenant(self.db)
+        actor=(
+            ActorContext(ActorKind.USER,user_id=scope.user_id)
+            if actor_kind is ActorKind.USER and scope.user_id is not None
+            else ActorContext(actor_kind,machine_principal=machine_principal)
+        )
+        trace_data=self.db.info.get("audit_trace")
+        AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        ).append(
+            event_type=event_type,
+            actor=actor,
+            tenant=AuditTenantScope(scope.organisation_id,scope.participant_id),
+            subject=SubjectRef(SubjectType.TURNOVER_OPERATION,operation_id),
+            outcome=outcome,
+            authorization_decision=AuthorizationDecision.ALLOW if actor.kind is ActorKind.USER else AuthorizationDecision.NOT_APPLICABLE,
+            trace=TraceContext(
+                request_id=trace_data.get("request_id") if isinstance(trace_data,dict) else None,
+                correlation_id=trace_data.get("correlation_id") if isinstance(trace_data,dict) else None,
+                causation_id=trace_data.get("causation_id") if isinstance(trace_data,dict) else None,
+                operation_id=operation_id,
+                event_key=f"turnover:{operation_id}:{event_key_suffix}"[:256],
+            ),
+            metadata=dict(metadata),
+            evidence_hashes=evidence_hashes,
+        )
+
     def queue_prevalidated(
         self,
         prepared: PreparedTurnoverDocument,
@@ -185,6 +230,22 @@ class TurnoverApplicationService:
         )
         self.db.add(ledger)
         self.db.flush()
+        precondition_hash=hashlib.sha256(canonical_json(dict(precondition_snapshot)).encode("utf-8")).hexdigest()
+        self._immutable(
+            "TURNOVER_INTENT_CREATED",
+            operation_id,
+            actor_kind=ActorKind.USER if scope.user_id is not None else ActorKind.WORKER,
+            machine_principal=None if scope.user_id is not None else "turnover-worker",
+            outcome=AuditOutcome.PENDING,
+            metadata={
+                "request_id":request_id,"operation_kind":prepared.operation_kind.value,
+                "document_type":prepared.document_type,"document_sha256":prepared.exact_document.sha256,
+                "request_sha256":request_sha,"idempotency_fingerprint":idempotency_key,
+                "precondition_evidence_sha256":precondition_hash,
+            },
+            evidence_hashes=(prepared.exact_document.sha256,request_sha,precondition_hash),
+            event_key_suffix="intent",
+        )
 
         job = AgentJob(
             job_id=request_id,
@@ -226,6 +287,20 @@ class TurnoverApplicationService:
             raise AgentReplayConflict("remote document id changed for operation")
         ledger.remote_document_id = document_id
         self._audit(operation_id, "TURNOVER_REMOTE_DOCUMENT_CONFIRMED", {"document_id": document_id})
+        self._immutable(
+            "TURNOVER_REMOTE_RESULT",
+            operation_id,
+            actor_kind=ActorKind.WORKER,
+            machine_principal="turnover-result-worker",
+            outcome=AuditOutcome.SUCCESS,
+            metadata={
+                "operation_kind":ledger.operation_kind,"document_type":ledger.document_type,
+                "document_sha256":ledger.document_sha256,"remote_document_id":document_id,
+                "request_sha256":ledger.request_sha256,
+            },
+            evidence_hashes=(ledger.document_sha256,ledger.request_sha256),
+            event_key_suffix=f"remote-result:{hashlib.sha256(document_id.encode()).hexdigest()}",
+        )
         self.db.flush()
 
     def reconcile(
@@ -261,6 +336,24 @@ class TurnoverApplicationService:
             operation_id,
             "TURNOVER_RECONCILIATION",
             {"state": result.state.value, "reason": result.reason},
+        )
+        reconciliation_hash=hashlib.sha256(canonical_json({
+            "state":result.state.value,"reason":result.reason,"document_status_raw":result.document_status_raw,
+        }).encode("utf-8")).hexdigest()
+        self._immutable(
+            "TURNOVER_RECONCILED",
+            operation_id,
+            actor_kind=ActorKind.WORKER,
+            machine_principal="turnover-reconciliation-worker",
+            outcome=AuditOutcome.SUCCESS if result.state.value=="RECONCILED" else AuditOutcome.CONFLICT,
+            metadata={
+                "operation_kind":ledger.operation_kind,"document_type":ledger.document_type,
+                "document_sha256":ledger.document_sha256,"reconciliation_state":result.state.value,
+                "postcondition_evidence_sha256":reconciliation_hash,
+                "manual_review_reason":None if result.state.value=="RECONCILED" else result.reason,
+            },
+            evidence_hashes=(ledger.document_sha256,reconciliation_hash),
+            event_key_suffix=f"reconciled:{reconciliation_hash}",
         )
         self.db.flush()
         return {
