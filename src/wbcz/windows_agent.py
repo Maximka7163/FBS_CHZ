@@ -182,6 +182,7 @@ class AgentJobType(StrEnum):
     REPORT_DOWNLOAD = "REPORT_DOWNLOAD"
     REPORT_QUOTA_TYPE = "REPORT_QUOTA_TYPE"
     REPORT_QUOTA_ID = "REPORT_QUOTA_ID"
+    INTEGRATION_HEALTH = "INTEGRATION_HEALTH"
 
 
 class AgentJobState(StrEnum):
@@ -289,6 +290,20 @@ class AgentJob:
                 raise AgentSecurityError(str(exc)) from exc
             if normalized != self.read_payload:
                 raise AgentSecurityError("M7 EDO read_payload must already be canonical")
+        elif self.job_type is AgentJobType.INTEGRATION_HEALTH:
+            if self.read_payload is None or not isinstance(self.read_payload, dict):
+                raise AgentSecurityError("M14 health job misses typed read_payload")
+            allowed = {"check_id", "check_kind", "read_probe"}
+            if set(self.read_payload) - allowed:
+                raise AgentSecurityError("M14 health job contains unsupported fields")
+            if not isinstance(self.read_payload.get("check_id"), str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", self.read_payload["check_id"]):
+                raise AgentSecurityError("M14 health check_id is invalid")
+            if self.read_payload.get("check_kind") != "TRUE_API":
+                raise AgentSecurityError("M14 health check_kind is unsupported")
+            if self.read_payload.get("read_probe", "NOT_TESTED") != "NOT_TESTED":
+                raise AgentSecurityError("M14 optional read probe is not enabled")
+            if any((self.document_type, self.document_sha256, self.product_document_base64, self.cises, self.document_id)):
+                raise AgentSecurityError("M14 health job contains write/business fields")
         elif self.job_type.value in M11_AGENT_JOB_TYPES:
             if self.read_payload is None:
                 raise AgentSecurityError("M11 report job misses typed read_payload")
@@ -1077,6 +1092,8 @@ class WindowsAgentExecutor:
             return self._m4_read(job)
         if job.job_type.value in M7_READ_JOB_TYPES:
             return self._m7_read(job)
+        if job.job_type is AgentJobType.INTEGRATION_HEALTH:
+            return self._integration_health(job)
         if job.job_type.value in M11_AGENT_JOB_TYPES:
             if job.job_type is AgentJobType.REPORT_DOWNLOAD:
                 raise AgentSecurityError("REPORT_DOWNLOAD requires execute_report_download")
@@ -1358,6 +1375,119 @@ class WindowsAgentExecutor:
                     "sha256": metadata["sha256"],
                 },
             )
+
+    def _integration_health(self, job: AgentJob) -> AgentResult:
+        """Typed M14 readiness check. It has no business-write/report side effect."""
+        components: dict[str, dict[str, Any]] = {
+            "AGENT_REACHABILITY": {"status": "READY"},
+            "WRITE_FEATURE_GATE": {
+                "status": "ENABLED" if self.production_write else "DISABLED",
+                "reason_code": None if self.production_write else "TRUE_API_PRODUCTION_WRITE_DISABLED",
+            },
+            "TRUE_API_READ_PROBE": {"status": "NOT_TESTED"},
+        }
+        certificate: dict[str, Any] = {}
+        try:
+            diagnostics = self.transport.tls_diagnostics()
+            components["CRYPTO_PROVIDER"] = {
+                "status": "READY",
+                "gost_session_verified": bool(diagnostics.get("gost_session_verified")),
+            }
+        except Exception:
+            components["CRYPTO_PROVIDER"] = {
+                "status": "ERROR",
+                "reason_code": "CRYPTO_PROVIDER_UNAVAILABLE",
+            }
+
+        try:
+            observed = self.document_signer.inspector.inspect()
+            certificate = {
+                "thumbprint": str(observed.get("thumbprint") or self.document_signer.thumbprint).replace(" ", "").upper(),
+                "subject": observed.get("subject"),
+                "issuer": observed.get("issuer"),
+                "certificate_inn": observed.get("certificate_inn"),
+                "valid_from": observed.get("not_before"),
+                "valid_to": observed.get("not_after"),
+                "algorithm": observed.get("public_key_oid"),
+                "has_private_key": bool(observed.get("has_private_key")),
+                "crypto_provider": observed.get("provider"),
+                "compatibility": "GOST_CRYPTOPRO" if observed.get("gost_compatible") and observed.get("cryptopro_provider") else "UNSUPPORTED",
+                "serial": observed.get("serial"),
+            }
+            components["CERTIFICATE_PRESENT"] = {"status": "READY"}
+            components["CERTIFICATE_TIME_VALIDITY"] = {"status": "READY"}
+            components["CERTIFICATE_PRIVATE_KEY"] = {
+                "status": "READY" if certificate["has_private_key"] else "ERROR",
+                "reason_code": None if certificate["has_private_key"] else "CERTIFICATE_NO_PRIVATE_KEY",
+            }
+            components["CERTIFICATE_COMPATIBILITY"] = {
+                "status": "READY" if certificate["compatibility"] == "GOST_CRYPTOPRO" else "ERROR",
+                "reason_code": None if certificate["compatibility"] == "GOST_CRYPTOPRO" else "CRYPTO_PROVIDER_UNAVAILABLE",
+            }
+            cert_inn = certificate.get("certificate_inn")
+            if cert_inn is None:
+                components["CERTIFICATE_PARTICIPANT_MATCH"] = {
+                    "status": "UNKNOWN",
+                    "reason_code": "CERTIFICATE_PARTICIPANT_INN_UNAVAILABLE",
+                }
+            elif str(cert_inn) == self.participant_inn:
+                components["CERTIFICATE_PARTICIPANT_MATCH"] = {"status": "READY"}
+            else:
+                components["CERTIFICATE_PARTICIPANT_MATCH"] = {
+                    "status": "ERROR",
+                    "reason_code": "CERTIFICATE_PARTICIPANT_MISMATCH",
+                }
+        except TrueApiError as exc:
+            safe = str(exc)
+            reason = (
+                "CERTIFICATE_NOT_FOUND" if "not found" in safe.casefold()
+                else "CERTIFICATE_NO_PRIVATE_KEY" if "private key" in safe.casefold()
+                else "CERTIFICATE_NOT_YET_VALID" if "not yet valid" in safe.casefold()
+                else "CERTIFICATE_EXPIRED" if "expired" in safe.casefold() or "not currently valid" in safe.casefold()
+                else "CRYPTO_PROVIDER_UNAVAILABLE" if "cryptopro" in safe.casefold()
+                else "CERTIFICATE_NOT_FOUND"
+            )
+            components["CERTIFICATE_PRESENT"] = {"status": "ERROR", "reason_code": reason}
+            components["CERTIFICATE_TIME_VALIDITY"] = {"status": "ERROR", "reason_code": reason}
+            components["CERTIFICATE_PARTICIPANT_MATCH"] = {"status": "UNKNOWN"}
+            components["CERTIFICATE_PRIVATE_KEY"] = {"status": "UNKNOWN"}
+            components["CERTIFICATE_COMPATIBILITY"] = {"status": "UNKNOWN"}
+
+        blocking = any(v.get("status") == "ERROR" for k, v in components.items() if k != "WRITE_FEATURE_GATE")
+        if blocking:
+            components["TRUE_API_AUTH"] = {"status": "NOT_TESTED"}
+            outcome = "HEALTH_FAILED"
+            error_code = next(
+                (v.get("reason_code") for v in components.values() if v.get("status") == "ERROR" and v.get("reason_code")),
+                "CONFIG_MISSING",
+            )
+        else:
+            try:
+                # AuthSession uuidToken remains only inside this Windows process.
+                self.session_manager.bearer_token()
+                components["TRUE_API_AUTH"] = {"status": "READY"}
+                outcome = "HEALTH_READY" if components["CERTIFICATE_PARTICIPANT_MATCH"]["status"] == "READY" else "HEALTH_DEGRADED"
+                error_code = None if outcome == "HEALTH_READY" else "CERTIFICATE_PARTICIPANT_INN_UNAVAILABLE"
+            except TrueApiHttpError as exc:
+                getattr(self.session_manager, "observe_http_status", lambda _status: None)(exc.status)
+                components["TRUE_API_AUTH"] = {"status": "ERROR", "reason_code": "AUTH_FAILED"}
+                outcome, error_code = "HEALTH_FAILED", "AUTH_FAILED"
+            except TrueApiError:
+                components["TRUE_API_AUTH"] = {"status": "ERROR", "reason_code": "REMOTE_UNAVAILABLE"}
+                outcome, error_code = "HEALTH_FAILED", "REMOTE_UNAVAILABLE"
+        return AgentResult(
+            job.job_id,
+            job.operation_id,
+            outcome,
+            error_code=error_code,
+            read_result={
+                "type": "M14_INTEGRATION_HEALTH",
+                "check_id": job.read_payload["check_id"] if job.read_payload else None,
+                "components": components,
+                "certificate": certificate,
+                "read_probe": "NOT_TESTED",
+            },
+        )
 
     def _cis_check(self, job: AgentJob) -> AgentResult:
         try:
