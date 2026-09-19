@@ -7,7 +7,7 @@ set -eu
 : "${WBCZ_MIGRATOR_DB_PASSWORD:?WBCZ_MIGRATOR_DB_PASSWORD is required}"
 : "${WBCZ_BACKUP_DB_PASSWORD:?WBCZ_BACKUP_DB_PASSWORD is required}"
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"   --set=app_password="$WBCZ_APP_DB_PASSWORD"   --set=migrator_password="$WBCZ_MIGRATOR_DB_PASSWORD"   --set=backup_password="$WBCZ_BACKUP_DB_PASSWORD" <<'SQL'
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"   --set=app_password="$WBCZ_APP_DB_PASSWORD"   --set=migrator_password="$WBCZ_MIGRATOR_DB_PASSWORD"   --set=backup_password="$WBCZ_BACKUP_DB_PASSWORD" --set=db_name="$POSTGRES_DB" <<'SQL'
 DO $do$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='wbcz_migrator') THEN
@@ -29,7 +29,7 @@ ALTER ROLE wbcz_backup PASSWORD :'backup_password' NOSUPERUSER NOCREATEDB NOCREA
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 ALTER SCHEMA public OWNER TO wbcz_migrator;
 GRANT USAGE ON SCHEMA public TO wbcz_app, wbcz_backup;
-GRANT CONNECT ON DATABASE :"DBNAME" TO wbcz_migrator, wbcz_app, wbcz_backup;
+GRANT CONNECT ON DATABASE :"db_name" TO wbcz_migrator, wbcz_app, wbcz_backup;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE wbcz_migrator IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO wbcz_app;
