@@ -57,6 +57,13 @@ class WebConfig:
     agent_poll_initial_seconds: int = 10
     agent_poll_max_seconds: int = 120
     agent_poll_max_attempts: int = 60
+    agent_legacy_bootstrap_enabled: bool = True
+    agent_health_online_seconds: int = 120
+    agent_health_stale_seconds: int = 600
+    integration_check_cooldown_seconds: int = 30
+    integration_check_user_limit_per_minute: int = 10
+    certificate_expiry_critical_days: int = 7
+    certificate_expiry_soon_days: int = 30
     true_api_write_enabled: bool = False
     true_api_reports_enabled: bool = False
     report_artifact_root: str | None = None
@@ -143,6 +150,14 @@ class WebConfig:
             raise ValueError("WBCZ_AGENT_POLL_MAX_SECONDS is out of range")
         if not 1 <= self.agent_poll_max_attempts <= 1000:
             raise ValueError("WBCZ_AGENT_POLL_MAX_ATTEMPTS is out of range")
+        if not 1 <= self.agent_health_online_seconds < self.agent_health_stale_seconds <= 86400:
+            raise ValueError("M14 agent health thresholds are invalid")
+        if not 1 <= self.integration_check_cooldown_seconds <= 3600:
+            raise ValueError("WBCZ_INTEGRATION_CHECK_COOLDOWN_SECONDS is out of range")
+        if not 1 <= self.integration_check_user_limit_per_minute <= 100:
+            raise ValueError("WBCZ_INTEGRATION_CHECK_USER_LIMIT_PER_MINUTE is out of range")
+        if not 1 <= self.certificate_expiry_critical_days < self.certificate_expiry_soon_days <= 365:
+            raise ValueError("M14 certificate expiry thresholds are invalid")
         if self.true_api_write_enabled:
             raise ValueError("Production True API write remains disabled pending runtime contract tests")
         if self.true_api_reports_enabled and not self.agent_enabled:
@@ -177,11 +192,11 @@ class WebConfig:
                 raise ValueError("WBCZ_ORGANISATION_TYPE is required when P0 organisation fields are configured")
         else:
             self.organisation_document_config()
-        if self.agent_enabled:
-            token = self.agent_machine_token or ""
+        if self.agent_enabled and self.agent_legacy_bootstrap_enabled and self.agent_machine_token:
+            token = self.agent_machine_token
             minimum = 32 if self.environment == "production" else 16
             if len(token) < minimum:
-                raise ValueError(f"WBCZ_AGENT_MACHINE_TOKEN must be at least {minimum} characters when agent is enabled")
+                raise ValueError(f"WBCZ_AGENT_MACHINE_TOKEN must be at least {minimum} characters when legacy bootstrap is enabled")
             normalized = token.strip().lower()
             if normalized in {"changeme", "change_me", "password", "secret", "agent-token", "replace_me"} or "replace_with" in normalized:
                 raise ValueError("WBCZ_AGENT_MACHINE_TOKEN is an unsafe placeholder")
@@ -258,6 +273,13 @@ class WebConfig:
             agent_poll_initial_seconds=int(os.getenv("WBCZ_AGENT_POLL_INITIAL_SECONDS", "10")),
             agent_poll_max_seconds=int(os.getenv("WBCZ_AGENT_POLL_MAX_SECONDS", "120")),
             agent_poll_max_attempts=int(os.getenv("WBCZ_AGENT_POLL_MAX_ATTEMPTS", "60")),
+            agent_legacy_bootstrap_enabled=_env_bool("WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED", True),
+            agent_health_online_seconds=int(os.getenv("WBCZ_AGENT_HEALTH_ONLINE_SECONDS", "120")),
+            agent_health_stale_seconds=int(os.getenv("WBCZ_AGENT_HEALTH_STALE_SECONDS", "600")),
+            integration_check_cooldown_seconds=int(os.getenv("WBCZ_INTEGRATION_CHECK_COOLDOWN_SECONDS", "30")),
+            integration_check_user_limit_per_minute=int(os.getenv("WBCZ_INTEGRATION_CHECK_USER_LIMIT_PER_MINUTE", "10")),
+            certificate_expiry_critical_days=int(os.getenv("WBCZ_CERTIFICATE_EXPIRY_CRITICAL_DAYS", "7")),
+            certificate_expiry_soon_days=int(os.getenv("WBCZ_CERTIFICATE_EXPIRY_SOON_DAYS", "30")),
             true_api_write_enabled=_env_bool("WBCZ_TRUE_API_WRITE_ENABLED", False),
             true_api_reports_enabled=_env_bool("WBCZ_TRUE_API_REPORTS_ENABLED", False),
             report_artifact_root=os.getenv("WBCZ_REPORT_ARTIFACT_ROOT", "").strip() or None,
