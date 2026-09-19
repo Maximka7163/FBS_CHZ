@@ -111,7 +111,7 @@ def login(
             payload.username,
             payload.password,
             csrf_token=csrf_token,
-            remote_address=request.client.host if request.client else None,
+            remote_address=getattr(request.state, "client_ip", None) or (request.client.host if request.client else None),
             user_agent=request.headers.get("user-agent"),
         )
         auth.revoke_presented_session(
