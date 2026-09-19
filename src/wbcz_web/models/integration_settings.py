@@ -48,7 +48,8 @@ class AgentBindingRecord(Base):
         ),
         CheckConstraint("state IN ('PENDING','ACTIVE','DISABLED','ARCHIVED')", name="ck_agent_bindings_state"),
         CheckConstraint("credential_version >= 1", name="ck_agent_bindings_credential_version"),
-        UniqueConstraint("participant_id", "installation_id", name="uq_agent_bindings_participant_installation"),
+        UniqueConstraint("organisation_id", "participant_id", "installation_id", name="uq_agent_bindings_participant_installation"),
+        UniqueConstraint("id", "organisation_id", "participant_id", name="uq_agent_bindings_id_tenant"),
         Index(
             "uq_agent_bindings_active_primary",
             "organisation_id", "participant_id",
@@ -62,9 +63,7 @@ class AgentCertificateObservationRecord(Base):
     __tablename__ = "agent_certificate_observations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_text)
-    agent_binding_id: Mapped[str] = mapped_column(
-        ForeignKey("agent_bindings.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
+    agent_binding_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     organisation_id: Mapped[str] = mapped_column(
         ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -95,6 +94,13 @@ class AgentCertificateObservationRecord(Base):
             name="fk_agent_cert_obs_participant_organisation",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["agent_binding_id", "organisation_id", "participant_id"],
+            ["agent_bindings.id", "agent_bindings.organisation_id", "agent_bindings.participant_id"],
+            name="fk_agent_cert_obs_binding_tenant",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("id", "organisation_id", "participant_id", name="uq_agent_cert_obs_id_tenant"),
         CheckConstraint(
             "readiness_state IN ('READY','NOT_READY','UNKNOWN')",
             name="ck_agent_cert_obs_readiness",
@@ -120,16 +126,12 @@ class TrueApiConnectionRecord(Base):
     participant_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     environment: Mapped[str] = mapped_column(String(24), nullable=False, default="PRODUCTION")
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="ENABLED", index=True)
-    primary_agent_binding_id: Mapped[str | None] = mapped_column(
-        ForeignKey("agent_bindings.id", ondelete="RESTRICT"), nullable=True
-    )
+    primary_agent_binding_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     desired_capabilities_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     observed_capabilities_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     desired_certificate_ref: Mapped[str | None] = mapped_column(String(160), nullable=True)
     certificate_selection_state: Mapped[str] = mapped_column(String(32), nullable=False, default="NONE")
-    observed_certificate_observation_id: Mapped[str | None] = mapped_column(
-        ForeignKey("agent_certificate_observations.id", ondelete="SET NULL"), nullable=True
-    )
+    observed_certificate_observation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_auth_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -145,6 +147,18 @@ class TrueApiConnectionRecord(Base):
             ["participants.id", "participants.organisation_id"],
             name="fk_true_api_connections_participant_organisation",
             ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["primary_agent_binding_id", "organisation_id", "participant_id"],
+            ["agent_bindings.id", "agent_bindings.organisation_id", "agent_bindings.participant_id"],
+            name="fk_true_api_primary_binding_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["observed_certificate_observation_id", "organisation_id", "participant_id"],
+            ["agent_certificate_observations.id", "agent_certificate_observations.organisation_id", "agent_certificate_observations.participant_id"],
+            name="fk_true_api_observed_cert_tenant",
+            ondelete="SET NULL",
         ),
         CheckConstraint("state IN ('ENABLED','DISABLED','ARCHIVED')", name="ck_true_api_connections_state"),
         CheckConstraint(
@@ -171,9 +185,7 @@ class IntegrationHealthCheckRecord(Base):
     integration_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     connection_type: Mapped[str] = mapped_column(String(32), nullable=False)
     connection_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    agent_binding_id: Mapped[str | None] = mapped_column(
-        ForeignKey("agent_bindings.id", ondelete="RESTRICT"), nullable=True, index=True
-    )
+    agent_binding_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     check_kind: Mapped[str] = mapped_column(String(48), nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
@@ -200,6 +212,12 @@ class IntegrationHealthCheckRecord(Base):
             ["participant_id", "organisation_id"],
             ["participants.id", "participants.organisation_id"],
             name="fk_integration_health_participant_organisation",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["agent_binding_id", "organisation_id", "participant_id"],
+            ["agent_bindings.id", "agent_bindings.organisation_id", "agent_bindings.participant_id"],
+            name="fk_integration_health_binding_tenant",
             ondelete="RESTRICT",
         ),
         CheckConstraint(
