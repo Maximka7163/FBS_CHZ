@@ -489,12 +489,6 @@ def test_real_postgres_concurrent_appends_same_org_are_contiguous():
             ))
             assert [r.sequence for r in rows] == list(range(1, len(rows) + 1))
     finally:
-        with factory() as cleanup:
-            org = cleanup.scalar(select(OrganisationRecord).where(OrganisationRecord.name == "Concurrent " + suffix))
-            if org is not None:
-                cleanup.delete(org)
-            user = cleanup.scalar(select(User).where(User.username == "conc-" + suffix))
-            if user is not None:
-                cleanup.delete(user)
-            cleanup.commit()
+        # Immutable audit uses RESTRICT tenant/actor references by design.
+        # Unique test identities are left for the disposable integration database.
         engine.dispose()
