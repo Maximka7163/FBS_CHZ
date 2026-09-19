@@ -22,7 +22,7 @@ class OzonConnectionRecord(Base):
     environment: Mapped[str] = mapped_column(String(24), nullable=False, default="PRODUCTION")
     participant_inn: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
     client_id: Mapped[str] = mapped_column(Text, nullable=False)
-    api_key_secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_secret_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     pending_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
