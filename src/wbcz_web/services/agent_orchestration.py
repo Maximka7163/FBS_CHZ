@@ -7,11 +7,13 @@ import hashlib
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from wbcz.control_engine import decide
 from wbcz.models import Decision, Event, KiState, Outcome, canonical_json
 from wbcz.windows_agent import (
+    AgentAuthError,
     AgentJob,
     AgentJobState,
     AgentJobType,
@@ -23,9 +25,11 @@ from wbcz.windows_agent import (
 )
 from wbcz.write_pipeline import ExactDocument, InvalidWriteOperation, WriteState
 from wbcz_web.config import WebConfig
-from wbcz_web.models import AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun, ReportJobRecord
+from wbcz_web.models import AgentBindingRecord, AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun, ParticipantRecord, ReportJobRecord
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
+from wbcz_web.services.agent_bindings import AgentBindingService, AgentPrincipal
+from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
 from wbcz_web.services.audit_history import (
     ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
     AuthorizationDecision,SubjectRef,SubjectType,TraceContext,
@@ -167,26 +171,85 @@ class AgentOrchestrationBroker:
         *,
         document_assembler: ExactDocumentAssembler | None = None,
     ) -> None:
-        if not config.agent_enabled or not config.agent_machine_token:
+        if not config.agent_enabled:
             raise InvalidWriteOperation("Windows agent server boundary is disabled")
         self.db = db
         self.config = config
         self.imports = ImportRepository(db)
         self.write_store = SqlAlchemyWriteOperationStore(db)
-        self.job_store = SqlAlchemyAgentJobStore(db, lease_seconds=config.agent_job_lease_seconds)
-        self.machine_auth = MachineTokenVerifier(config.agent_machine_token)
+        self.job_store: SqlAlchemyAgentJobStore | None = None
+        self.machine_auth: MachineTokenVerifier | None = None
+        self.core: VpsAgentBroker | None = None
+        self.principal: AgentPrincipal | None = None
+        self.document_assembler = document_assembler or UnavailableExactDocumentAssembler()
+
+    def _authorize_agent(self, machine_token: str, *, mark_poll: bool = False) -> AgentPrincipal:
+        bindings = AgentBindingService(self.db)
+        try:
+            principal = bindings.authenticate(machine_token, mark_poll=mark_poll)
+        except AgentAuthError:
+            if bindings.active_binding_count() > 0:
+                # Once any M14 binding is active, the global credential can no
+                # longer authenticate or drain NULL historical jobs.
+                raise
+            if (
+                not getattr(self.config, "agent_legacy_bootstrap_enabled", True)
+                or not self.config.agent_machine_token
+            ):
+                raise
+            MachineTokenVerifier(self.config.agent_machine_token).verify(machine_token)
+            participants = list(self.db.scalars(
+                select(ParticipantRecord)
+                .where(
+                    ParticipantRecord.is_active.is_(True),
+                    ParticipantRecord.verification_state == "VERIFIED",
+                )
+                .order_by(ParticipantRecord.id)
+                .limit(2)
+            ))
+            if len(participants) > 1:
+                raise AgentAuthError("legacy agent is disabled outside single-tenant mode")
+            if participants:
+                participant = participants[0]
+                bind_tenant_scope(
+                    self.db,
+                    organisation_id=participant.organisation_id,
+                    participant_id=participant.id,
+                    user_id=None,
+                    role=None,
+                )
+                principal = AgentPrincipal(
+                    None, participant.organisation_id, participant.id, participant.inn, True
+                )
+            elif self.db.get(BootstrapRecord, 1) is not None:
+                raise AgentAuthError("legacy agent has no verified participant")
+            else:
+                principal = AgentPrincipal(None, None, None, self.config.own_inn, True)
+
+        self.principal = principal
+        self.machine_auth = MachineTokenVerifier(machine_token)
+        self.job_store = SqlAlchemyAgentJobStore(
+            self.db,
+            lease_seconds=self.config.agent_job_lease_seconds,
+            agent_binding_id=principal.binding_id,
+            organisation_id=principal.organisation_id,
+            participant_id=principal.participant_id,
+            legacy_unbound=principal.legacy,
+        )
         self.core = VpsAgentBroker(
             write_store=self.write_store,
             job_store=self.job_store,
             machine_auth=self.machine_auth,
-            own_inn=config.own_inn,
+            own_inn=principal.participant_inn,
         )
-        self.document_assembler = document_assembler or UnavailableExactDocumentAssembler()
+        return principal
 
     def check_auth(self, machine_token: str) -> None:
-        self.machine_auth.verify(machine_token)
+        self._authorize_agent(machine_token)
 
     def fetch_one(self, machine_token: str) -> AgentJob | None:
+        self._authorize_agent(machine_token, mark_poll=True)
+        assert self.core is not None
         return self.core.fetch_one(machine_token)
 
     def _report_artifact_ingress(self) -> ReportArtifactIngressService:
@@ -217,7 +280,7 @@ class AgentOrchestrationBroker:
         chunks,
         observed_mime: str | None,
     ):
-        self.machine_auth.verify(machine_token)
+        principal = self._authorize_agent(machine_token)
         artifact = self._report_artifact_ingress().ingest_stream(
             artifact_upload_id=artifact_upload_id,
             report_job_id=report_job_id,
@@ -229,13 +292,24 @@ class AgentOrchestrationBroker:
         job=self.db.get(ReportJobRecord,report_job_id)
         if job is None or not job.organisation_id or not job.participant_id:
             raise AgentReplayConflict("report artifact has no tenant-owned report job")
+        if (
+            principal.binding_id is not None
+            and (job.organisation_id != principal.organisation_id or job.participant_id != principal.participant_id)
+        ):
+            raise AgentReplayConflict("agent cannot upload an artifact for another tenant")
         AuditService(
             self.db,
             pseudonym_key=self.db.info.get("audit_pseudonym_key"),
             pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
         ).append(
             event_type="AGENT_ARTIFACT_UPLOADED",
-            actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+            actor=ActorContext(
+                ActorKind.WINDOWS_AGENT,
+                machine_principal=(
+                    f"agent-binding:{principal.binding_id}" if principal.binding_id
+                    else "legacy-windows-agent"
+                ),
+            ),
             tenant=AuditTenantScope(job.organisation_id,job.participant_id),
             subject=SubjectRef(SubjectType.REPORT_ARTIFACT,artifact.artifact_id),
             outcome=AuditOutcome.SUCCESS,
@@ -257,7 +331,8 @@ class AgentOrchestrationBroker:
         return artifact
 
     def submit_result(self, machine_token: str, result: AgentResult) -> None:
-        self.machine_auth.verify(machine_token)
+        principal = self._authorize_agent(machine_token)
+        assert self.job_store is not None and self.machine_auth is not None and self.core is not None
         metadata = self.job_store.metadata(result.job_id, lock=True)
         job_row = self.db.get(AgentJobRecord, result.job_id)
         if job_row is None:
@@ -290,6 +365,27 @@ class AgentOrchestrationBroker:
                 raise AgentReplayConflict("incompatible duplicate agent result")
             return
 
+        if metadata.purpose == "INTEGRATION_HEALTH":
+            if principal.binding_id is None:
+                raise AgentReplayConflict("M14 health jobs require a participant-bound agent")
+            binding = self.db.get(AgentBindingRecord, principal.binding_id)
+            if (
+                binding is None
+                or binding.organisation_id != principal.organisation_id
+                or binding.participant_id != principal.participant_id
+                or binding.state != "ACTIVE"
+            ):
+                raise AgentReplayConflict("agent binding is inactive or tenant-mismatched")
+            from wbcz_web.services.integration_settings import IntegrationSettingsService
+            IntegrationSettingsService(
+                self.db,
+                self.config,
+                secret_provider=ReadOnlySecretProvider(),
+            ).apply_agent_health_result(binding, result)
+            self.job_store.complete(result)
+            self.db.flush()
+            return
+
         if metadata.purpose == REPORT_AGENT_PURPOSE:
             # M11 report jobs never touch P0 write/document state. Complete the
             # durable agent delivery first, then advance only report control state.
@@ -310,7 +406,7 @@ class AgentOrchestrationBroker:
             write_store=self.write_store,
             job_store=self.job_store,
             machine_auth=self.machine_auth,
-            own_inn=_tenant_or_legacy_inn(self.db, self.config),
+            own_inn=principal.participant_inn,
         )
         tenant_core.submit_result(machine_token, result)
         if metadata.purpose == CONTROL_CIS:
