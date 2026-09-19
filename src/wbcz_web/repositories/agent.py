@@ -606,12 +606,15 @@ class SqlAlchemyAgentJobStore:
             if primary is not None:
                 binding_id = primary.id
             else:
-                has_binding = self.db.scalar(select(AgentBindingRecord.id).where(
+                has_local_binding = self.db.scalar(select(AgentBindingRecord.id).where(
                     AgentBindingRecord.organisation_id == scope.organisation_id,
                     AgentBindingRecord.participant_id == scope.participant_id,
                 ).limit(1))
-                if has_binding is not None:
-                    raise PermissionError("participant has no active primary agent binding")
+                m14_cutover_active = self.db.scalar(select(AgentBindingRecord.id).where(
+                    AgentBindingRecord.state == "ACTIVE"
+                ).limit(1))
+                if has_local_binding is not None or m14_cutover_active is not None:
+                    raise PermissionError("participant has no active primary agent binding after M14 cutover")
 
         existing_stmt = select(AgentJobRecord).where(AgentJobRecord.job_id == job.job_id)
         if scope is not None:
