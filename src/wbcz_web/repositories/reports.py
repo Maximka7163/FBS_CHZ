@@ -19,6 +19,10 @@ from wbcz.m11_reports import (
     sanitize_report_evidence,
 )
 from wbcz_web.models import BootstrapRecord
+from wbcz_web.services.audit_history import (
+    ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
+    AuthorizationDecision,SubjectRef,SubjectType,TraceContext,
+)
 from wbcz_web.models.reports import (
     ReportArtifactRecord,
     ReportArtifactUploadRecord,
@@ -50,6 +54,45 @@ class ClaimedReportJob:
 class SqlReportRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
+
+    def _immutable(
+        self,
+        row: ReportJobRecord,
+        event_type: str,
+        *,
+        actor_kind: ActorKind,
+        actor_user_id: int | None = None,
+        machine_principal: str | None = None,
+        subject_type: SubjectType = SubjectType.REPORT_JOB,
+        subject_id: str | None = None,
+        outcome: AuditOutcome = AuditOutcome.SUCCESS,
+        authorization_decision: AuthorizationDecision = AuthorizationDecision.NOT_APPLICABLE,
+        metadata: Mapping[str, Any] | None = None,
+        evidence_hashes: tuple[str, ...] = (),
+        event_key_suffix: str,
+    ) -> None:
+        if not row.organisation_id or not row.participant_id:
+            return
+        AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        ).append(
+            event_type=event_type,
+            actor=ActorContext(actor_kind, user_id=actor_user_id, machine_principal=machine_principal),
+            tenant=AuditTenantScope(row.organisation_id, row.participant_id),
+            subject=SubjectRef(subject_type, subject_id or row.id),
+            outcome=outcome,
+            authorization_decision=authorization_decision,
+            trace=TraceContext(
+                correlation_id=row.correlation_id,
+                causation_id=row.causation_id,
+                operation_id=row.id,
+                event_key=f"report:{row.id}:{event_key_suffix}"[:256],
+            ),
+            metadata=dict(metadata or {}),
+            evidence_hashes=evidence_hashes,
+        )
 
     def event(
         self,
@@ -107,10 +150,15 @@ class SqlReportRepository:
             participant_id = str(scope["participant_id"])
         elif self.db.get(BootstrapRecord, 1) is not None:
             raise ReportSecurityError("post-bootstrap report jobs require tenant scope")
+        trace_data=self.db.info.get("audit_trace")
+        correlation_id=trace_data.get("correlation_id") if isinstance(trace_data,dict) else None
+        causation_id=trace_data.get("request_id") if isinstance(trace_data,dict) else None
         row = ReportJobRecord(
             id=job_id,
             organisation_id=organisation_id,
             participant_id=participant_id,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
             origin=origin,
             participant_inn=participant_inn,
             report_type=report_type,
@@ -130,6 +178,23 @@ class SqlReportRepository:
         self.db.add(row)
         self.db.flush()
         self.event(job_id, "requested", to_state=ReportJobState.REQUESTED.value, actor_user_id=requested_by_user_id)
+        self.db.flush()
+        actor_user_id=int(requested_by_user_id) if requested_by_user_id and str(requested_by_user_id).isdigit() else None
+        self._immutable(
+            row,
+            "REPORT_REQUESTED",
+            actor_kind=ActorKind.USER if actor_user_id is not None else ActorKind.WORKER,
+            actor_user_id=actor_user_id,
+            machine_principal=None if actor_user_id is not None else "report-request-worker",
+            outcome=AuditOutcome.PENDING,
+            authorization_decision=AuthorizationDecision.ALLOW if actor_user_id is not None else AuthorizationDecision.NOT_APPLICABLE,
+            metadata={
+                "report_job_id":row.id,"report_type":row.report_type,"format":row.output_format,
+                "sensitivity_class":row.sensitivity_class,"schema_version":row.report_schema_version,
+                "request_fingerprint_sha256":row.request_fingerprint_sha256,"origin":row.origin,
+            },
+            event_key_suffix="requested",
+        )
         self.db.flush()
         return row
 
@@ -202,6 +267,12 @@ class SqlReportRepository:
             row.lease_owner = None
             row.lease_expires_at = None
             self.event(row.id, "generation_failed", from_state=previous, to_state=row.state, details={"reason": "attempt_limit"})
+            self._immutable(
+                row,"REPORT_GENERATION_FAILED",actor_kind=ActorKind.WORKER,
+                machine_principal=worker_id,outcome=AuditOutcome.FAILED,
+                metadata={"report_job_id":row.id,"error_code":"ATTEMPT_LIMIT","attempt_count":row.attempt_count},
+                event_key_suffix=f"generation-failed-attempt-limit:{row.attempt_count}",
+            )
             self.db.flush()
             return None
         reclaimed = previous == ReportJobState.GENERATING.value
@@ -220,6 +291,15 @@ class SqlReportRepository:
             details={"attempt_count": row.attempt_count},
         )
         self.event(row.id, "generation_started", from_state=row.state, to_state=row.state)
+        self._immutable(
+            row,"REPORT_GENERATION_STARTED",actor_kind=ActorKind.WORKER,
+            machine_principal=worker_id,outcome=AuditOutcome.PENDING,
+            metadata={
+                "report_job_id":row.id,"attempt_count":row.attempt_count,
+                "lease_recovered":reclaimed,
+            },
+            event_key_suffix=f"generation-started:{row.attempt_count}",
+        )
         self.db.flush()
         return ClaimedReportJob(
             row.id,
@@ -351,6 +431,21 @@ class SqlReportRepository:
             evidence_sha256=sha256,
             details={"role": artifact_role, "format": format, "byte_size": byte_size},
         )
+        job=self.db.get(ReportJobRecord,job_id)
+        if job is None:raise KeyError(job_id)
+        self._immutable(
+            job,"REPORT_ARTIFACT_FINALIZED",actor_kind=ActorKind.WORKER,
+            machine_principal="report-artifact-worker",
+            subject_type=SubjectType.REPORT_ARTIFACT,subject_id=artifact_id,
+            outcome=AuditOutcome.SUCCESS,
+            metadata={
+                "report_job_id":job.id,"artifact_id":artifact_id,"artifact_role":artifact_role,
+                "format":format,"sensitivity_class":sensitivity_class,"byte_size":byte_size,
+                "artifact_sha256":sha256,"remote_result_part_id":remote_result_part_id,
+            },
+            evidence_hashes=(sha256,),
+            event_key_suffix=f"artifact-finalized:{artifact_id}",
+        )
         return row
 
     def mark_ready(self, job_id: str, *, worker_id: str | None = None) -> ReportJobRecord:
@@ -368,6 +463,12 @@ class SqlReportRepository:
         row.lease_expires_at = None
         row.heartbeat_at = None
         self.event(job_id, "ready", from_state=previous, to_state=row.state)
+        self._immutable(
+            row,"REPORT_GENERATION_COMPLETED",actor_kind=ActorKind.WORKER,
+            machine_principal=worker_id or "report-worker",outcome=AuditOutcome.SUCCESS,
+            metadata={"report_job_id":row.id,"state":row.state,"attempt_count":row.attempt_count},
+            event_key_suffix="generation-completed",
+        )
         self.db.flush()
         return row
 
@@ -384,6 +485,15 @@ class SqlReportRepository:
         row.lease_expires_at = None
         row.heartbeat_at = None
         self.event(job_id, "generation_failed", from_state=previous, to_state=row.state, details={"error_code": code})
+        self._immutable(
+            row,"REPORT_GENERATION_FAILED",actor_kind=ActorKind.WORKER,
+            machine_principal="report-worker",outcome=AuditOutcome.FAILED,
+            metadata={
+                "report_job_id":row.id,"error_code":row.error_code,
+                "redacted_message":row.error_message_redacted[:512] if row.error_message_redacted else None,
+            },
+            event_key_suffix=f"generation-failed:{row.attempt_count}:{row.error_code}",
+        )
         self.db.flush()
         return row
 
