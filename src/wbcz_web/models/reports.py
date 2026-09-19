@@ -46,6 +46,12 @@ class ReportJobRecord(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    delivery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    semantic_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_classification: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    terminal_reason: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error_message_redacted: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -57,6 +63,9 @@ class ReportJobRecord(Base):
             "state IN (" + ",".join(f"'{value}'" for value in _REPORT_STATES) + ")",
             name="ck_report_jobs_state",
         ),
+        CheckConstraint("delivery_count >= 0", name="ck_report_jobs_delivery_nonnegative"),
+        CheckConstraint("semantic_retry_count >= 0", name="ck_report_jobs_semantic_retry_nonnegative"),
+        CheckConstraint("priority >= 0 AND priority <= 1000", name="ck_report_jobs_priority_range"),
     )
 
 
