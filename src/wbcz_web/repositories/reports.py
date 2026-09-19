@@ -237,7 +237,10 @@ class SqlReportRepository:
             select(ReportJobRecord)
             .where(
                 or_(
-                    ReportJobRecord.state == ReportJobState.QUEUED.value,
+                    and_(
+                        ReportJobRecord.state == ReportJobState.QUEUED.value,
+                        or_(ReportJobRecord.next_attempt_at.is_(None), ReportJobRecord.next_attempt_at <= now),
+                    ),
                     and_(
                         ReportJobRecord.state == ReportJobState.GENERATING.value,
                         ReportJobRecord.lease_expires_at.is_not(None),
@@ -245,7 +248,7 @@ class SqlReportRepository:
                     ),
                 )
             )
-            .order_by(ReportJobRecord.requested_at, ReportJobRecord.id)
+            .order_by(ReportJobRecord.priority, ReportJobRecord.requested_at, ReportJobRecord.id)
             .with_for_update(skip_locked=True)
             .limit(1)
         )
@@ -281,7 +284,9 @@ class SqlReportRepository:
         row.claimed_at = row.claimed_at or now
         row.heartbeat_at = now
         row.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        row.delivery_count += 1
         row.attempt_count += 1
+        row.next_attempt_at = None
         row.started_at = row.started_at or now
         self.event(
             row.id,
@@ -469,6 +474,56 @@ class SqlReportRepository:
             metadata={"report_job_id":row.id,"state":row.state,"attempt_count":row.attempt_count},
             event_key_suffix="generation-completed",
         )
+        self.db.flush()
+        return row
+
+    def schedule_retry(
+        self,
+        job_id: str,
+        *,
+        classification: str,
+        available_at: datetime,
+        consumes_semantic_attempt: bool,
+        error_code: str | None = None,
+    ) -> ReportJobRecord:
+        row = self.db.scalar(select(ReportJobRecord).where(ReportJobRecord.id == job_id).with_for_update())
+        if row is None:
+            raise KeyError(job_id)
+        if row.state != ReportJobState.GENERATING.value:
+            raise ReportSecurityError("retry can only be scheduled from GENERATING")
+        previous = row.state
+        row.state = ReportJobState.QUEUED.value
+        row.retry_classification = classification[:48]
+        row.error_code = (error_code or classification)[:80]
+        row.next_attempt_at = available_at
+        row.lease_owner = None
+        row.lease_expires_at = None
+        row.heartbeat_at = None
+        if consumes_semantic_attempt:
+            row.semantic_retry_count += 1
+        self.event(
+            job_id, "retry_scheduled", from_state=previous, to_state=row.state,
+            details={
+                "classification": row.retry_classification,
+                "semantic_retry_count": row.semantic_retry_count,
+                "delivery_count": row.delivery_count,
+            },
+        )
+        self.db.flush()
+        return row
+
+    def release_for_drain(self, job_id: str, *, worker_id: str) -> ReportJobRecord:
+        row = self.db.scalar(select(ReportJobRecord).where(ReportJobRecord.id == job_id).with_for_update())
+        if row is None:
+            raise KeyError(job_id)
+        if row.state != ReportJobState.GENERATING.value or row.lease_owner != worker_id:
+            raise ReportSecurityError("report lease ownership mismatch")
+        row.state = ReportJobState.QUEUED.value
+        row.lease_owner = None
+        row.lease_expires_at = None
+        row.heartbeat_at = None
+        row.next_attempt_at = _now()
+        self.event(job_id, "lease_released_for_drain", from_state="GENERATING", to_state="QUEUED")
         self.db.flush()
         return row
 
