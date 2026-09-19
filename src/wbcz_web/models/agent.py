@@ -93,6 +93,11 @@ class AgentJobRecord(Base):
     leased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     delivery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    semantic_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_classification: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    terminal_reason: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     result_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -111,6 +116,8 @@ class AgentJobRecord(Base):
             name="fk_agent_jobs_agent_binding_tenant",
             ondelete="RESTRICT",
         ),
+        CheckConstraint("semantic_retry_count >= 0", name="ck_agent_jobs_semantic_retry_nonnegative"),
+        CheckConstraint("priority >= 0 AND priority <= 1000", name="ck_agent_jobs_priority_range"),
         UniqueConstraint("job_id", "payload_sha256", name="uq_agent_jobs_payload"),
     )
 
