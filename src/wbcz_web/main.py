@@ -25,6 +25,7 @@ def create_app(
     from .api.integration_routes import integrations_router
     from .api.health_routes import health_router
     from .api.enrollment_routes import enrollment_router
+    from .api.manual_review_routes import manual_review_router
     from .services.integration_secrets import ReadOnlySecretProvider
     from .services.production_secrets import build_production_secret_provider
     from .middleware import RequestContextMiddleware
@@ -39,6 +40,7 @@ def create_app(
         *integrations_router.routes,
         *health_router.routes,
         *enrollment_router.routes,
+        *manual_review_router.routes,
         *agent_router.routes,
     ]
     app = FastAPI(
