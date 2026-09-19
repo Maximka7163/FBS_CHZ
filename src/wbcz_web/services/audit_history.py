@@ -187,6 +187,7 @@ _COMMON_METADATA = frozenset({
     "user_agent_hmac", "filter_summary", "limit", "returned_count", "query_kind",
     "remote_result_part_id", "publication_key_present", "artifact_role", "origin",
     "attempt_count", "blind_retry", "lease_recovered", "result_outcome", "action",
+    "child_set_hash", "relation_delta", "request_id", "document_id_present",
     "member_user_id", "controlled_recovery", "participant_verification_state",
 })
 
@@ -256,9 +257,9 @@ _EVENT_DEFINITIONS = [
     _ev("INVITATION_ACCEPTED", AuditCategory.TENANT_ADMIN, "INVITATION_ACCEPTED", [U], [SubjectType.INVITATION,SubjectType.MEMBERSHIP], TenantRequirement.ORGANISATION, snapshot=True),
     _ev("INVITATION_REVOKED", AuditCategory.TENANT_ADMIN, "INVITATION_REVOKED", [U], [SubjectType.INVITATION], TenantRequirement.ORGANISATION, snapshot=True),
     _ev("BOOTSTRAP_COMPLETED", AuditCategory.TENANT_ADMIN, "BOOTSTRAP_COMPLETED", [B], [SubjectType.ORGANISATION], TenantRequirement.ORGANISATION, snapshot=True),
-    _ev("TURNOVER_INTENT_CREATED", AuditCategory.TURNOVER, "INTENT_CREATED", [U,W], [SubjectType.TURNOVER_OPERATION], TenantRequirement.PARTICIPANT, snapshot=True),
-    _ev("TURNOVER_REMOTE_RESULT", AuditCategory.TURNOVER, "REMOTE_RESULT", [W,A,R], [SubjectType.TURNOVER_OPERATION], TenantRequirement.PARTICIPANT),
-    _ev("TURNOVER_RECONCILED", AuditCategory.TURNOVER, "RECONCILED", [W,U], [SubjectType.TURNOVER_OPERATION], TenantRequirement.PARTICIPANT),
+    _ev("TURNOVER_INTENT_CREATED", AuditCategory.TURNOVER, "INTENT_CREATED", [U,W], [SubjectType.TURNOVER_OPERATION,SubjectType.WRITE_OPERATION], TenantRequirement.PARTICIPANT, snapshot=True),
+    _ev("TURNOVER_REMOTE_RESULT", AuditCategory.TURNOVER, "REMOTE_RESULT", [W,A,R], [SubjectType.TURNOVER_OPERATION,SubjectType.WRITE_OPERATION], TenantRequirement.PARTICIPANT),
+    _ev("TURNOVER_RECONCILED", AuditCategory.TURNOVER, "RECONCILED", [W,U], [SubjectType.TURNOVER_OPERATION,SubjectType.WRITE_OPERATION], TenantRequirement.PARTICIPANT),
     _ev("AGGREGATION_INTENT_CREATED", AuditCategory.AGGREGATION, "INTENT_CREATED", [U,W], [SubjectType.AGGREGATION_OPERATION], TenantRequirement.PARTICIPANT, snapshot=True),
     _ev("AGGREGATION_REMOTE_RESULT", AuditCategory.AGGREGATION, "REMOTE_RESULT", [W,A,R], [SubjectType.AGGREGATION_OPERATION], TenantRequirement.PARTICIPANT),
     _ev("AGGREGATION_RECONCILED", AuditCategory.AGGREGATION, "RECONCILED", [W,U], [SubjectType.AGGREGATION_OPERATION], TenantRequirement.PARTICIPANT),
