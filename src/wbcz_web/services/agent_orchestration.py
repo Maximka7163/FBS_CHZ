@@ -177,7 +177,12 @@ class AgentOrchestrationBroker:
         self.config = config
         self.imports = ImportRepository(db)
         self.write_store = SqlAlchemyWriteOperationStore(db)
-        self.job_store: SqlAlchemyAgentJobStore | None = None
+        # Backend orchestration must be able to enqueue tenant-routed jobs before
+        # any Windows agent authenticates. Agent fetch/complete replaces this
+        # producer store with an authenticated binding-scoped store.
+        self.job_store: SqlAlchemyAgentJobStore = SqlAlchemyAgentJobStore(
+            db, lease_seconds=config.agent_job_lease_seconds
+        )
         self.machine_auth: MachineTokenVerifier | None = None
         self.core: VpsAgentBroker | None = None
         self.principal: AgentPrincipal | None = None
