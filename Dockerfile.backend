@@ -1,9 +1,10 @@
 FROM python:3.12-slim AS builder
 WORKDIR /build
+COPY requirements.production.lock ./
 COPY pyproject.toml ./
 COPY src ./src
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip wheel --no-cache-dir --wheel-dir /wheels ".[web]"
+RUN python -m pip install --no-cache-dir -r requirements.production.lock \
+    && python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
 FROM python:3.12-slim AS runtime
 ARG APP_VERSION=0.5.1
@@ -14,15 +15,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WBCZ_BUILD_SHA=${BUILD_SHA}
 RUN groupadd --system wbcz \
     && useradd --system --gid wbcz --create-home --home-dir /home/wbcz wbcz
+COPY requirements.production.lock /tmp/requirements.production.lock
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir /wheels/*.whl \
-    && rm -rf /wheels
+RUN python -m pip install --no-cache-dir -r /tmp/requirements.production.lock \
+    && python -m pip install --no-cache-dir --no-deps /wheels/*.whl \
+    && rm -rf /wheels /tmp/requirements.production.lock
 WORKDIR /app
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
-# COPY preserves source modes from the build context. Normalize Alembic assets in
-# the image so the unprivileged runtime user can always read/traverse them even
-# when the extracted production build context had restrictive permissions.
 RUN chmod 0755 /app \
     && find /app/migrations -type d -exec chmod 0755 {} + \
     && find /app/migrations -type f -exec chmod 0644 {} + \
