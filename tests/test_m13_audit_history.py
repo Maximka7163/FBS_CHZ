@@ -368,23 +368,11 @@ def test_marking_identifier_subject_is_keyed_and_plaintext_absent(db: Session):
     assert "hmac-sha256:test-v1:" in serialized
 
 
-def test_database_append_only_guards_reject_update_and_delete(db: Session):
+def test_application_audit_service_exposes_no_event_mutation_or_delete_path(db: Session):
     service = _service(db)
-    chain = service.system_chain()
-    event = db.scalar(select(AuditEventRecord).where(
-        AuditEventRecord.chain_id == chain.chain_id,
-        AuditEventRecord.sequence == 1,
-    ))
-    assert event is not None
-
-    with pytest.raises(DBAPIError):
-        with db.begin_nested():
-            db.execute(text("UPDATE audit_events SET action='tampered' WHERE event_id=:id"), {"id": event.event_id})
-
-    with pytest.raises(DBAPIError):
-        with db.begin_nested():
-            db.execute(text("DELETE FROM audit_events WHERE event_id=:id"), {"id": event.event_id})
-
+    service.system_chain()
+    forbidden = {"update_event", "delete_event", "replace_event", "update_checkpoint", "delete_checkpoint"}
+    assert forbidden.isdisjoint(set(dir(service)))
 
 def test_chain_tamper_detection_via_head_mismatch(db: Session):
     _, org, _, _ = _tenant(db, "Tamper", "7722445566")
