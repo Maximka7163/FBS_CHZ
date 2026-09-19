@@ -258,9 +258,7 @@ class WebConfig:
             raise ValueError("WBCZ_PROCESS_ROLE must be web or worker")
         if not self.app_url or not self.app_url.startswith("https://"):
             raise ValueError("WBCZ_APP_URL must be an https URL in strict production")
-        if not self.migration_database_url:
-            raise ValueError("WBCZ_MIGRATION_DATABASE_URL is required in strict production")
-        if self.migration_database_url == self.database_url:
+        if self.migration_database_url and self.migration_database_url == self.database_url:
             raise ValueError("runtime and migrator database credentials must be separated")
         if not self.trusted_proxy_cidrs:
             raise ValueError("WBCZ_TRUSTED_PROXY_CIDRS is required in strict production")
@@ -282,7 +280,6 @@ class WebConfig:
             raise ValueError("strict production paths missing: " + ",".join(sorted(missing)))
         ints = {
             "WBCZ_DB_POOL_SIZE": self.db_pool_size,
-            "WBCZ_DB_MAX_OVERFLOW": self.db_max_overflow,
             "WBCZ_DB_POOL_TIMEOUT_SECONDS": self.db_pool_timeout_seconds,
             "WBCZ_DB_POOL_RECYCLE_SECONDS": self.db_pool_recycle_seconds,
             "WBCZ_DB_STATEMENT_TIMEOUT_MS": self.db_statement_timeout_ms,
