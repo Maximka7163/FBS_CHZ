@@ -105,6 +105,8 @@ class WebConfig:
     db_lock_timeout_ms: int = 5000
     db_idle_transaction_timeout_ms: int = 60000
     db_application_name: str = "wbcz-web"
+    db_connection_budget: int = 80
+    web_process_count: int = 2
     worker_concurrency: int = 1
     worker_heartbeat_seconds: int = 15
     worker_stale_seconds: int = 90
@@ -302,6 +304,9 @@ class WebConfig:
             raise ValueError("worker lease must exceed heartbeat interval")
         if self.db_max_overflow < 0:
             raise ValueError("WBCZ_DB_MAX_OVERFLOW must be non-negative")
+        projected_connections = (self.db_pool_size + self.db_max_overflow) * (self.web_process_count + self.worker_concurrency)
+        if projected_connections > self.db_connection_budget:
+            raise ValueError("configured web/worker pools exceed WBCZ_DB_CONNECTION_BUDGET")
         if not re.fullmatch(r"m\d+-v\d+", self.agent_protocol_current):
             raise ValueError("WBCZ_AGENT_PROTOCOL_CURRENT is invalid")
         if not re.fullmatch(r"m\d+-v\d+", self.agent_protocol_minimum):
@@ -362,6 +367,8 @@ class WebConfig:
             db_lock_timeout_ms=int(os.getenv("WBCZ_DB_LOCK_TIMEOUT_MS", "5000")),
             db_idle_transaction_timeout_ms=int(os.getenv("WBCZ_DB_IDLE_TRANSACTION_TIMEOUT_MS", "60000")),
             db_application_name=os.getenv("WBCZ_DB_APPLICATION_NAME", "wbcz-web").strip() or "wbcz-web",
+            db_connection_budget=int(os.getenv("WBCZ_DB_CONNECTION_BUDGET", "80")),
+            web_process_count=int(os.getenv("WBCZ_WEB_PROCESS_COUNT", "2")),
             worker_concurrency=int(os.getenv("WBCZ_WORKER_CONCURRENCY", "1")),
             worker_heartbeat_seconds=int(os.getenv("WBCZ_WORKER_HEARTBEAT_SECONDS", "15")),
             worker_stale_seconds=int(os.getenv("WBCZ_WORKER_STALE_SECONDS", "90")),
