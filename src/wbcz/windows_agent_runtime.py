@@ -6,8 +6,10 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 from .models import canonical_json, utc_now
+from .m11_reports import DispenserCapability, DispenserRateDecision
 from .windows_agent import (
     AgentJob,
     AgentJobType,
@@ -31,6 +33,20 @@ CREATE TABLE IF NOT EXISTS windows_agent_write_replay (
     result_sha256 TEXT,
     result_json TEXT,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS windows_agent_m11_rate_windows (
+    scope_key TEXT NOT NULL,
+    rate_family TEXT NOT NULL,
+    history_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope_key, rate_family)
+);
+
+CREATE TABLE IF NOT EXISTS windows_agent_runtime_metadata (
+    metadata_key TEXT PRIMARY KEY,
+    metadata_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 """
@@ -149,6 +165,93 @@ class WindowsAgentReplayStore:
             (operation_id,),
         ).fetchone()
         return str(row["state"]) if row else None
+
+    def consume_m11_rate(
+        self,
+        capability: DispenserCapability,
+        *,
+        scope_key: str,
+        now_epoch: float,
+    ) -> DispenserRateDecision:
+        if not capability.enabled:
+            from .m11_reports import ReportSecurityError
+            raise ReportSecurityError(capability.disabled_reason or "capability disabled")
+        if not scope_key:
+            from .m11_reports import ReportContractError
+            raise ReportContractError("rate scope key required")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT history_json FROM windows_agent_m11_rate_windows WHERE scope_key=? AND rate_family=?",
+                (scope_key, capability.rate_family),
+            ).fetchone()
+            history = json.loads(row["history_json"]) if row is not None else []
+            if not isinstance(history, list):
+                history = []
+            threshold = float(now_epoch) - 60.0
+            kept = [float(item) for item in history if isinstance(item, (int, float)) and float(item) > threshold]
+            if len(kept) >= capability.requests_per_minute:
+                retry = max(0.0, 60.0 - (float(now_epoch) - kept[0]))
+                self._connection.commit()
+                return DispenserRateDecision(False, retry)
+            kept.append(float(now_epoch))
+            payload = json.dumps(kept, separators=(",", ":"))
+            self._connection.execute(
+                """INSERT INTO windows_agent_m11_rate_windows(scope_key, rate_family, history_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(scope_key, rate_family)
+                DO UPDATE SET history_json=excluded.history_json, updated_at=excluded.updated_at""",
+                (scope_key, capability.rate_family, payload, utc_now()),
+            )
+            self._connection.commit()
+            return DispenserRateDecision(True, 0.0)
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def set_runtime_metadata(self, key: str, value: dict) -> None:
+        if not key or len(key) > 128:
+            raise ValueError("invalid runtime metadata key")
+        payload = canonical_json(value)
+        self._connection.execute(
+            """INSERT INTO windows_agent_runtime_metadata(metadata_key, metadata_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(metadata_key)
+            DO UPDATE SET metadata_json=excluded.metadata_json, updated_at=excluded.updated_at""",
+            (key, payload, utc_now()),
+        )
+
+    def get_runtime_metadata(self, key: str) -> dict | None:
+        row = self._connection.execute(
+            "SELECT metadata_json FROM windows_agent_runtime_metadata WHERE metadata_key=?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["metadata_json"])
+        return value if isinstance(value, dict) else None
+
+
+class DurableDispenserRateLimiter:
+    """M11 limiter whose consumed 60-second windows survive Windows agent restart."""
+
+    def __init__(self, replay_store: WindowsAgentReplayStore, *, wall_clock=time.time) -> None:
+        self.replay_store = replay_store
+        self.wall_clock = wall_clock
+
+    def consume(
+        self,
+        capability: DispenserCapability,
+        *,
+        scope_key: str,
+        now_monotonic: float,
+    ) -> DispenserRateDecision:
+        del now_monotonic
+        return self.replay_store.consume_m11_rate(
+            capability,
+            scope_key=scope_key,
+            now_epoch=float(self.wall_clock()),
+        )
 
 
 class DurableWindowsAgentExecutor(WindowsAgentExecutor):
