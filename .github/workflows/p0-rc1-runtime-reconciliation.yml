@@ -1,0 +1,335 @@
+name: P0 RC1 runtime reconciliation
+
+on:
+  push:
+    branches: [release/p0-rc1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RC1_BASE_SHA: ce71f9e049bc7d65a0221001b2c7e5aa701f2243
+  RC1_MIGRATION: 0016_m15_production_hardening
+  FROZEN_P0_SHA: 395701f1757711b5a11b9348d929182d40f51f0a
+
+jobs:
+  backend-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wbcz_rc1
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wbcz_rc1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      WBCZ_ENV: test
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_rc1
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_rc1
+      WBCZ_OWN_INN: "1234567890"
+      WBCZ_COOKIE_SECURE: "false"
+      WBCZ_BUILD_SHA: rc1-ci
+      WBCZ_AUDIT_PSEUDONYM_KEY: rc1-ci-only-audit-pseudonym-key-0000000000000001
+      WBCZ_AUDIT_PSEUDONYM_KEY_ID: rc1-ci-v1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Prove exact base and branch boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          git merge-base --is-ancestor "$RC1_BASE_SHA" HEAD
+          test "$(git rev-parse "$RC1_BASE_SHA")" = "$RC1_BASE_SHA"
+          test "$(git rev-parse origin/p0/test-candidate-001)" = "$FROZEN_P0_SHA"
+          test -z "$(git diff --name-only "$RC1_BASE_SHA" HEAD -- migrations/versions)"
+          test -z "$(git diff --name-only "$RC1_BASE_SHA" HEAD -- frontend)"
+      - name: Install locked backend runtime and test tools
+        run: |
+          python -m pip install -r requirements.production.lock
+          python -m pip install --no-deps -e .
+          python -m pip install "pytest==9.1.1" "httpx==0.28.1"
+      - name: Verify lock and compile
+        run: |
+          python scripts/m15_verify_dependency_lock.py
+          python -m compileall -q src scripts tests
+      - name: Build deterministic WB regression workbook
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$USER" /mnt/data
+          python scripts/generate_regression_workbook.py /mnt/data/REF_WB_archive_9.xlsx
+          test -s /mnt/data/REF_WB_archive_9.xlsx
+      - name: Exact migration head and fresh migration
+        run: |
+          test "$(alembic heads | awk '{print $1}')" = "$RC1_MIGRATION"
+          alembic upgrade "$RC1_MIGRATION"
+          test "$(alembic current | awk '{print $1}')" = "$RC1_MIGRATION"
+      - name: RC1 focused reconciliation tests
+        run: python -m pytest -q tests/test_p0_rc1_runtime_package.py
+      - name: Full backend regression
+        run: python -m pytest -q tests
+      - name: Repository secret scan
+        run: python scripts/m15_secret_scan.py
+
+  vps-runtime-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      archive_name: ${{ steps.bundle.outputs.archive_name }}
+      archive_sha256: ${{ steps.bundle.outputs.archive_sha256 }}
+      image_digest: ${{ steps.bundle.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Prove package source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          git merge-base --is-ancestor "$RC1_BASE_SHA" HEAD
+          test -z "$(git diff --name-only "$RC1_BASE_SHA" HEAD -- frontend)"
+      - name: Build accepted frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run typecheck
+          npm run build
+          if grep -R -E 'https?://(localhost|127\.0\.0\.1)' dist; then
+            echo 'localhost URL found in production frontend' >&2
+            exit 1
+          fi
+      - name: Build deterministic VPS archive twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          TS="$(git show -s --format=%cI HEAD)"
+          python scripts/build_p0_rc1_runtime_bundle.py             --source-root . --output-dir build-a             --source-sha "${{ github.sha }}" --source-branch release/p0-rc1             --build-timestamp-utc "$TS" --builder-sha "${{ github.sha }}"
+          python scripts/build_p0_rc1_runtime_bundle.py             --source-root . --output-dir build-b             --source-sha "${{ github.sha }}" --source-branch release/p0-rc1             --build-timestamp-utc "$TS" --builder-sha "${{ github.sha }}"
+          ARCHIVE="sellari-marking-p0-rc1-0.5.1-${GITHUB_SHA:0:12}.tar.gz"
+          cmp "build-a/$ARCHIVE" "build-b/$ARCHIVE"
+          cmp "build-a/$ARCHIVE.sha256" "build-b/$ARCHIVE.sha256"
+          (cd build-a && sha256sum -c "$ARCHIVE.sha256")
+          mkdir -p extracted
+          tar -xzf "build-a/$ARCHIVE" -C extracted
+          ROOT="extracted/sellari-marking-p0-rc1-0.5.1-${GITHUB_SHA:0:12}"
+          (cd "$ROOT" && sha256sum -c SHA256SUMS)
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root=Path("extracted") / f"sellari-marking-p0-rc1-0.5.1-{os.environ['GITHUB_SHA'][:12]}"
+          data=json.loads((root/"RELEASE.json").read_text())
+          assert data["source_git_sha"] == os.environ["GITHUB_SHA"]
+          assert data["frontend_built_from_sha"] == os.environ["GITHUB_SHA"]
+          assert data["alembic_head"] == "0016_m15_production_hardening"
+          assert data["true_api_write_default"] is False
+          assert data["production_true_api_transport"] == "windows-outbound-agent-only"
+          assert data["legacy_global_agent_bootstrap"] is False
+          assert not (root/"src/wbcz_ui").exists()
+          PY
+      - name: Validate isolated compose and extracted image
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="sellari-marking-p0-rc1-0.5.1-${GITHUB_SHA:0:12}.tar.gz"
+          ROOT="extracted/sellari-marking-p0-rc1-0.5.1-${GITHUB_SHA:0:12}"
+          python - <<'PY' > "$RUNNER_TEMP/rc1-compose.env"
+          import re
+          from pathlib import Path
+          text=Path("docker-compose.prod.yml").read_text()
+          for name in sorted(set(re.findall(r'\$\{([A-Z0-9_]+):\?', text))):
+              print(f"{name}=SYNTHETIC_RC1_VALUE")
+          PY
+          env -u WBCZ_DATABASE_URL -u WBCZ_TEST_DATABASE_URL             docker compose --env-file "$RUNNER_TEMP/rc1-compose.env" -f "$ROOT/docker-compose.prod.yml" config --quiet
+          docker build             --build-arg APP_VERSION=0.5.1             --build-arg BUILD_SHA="$GITHUB_SHA"             -t "wbcz-p0-rc1:$GITHUB_SHA"             -f "$ROOT/Dockerfile.backend" "$ROOT"
+          HEADS="$(docker run --rm --entrypoint sh "wbcz-p0-rc1:$GITHUB_SHA" -ec 'test "$(id -un)" = wbcz; alembic -c /app/alembic.ini heads')"
+          test "$HEADS" = "0016_m15_production_hardening (head)"
+          DIGEST="$(docker image inspect "wbcz-p0-rc1:$GITHUB_SHA" --format '{{.Id}}')"
+          HASH="$(cut -d' ' -f1 "build-a/$ARCHIVE.sha256")"
+          echo "archive_name=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$HASH" >> "$GITHUB_OUTPUT"
+          echo "image_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p0-rc1-vps-${{ github.sha }}
+          path: |
+            build-a/sellari-marking-p0-rc1-0.5.1-*.tar.gz
+            build-a/sellari-marking-p0-rc1-0.5.1-*.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  windows-agent-package:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    outputs:
+      zip_name: ${{ steps.package.outputs.zip_name }}
+      zip_sha256: ${{ steps.package.outputs.zip_sha256 }}
+      pyinstaller_version: ${{ steps.package.outputs.pyinstaller_version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install Windows build and test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.production.lock
+          python -m pip install --no-deps -e .
+          python -m pip install "pytest==9.1.1" "httpx==0.28.1" "pyinstaller>=6,<7"
+      - name: Windows agent regression
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_windows_agent.py tests/test_agent_protocol_runtime.py tests/test_p0_rc1_runtime_package.py
+          python -m pytest -q tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
+      - name: Build self-contained Windows agent
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --name wbcz-agent --paths src windows-agent/wbcz_agent_entry.py
+          .\dist\wbcz-agent\wbcz-agent.exe --help | Out-Null
+      - name: Stage Windows package
+        id: package
+        shell: pwsh
+        run: |
+          $short = "$($env:GITHUB_SHA.Substring(0,12))"
+          $zip = "sellari-wbcz-agent-p0-rc1-0.5.1-$short.zip"
+          $root = Join-Path $PWD "out\sellari-wbcz-agent-p0-rc1-0.5.1-$short"
+          New-Item -ItemType Directory -Path (Join-Path $root 'app') -Force | Out-Null
+          Copy-Item -LiteralPath '.\dist\wbcz-agent' -Destination (Join-Path $root 'app\wbcz-agent') -Recurse
+          $files = @('Install-WbczAgent.ps1','Runtime-Common.ps1','Set-WbczAgentConfig.ps1','Preflight-WbczAgent.ps1','Start-WbczAgent.ps1','Uninstall-WbczAgent.ps1','README.txt')
+          foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path 'windows-agent' $f) -Destination (Join-Path $root $f) }
+          $pyinstaller = python -c "import PyInstaller; print(PyInstaller.__version__)"
+          $meta = [ordered]@{
+            package_format='sellari-wbcz-windows-agent-p0-rc1-v1'
+            application_version='0.5.1'
+            source_git_sha=$env:GITHUB_SHA
+            protocol_version='m15-v1'
+            production_write_default=$false
+            participant_bound_enrollment=$true
+            permanent_credential_included=$false
+            certificate_material_included=$false
+            participant_data_included=$false
+            pyinstaller_version=$pyinstaller.Trim()
+          }
+          $meta | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'VERSION.json') -Encoding UTF8
+          if (Test-Path (Join-Path $root 'config.json')) { throw 'config must not be packaged' }
+          if (Test-Path (Join-Path $root 'agent-credential.dpapi')) { throw 'credential must not be packaged' }
+          $joined = (Get-ChildItem $root -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          if ($joined -match '-----BEGIN .*PRIVATE KEY-----') { throw 'private key marker found' }
+          New-Item -ItemType Directory -Path out -Force | Out-Null
+          Compress-Archive -Path (Join-Path $root '*') -DestinationPath (Join-Path $PWD "out\$zip") -CompressionLevel Optimal
+          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $PWD "out\$zip")).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content -LiteralPath (Join-Path $PWD "out\$zip.sha256") -Encoding ascii
+          "zip_name=$zip" >> $env:GITHUB_OUTPUT
+          "zip_sha256=$hash" >> $env:GITHUB_OUTPUT
+          "pyinstaller_version=$($pyinstaller.Trim())" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p0-rc1-windows-agent-${{ github.sha }}
+          path: |
+            out/sellari-wbcz-agent-p0-rc1-*.zip
+            out/sellari-wbcz-agent-p0-rc1-*.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  frontend-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Accepted frontend regression
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run typecheck
+          npm run build
+
+  rc-manifest:
+    needs: [backend-regression, vps-runtime-package, windows-agent-package, frontend-regression]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+      - name: Write exact RC manifest
+        shell: bash
+        env:
+          VPS_NAME: ${{ needs.vps-runtime-package.outputs.archive_name }}
+          VPS_SHA256: ${{ needs.vps-runtime-package.outputs.archive_sha256 }}
+          IMAGE_DIGEST: ${{ needs.vps-runtime-package.outputs.image_digest }}
+          WINDOWS_NAME: ${{ needs.windows-agent-package.outputs.zip_name }}
+          WINDOWS_SHA256: ${{ needs.windows-agent-package.outputs.zip_sha256 }}
+          PYINSTALLER_VERSION: ${{ needs.windows-agent-package.outputs.pyinstaller_version }}
+        run: |
+          mkdir -p build
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = {
+              "task_id": "P0-RC1-RUNTIME-RECONCILIATION-001",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "base_sha": "ce71f9e049bc7d65a0221001b2c7e5aa701f2243",
+              "migration_head": "0016_m15_production_hardening",
+              "production_write_default": False,
+              "vps_runtime_artifact": {
+                  "name": os.environ["VPS_NAME"],
+                  "sha256": os.environ["VPS_SHA256"],
+                  "image_digest": os.environ["IMAGE_DIGEST"],
+              },
+              "windows_agent_artifact": {
+                  "name": os.environ["WINDOWS_NAME"],
+                  "sha256": os.environ["WINDOWS_SHA256"],
+                  "pyinstaller_version": os.environ["PYINSTALLER_VERSION"],
+              },
+              "real_true_api_called": False,
+              "production_deployed": False,
+              "production_migration_applied": False,
+              "real_certificate_used": False,
+          }
+          Path("build/p0-rc1-manifest.json").write_text(json.dumps(data, indent=2, sort_keys=True)+"\n")
+          PY
+          sha256sum build/p0-rc1-manifest.json > build/p0-rc1-manifest.json.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p0-rc1-manifest-${{ github.sha }}
+          path: |
+            build/p0-rc1-manifest.json
+            build/p0-rc1-manifest.json.sha256
+          if-no-files-found: error
+          retention-days: 30
