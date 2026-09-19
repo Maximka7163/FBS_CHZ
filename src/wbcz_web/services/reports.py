@@ -552,7 +552,7 @@ class SynchronousReportExecutor:
                     if isinstance(value, dict):
                         yield value
 
-    def execute_claimed(self, claimed: ClaimedReportJob) -> LocalGenerationResult:
+    def execute_claimed(self, claimed: ClaimedReportJob, *, terminal_on_error: bool = True) -> LocalGenerationResult:
         if claimed.participant_inn != self.participant_inn:
             raise PermissionError("participant isolation mismatch")
         definition = LOCAL_REPORT_CATALOG[LocalReportType(claimed.report_type)]
@@ -620,8 +620,9 @@ class SynchronousReportExecutor:
                 descriptor.descriptor_sha256,
             )
         except BaseException as exc:
-            self.repo.fail(claimed.job_id, code=type(exc).__name__, message_redacted="local report generation failed")
-            self.db.flush()
+            if terminal_on_error:
+                self.repo.fail(claimed.job_id, code=type(exc).__name__, message_redacted="local report generation failed")
+                self.db.flush()
             raise
         finally:
             if rendered is not None:
