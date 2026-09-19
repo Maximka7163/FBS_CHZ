@@ -300,14 +300,15 @@ def test_agent_binding_hash_rotation_and_cross_tenant_job_routing(db: Session):
     assert db.get(AgentJobRecord, job_a.job_id).agent_binding_id == binding_a.id
     assert db.get(AgentJobRecord, job_b.job_id).agent_binding_id == binding_b.id
 
-    legacy_payload = AgentJob(
+    legacy_job = AgentJob(
         job_id="legacy-null-job",
         job_type=AgentJobType.CIS_INFO,
         operation_id="legacy-null-op",
         pg=P0_PG,
         expected_inn=pa.inn,
         read_payload={"cises":["SYNTHETIC-KIZ-M14"]},
-    ).safe_dict()
+    )
+    legacy_payload, legacy_digest = SqlAlchemyAgentJobStore._digest(legacy_job)
     db.add(AgentJobRecord(
         job_id="legacy-null-job",
         organisation_id=oa.id,
@@ -317,7 +318,7 @@ def test_agent_binding_hash_rotation_and_cross_tenant_job_routing(db: Session):
         operation_id="legacy-null-op",
         purpose="CIS_INVENTORY",
         poll_attempt=0,
-        payload_sha256=hashlib.sha256(canonical_json(legacy_payload).encode()).hexdigest(),
+        payload_sha256=legacy_digest,
         payload_json=legacy_payload,
         state="PENDING",
     ))
