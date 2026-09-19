@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from wbcz.models import canonical_json
 from wbcz.wb_fbs import (
-    WbConnection, WbConnectionState, WbEnvironment, WbReadTransport,
+    StatefulWbRateLimiter, WbConnection, WbConnectionState, WbEnvironment, WbReadTransport,
     WbRateLimitExceeded, WbTokenCategory, WbTokenType, runtime_token,
     verify_seller_identity,
 )
@@ -100,11 +100,13 @@ class IntegrationSettingsService:
         *,
         secret_provider: SecretProvider,
         wb_http_adapter=None,
+        wb_rate_limiter: StatefulWbRateLimiter | None = None,
     ) -> None:
         self.db = db
         self.config = config
         self.secret_provider = secret_provider
         self.wb_http_adapter = wb_http_adapter
+        self.wb_rate_limiter = wb_rate_limiter or StatefulWbRateLimiter()
         self.scope = active_tenant(db)
 
     def _trace(self) -> dict[str, Any]:
@@ -871,7 +873,7 @@ class IntegrationSettingsService:
                         raise KeyError("secret not available")
                     return token.value
             response = WbReadTransport(
-                self.wb_http_adapter, connection.environment
+                self.wb_http_adapter, connection.environment, rate_limiter=self.wb_rate_limiter
             ).seller_info(runtime_token(connection, OneSecret()))
             evidence = hashlib.sha256(response.body).hexdigest()
             if response.status_code == 429:
