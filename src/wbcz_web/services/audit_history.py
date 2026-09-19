@@ -240,6 +240,7 @@ _EVENT_DEFINITIONS = [
     _ev("CHECKPOINT_CREATED", AuditCategory.SYSTEM, "CHECKPOINT_CREATED", [S], [SubjectType.AUDIT_CHECKPOINT], TenantRequirement.SYSTEM_OR_ORGANISATION, metadata=["checkpoint_id","checkpoint_hash","through_sequence"]),
     _ev("CHAIN_VERIFICATION_FAILED", AuditCategory.SYSTEM, "CHAIN_VERIFICATION_FAILED", [S,C], [SubjectType.AUDIT_CHAIN], TenantRequirement.SYSTEM, metadata=["first_invalid_sequence","failure_reason","verification_status"]),
     _ev("AUDIT_QUERY_EXECUTED", AuditCategory.AUTHORIZATION, "AUDIT_QUERY", [U], [SubjectType.AUDIT_CHAIN], TenantRequirement.ORGANISATION, snapshot=True, metadata=["filter_summary","limit","returned_count","query_kind"]),
+    _ev("AUTHORIZATION_DENIED", AuditCategory.AUTHORIZATION, "ACCESS_DENIED", [U], [SubjectType.AUDIT_CHAIN], TenantRequirement.SYSTEM_OR_ORGANISATION, snapshot=True, metadata=["reason","query_kind"]),
     _ev("LOGIN_SUCCESS", AuditCategory.SECURITY, "LOGIN", [U], [SubjectType.SESSION], TenantRequirement.SYSTEM),
     _ev("LOGIN_FAILED", AuditCategory.SECURITY, "LOGIN", [S,U], [SubjectType.USER,SubjectType.SESSION], TenantRequirement.SYSTEM, criticality="MEDIUM"),
     _ev("LOGIN_THROTTLED", AuditCategory.SECURITY, "LOGIN_THROTTLE", [S,U], [SubjectType.USER,SubjectType.SESSION], TenantRequirement.SYSTEM),
