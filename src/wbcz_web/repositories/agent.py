@@ -609,30 +609,33 @@ class SqlAlchemyAgentJobStore:
         )
         self.db.add(row)
         self.db.flush()
-        audit=AuditService(
-            self.db,
-            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
-            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
-        )
-        tenant=AuditTenantScope(row.organisation_id,row.participant_id) if row.organisation_id else AuditTenantScope.system()
-        actor=ActorContext(ActorKind.USER,user_id=scope.user_id) if scope is not None and scope.user_id is not None else ActorContext(ActorKind.SYSTEM)
-        audit.append(
-            event_type="AGENT_JOB_CREATED",
-            actor=actor,
-            tenant=tenant,
-            subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
-            outcome=AuditOutcome.PENDING,
-            authorization_decision=AuthorizationDecision.ALLOW if actor.kind is ActorKind.USER else AuthorizationDecision.NOT_APPLICABLE,
-            trace=TraceContext(
-                correlation_id=row.correlation_id,causation_id=row.causation_id,
-                operation_id=row.operation_id,agent_job_id=row.job_id,
-                event_key=f"agent:{row.job_id}:created",
-            ),
-            metadata={
-                "job_type":row.job_type,"purpose":row.purpose,
-                "delivery_count":row.delivery_count,"payload_sha256":row.payload_sha256,
-            },
-        )
+        if row.organisation_id is not None or row.participant_id is not None:
+            if not row.organisation_id or not row.participant_id:
+                raise PermissionError("tenant-owned agent job has incomplete tenant scope")
+            audit=AuditService(
+                self.db,
+                pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+                pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+            )
+            tenant=AuditTenantScope(row.organisation_id,row.participant_id)
+            actor=ActorContext(ActorKind.USER,user_id=scope.user_id) if scope is not None and scope.user_id is not None else ActorContext(ActorKind.SYSTEM)
+            audit.append(
+                event_type="AGENT_JOB_CREATED",
+                actor=actor,
+                tenant=tenant,
+                subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
+                outcome=AuditOutcome.PENDING,
+                authorization_decision=AuthorizationDecision.ALLOW if actor.kind is ActorKind.USER else AuthorizationDecision.NOT_APPLICABLE,
+                trace=TraceContext(
+                    correlation_id=row.correlation_id,causation_id=row.causation_id,
+                    operation_id=row.operation_id,agent_job_id=row.job_id,
+                    event_key=f"agent:{row.job_id}:created",
+                ),
+                metadata={
+                    "job_type":row.job_type,"purpose":row.purpose,
+                    "delivery_count":row.delivery_count,"payload_sha256":row.payload_sha256,
+                },
+            )
         self.db.flush()
         return job
 
@@ -664,28 +667,30 @@ class SqlAlchemyAgentJobStore:
         row.delivery_count += 1
         row.updated_at = now
         self.db.flush()
-        audit=AuditService(
-            self.db,
-            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
-            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
-        )
-        tenant=AuditTenantScope(row.organisation_id,row.participant_id) if row.organisation_id else AuditTenantScope.system()
-        audit.append(
-            event_type="AGENT_JOB_CLAIMED",
-            actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
-            tenant=tenant,
-            subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
-            outcome=AuditOutcome.PENDING,
-            trace=TraceContext(
-                correlation_id=row.correlation_id,causation_id=row.causation_id,
-                operation_id=row.operation_id,agent_job_id=row.job_id,
-                event_key=f"agent:{row.job_id}:claimed:{row.delivery_count}",
-            ),
-            metadata={
-                "job_type":row.job_type,"purpose":row.purpose,
-                "delivery_count":row.delivery_count,"payload_sha256":row.payload_sha256,
-            },
-        )
+        if row.organisation_id is not None or row.participant_id is not None:
+            if not row.organisation_id or not row.participant_id:
+                raise PermissionError("tenant-owned agent job has incomplete tenant scope")
+            audit=AuditService(
+                self.db,
+                pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+                pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+            )
+            audit.append(
+                event_type="AGENT_JOB_CLAIMED",
+                actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+                tenant=AuditTenantScope(row.organisation_id,row.participant_id),
+                subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
+                outcome=AuditOutcome.PENDING,
+                trace=TraceContext(
+                    correlation_id=row.correlation_id,causation_id=row.causation_id,
+                    operation_id=row.operation_id,agent_job_id=row.job_id,
+                    event_key=f"agent:{row.job_id}:claimed:{row.delivery_count}",
+                ),
+                metadata={
+                    "job_type":row.job_type,"purpose":row.purpose,
+                    "delivery_count":row.delivery_count,"payload_sha256":row.payload_sha256,
+                },
+            )
         self.db.flush()
         return self._job(row)
 
@@ -697,17 +702,23 @@ class SqlAlchemyAgentJobStore:
             raise AgentReplayConflict("result operation_id mismatch")
         payload = result.safe_dict()
         digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
-        audit=AuditService(
-            self.db,
-            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
-            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
-        )
-        tenant=AuditTenantScope(row.organisation_id,row.participant_id) if row.organisation_id else AuditTenantScope.system()
+        audit=None
+        tenant=None
+        if row.organisation_id is not None or row.participant_id is not None:
+            if not row.organisation_id or not row.participant_id:
+                raise PermissionError("tenant-owned agent job has incomplete tenant scope")
+            audit=AuditService(
+                self.db,
+                pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+                pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+            )
+            tenant=AuditTenantScope(row.organisation_id,row.participant_id)
         if row.state == AgentJobState.COMPLETED.value:
             if row.result_sha256 != digest:
                 raise AgentReplayConflict("incompatible duplicate agent result")
-            audit.append(
-                event_type="AGENT_REPLAY_CONVERGED",
+            if audit is not None and tenant is not None:
+                audit.append(
+                    event_type="AGENT_REPLAY_CONVERGED",
                 actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
                 tenant=tenant,
                 subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
