@@ -257,6 +257,26 @@ def set_secret(
         raise _handle_error(exc) from None
 
 
+@integrations_router.post("/integrations/{integration_type}/{connection_id}/secret/revoke")
+def revoke_secret(
+    integration_type: str,
+    connection_id: str,
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(manage_integrations),
+    _: None = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _https_secret_boundary(request)
+    if integration_type not in {"wb","ozon"}:
+        raise HTTPException(status_code=400, detail="Credential revoke is allowed only for WB/Ozon")
+    try:
+        return _service(request, db).revoke_secret(
+            integration_type, connection_id, user_id=identity.user_id
+        )
+    except Exception as exc:
+        raise _handle_error(exc) from None
+
+
 @integrations_router.post("/integrations/{integration_type}/{connection_id}/check")
 def check_integration(
     integration_type: str,
