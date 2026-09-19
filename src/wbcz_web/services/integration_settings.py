@@ -122,11 +122,12 @@ class IntegrationSettingsService:
         user_id: int | None = None,
         outcome: AuditOutcome = AuditOutcome.SUCCESS,
         event_key_suffix: str | None = None,
+        machine_principal: str | None = None,
     ) -> None:
         actor = (
             ActorContext(ActorKind.USER, user_id=user_id)
             if actor_kind is ActorKind.USER
-            else ActorContext(actor_kind, machine_principal=f"agent-binding:{subject_id}")
+            else ActorContext(actor_kind, machine_principal=machine_principal or "windows-agent")
         )
         trace = self._trace()
         AuditService(
@@ -725,6 +726,7 @@ class IntegrationSettingsService:
         evidence_sha256: str | None = None,
         actor_kind: ActorKind = ActorKind.USER,
         user_id: int | None = None,
+        machine_principal: str | None = None,
     ) -> None:
         check.completed_at = _now()
         check.overall_status = overall
@@ -760,6 +762,7 @@ class IntegrationSettingsService:
             outcome=AuditOutcome.SUCCESS if event == "CONNECTION_CHECK_COMPLETED" else AuditOutcome.FAILED,
             metadata=metadata,
             event_key_suffix=check.id,
+            machine_principal=machine_principal,
         )
 
     def check(self, kind: str, object_id: str, *, user_id: int) -> dict[str, Any]:
@@ -855,7 +858,27 @@ class IntegrationSettingsService:
                 row.wb_sid, row.wb_tin = identity.sid, identity.tin
                 row.connection_state = verified.connection_state.value
                 row.last_verified_at = _now()
-                if identity.tin != self.scope.participant_inn:
+                duplicate = self.db.scalar(select(WbConnectionRecord).where(
+                    WbConnectionRecord.id != row.id,
+                    WbConnectionRecord.organisation_id == self.scope.organisation_id,
+                    WbConnectionRecord.participant_id == self.scope.participant_id,
+                    WbConnectionRecord.environment == row.environment,
+                    WbConnectionRecord.wb_sid == identity.sid,
+                    WbConnectionRecord.wb_tin == identity.tin,
+                    WbConnectionRecord.is_enabled.is_(True),
+                    WbConnectionRecord.archived_at.is_(None),
+                ).limit(1))
+                if duplicate is not None:
+                    row.last_error_code = "CONFIG_MISSING"
+                    self._complete_check(
+                        check, overall="ERROR",
+                        components={"WB_SELLER_INFO":{"status":"ERROR","reason_code":"CONFIG_MISSING"}},
+                        error_code="CONFIG_MISSING",
+                        redacted_message="Trusted duplicate WB seller identity is already configured.",
+                        remote_identity={"sid":identity.sid,"tin":identity.tin},
+                        evidence_sha256=evidence, user_id=user_id,
+                    )
+                elif identity.tin != self.scope.participant_inn:
                     row.last_error_code = "REMOTE_IDENTITY_MISMATCH"
                     self._complete_check(
                         check, overall="ERROR",
@@ -883,7 +906,15 @@ class IntegrationSettingsService:
         check, reused = self._start_check("ozon", row, check_kind="LOCAL_ONLY", user_id=user_id)
         if reused:
             return {**self.health_dto(check), "reused": True}
-        configured = bool(row.client_id and self._secret_ref("ozon", row))
+        secret_ref = self._secret_ref("ozon", row)
+        provider_configured = False
+        if secret_ref:
+            try:
+                self.secret_provider.get(secret_ref)
+                provider_configured = True
+            except SecretProviderError:
+                provider_configured = False
+        configured = bool(row.client_id and provider_configured)
         expired = bool(row.api_key_expires_at and row.api_key_expires_at <= _now())
         row.local_validation_state = "CONFIGURED" if configured and not expired else "INCOMPLETE"
         row.wire_readiness = "BLOCKED"
@@ -891,7 +922,7 @@ class IntegrationSettingsService:
         row.last_check_at = _now()
         components = {
             "LOCAL_CONFIGURATION":{"status":"READY" if configured else "ERROR"},
-            "SECRET":{"status":"READY" if self._secret_ref("ozon", row) else "ERROR"},
+            "SECRET":{"status":"READY" if provider_configured else "ERROR"},
             "REMOTE_WIRE":{"status":"BLOCKED","reason_code":"CONTRACT_BLOCKED"},
         }
         self._complete_check(
@@ -907,19 +938,21 @@ class IntegrationSettingsService:
         check, reused = self._start_check("suz", row, check_kind="LOCAL_ONLY", user_id=user_id)
         if reused:
             return {**self.health_dto(check), "reused": True}
+        binding = AgentBindingService(self.db).primary_for_active_scope()
         configured = bool(row.oms_id and row.oms_connection and row.environment)
-        row.local_config_state = "CONFIGURED" if configured else "INCOMPLETE"
+        row.local_config_state = "CONFIGURED" if configured and binding is not None else "INCOMPLETE"
         row.wire_readiness = "BLOCKED"
         row.blocker_code = "OFFICIAL_SUZ_PROGRAMMER_MANUAL_NOT_PINNED"
         row.last_check_at = _now()
         self._complete_check(
             check,
-            overall="BLOCKED" if configured else "ERROR",
+            overall="BLOCKED" if configured and binding is not None else "ERROR",
             components={
                 "LOCAL_CONFIGURATION":{"status":"READY" if configured else "ERROR"},
+                "AGENT_REACHABILITY":{"status":"READY" if binding is not None else "ERROR","reason_code":None if binding is not None else "AGENT_OFFLINE"},
                 "SUZ_CORE_WIRE":{"status":"BLOCKED","reason_code":"CONTRACT_BLOCKED"},
             },
-            error_code=None if configured else "CONFIG_MISSING",
+            error_code=None if configured and binding is not None else ("AGENT_OFFLINE" if binding is None else "CONFIG_MISSING"),
             redacted_message="Full SUZ wire remains blocked on pinned official programmer manual.",
             user_id=user_id,
         )
@@ -954,7 +987,11 @@ class IntegrationSettingsService:
         if cert_raw.get("thumbprint"):
             thumb = re.sub(r"[^0-9A-F]", "", str(cert_raw.get("thumbprint")).upper())[:160]
             valid_from, valid_to = _parse_dt(cert_raw.get("valid_from")), _parse_dt(cert_raw.get("valid_to"))
+            subject_text = str(cert_raw.get("subject") or "")
             cert_inn = str(cert_raw.get("certificate_inn") or "") or None
+            if cert_inn is None and subject_text:
+                matched = re.search(r"(?:OID\.1\.2\.643\.100\.4|INN|ИНН)\s*[=:]\s*(\d{10}|\d{12})", subject_text, re.IGNORECASE)
+                cert_inn = matched.group(1) if matched else None
             expiry = certificate_expiry_status(
                 valid_to,
                 critical_days=int(getattr(self.config, "certificate_expiry_critical_days", 7)),
@@ -963,12 +1000,20 @@ class IntegrationSettingsService:
             match = "MATCH" if cert_inn == self.scope.participant_inn else ("MISMATCH" if cert_inn else "UNKNOWN")
             has_key = bool(cert_raw.get("has_private_key"))
             compatible = str(cert_raw.get("compatibility") or "") == "GOST_CRYPTOPRO"
-            ready = has_key and compatible and expiry in {"VALID","EXPIRING_SOON","EXPIRING_CRITICAL"} and match == "MATCH"
+            not_yet_valid = bool(valid_from and valid_from > _now())
+            selection_match = not conn.desired_certificate_ref or conn.desired_certificate_ref == thumb
+            ready = (
+                has_key and compatible and not not_yet_valid
+                and expiry in {"VALID","EXPIRING_SOON","EXPIRING_CRITICAL"}
+                and match == "MATCH" and selection_match
+            )
             reason = (
                 "CERTIFICATE_PARTICIPANT_MISMATCH" if match == "MISMATCH"
                 else "CERTIFICATE_NO_PRIVATE_KEY" if not has_key
                 else "CRYPTO_PROVIDER_UNAVAILABLE" if not compatible
+                else "CERTIFICATE_NOT_YET_VALID" if not_yet_valid
                 else "CERTIFICATE_EXPIRED" if expiry == "EXPIRED"
+                else "CERTIFICATE_NOT_FOUND" if not selection_match
                 else None
             )
             cert = AgentCertificateObservationRecord(
@@ -976,7 +1021,7 @@ class IntegrationSettingsService:
                 organisation_id=binding.organisation_id,
                 participant_id=binding.participant_id,
                 thumbprint=thumb,
-                subject=str(cert_raw.get("subject") or "")[:2000] or None,
+                subject=subject_text[:2000] or None,
                 issuer=str(cert_raw.get("issuer") or "")[:2000] or None,
                 certificate_inn=cert_inn if cert_inn and cert_inn.isdigit() and len(cert_inn) in {10,12} else None,
                 valid_from=valid_from,
@@ -1019,11 +1064,17 @@ class IntegrationSettingsService:
             "true_api_auth": auth_ready,
             "read_probe": "NOT_TESTED",
         }
-        overall = (
-            "READY" if result.outcome == "HEALTH_READY"
-            else "DEGRADED" if result.outcome == "HEALTH_DEGRADED"
-            else "ERROR"
+        observed_cert = (
+            self.db.get(AgentCertificateObservationRecord, conn.observed_certificate_observation_id)
+            if conn.observed_certificate_observation_id else None
         )
+        backend_cert_ready = bool(observed_cert and observed_cert.readiness_state == "READY")
+        if result.outcome == "HEALTH_READY" and backend_cert_ready and auth_ready:
+            overall = "READY"
+        elif result.outcome in {"HEALTH_READY","HEALTH_DEGRADED"} and auth_ready:
+            overall = "DEGRADED"
+        else:
+            overall = "ERROR"
         evidence = hashlib.sha256(canonical_json({
             "components":components,"certificate":cert_snapshot,"outcome":result.outcome,
         }).encode("utf-8")).hexdigest()
@@ -1031,6 +1082,7 @@ class IntegrationSettingsService:
             check, overall=overall, components=components,
             error_code=result.error_code, certificate=cert_snapshot,
             evidence_sha256=evidence, actor_kind=ActorKind.WINDOWS_AGENT,
+            machine_principal=f"agent-binding:{binding.id}",
         )
         conn.last_check_at = check.completed_at
         conn.last_error_code = _safe_error(result.error_code)
