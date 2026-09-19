@@ -12,6 +12,8 @@ from wbcz.windows_agent import AgentJob, AgentJobState, AgentJobType, P0_PG
 from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentJobRecord
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
+from wbcz_web.services.tenant import active_tenant, scoped_agent_job
+from wbcz_web.services.tenant import active_tenant
 
 
 REFERENCE_PRODUCTS_PURPOSE = "REFERENCE_PRODUCTS"
@@ -44,7 +46,7 @@ class ReferenceProductsService:
             job_type=job_type,
             operation_id=f"m2read:{request_uuid}",
             pg=P0_PG,
-            expected_inn=self.config.own_inn,
+            expected_inn=active_tenant(self.db).participant_inn,
             read_payload=canonical,
         )
         self.jobs.enqueue(job, purpose=REFERENCE_PRODUCTS_PURPOSE)
@@ -57,10 +59,10 @@ class ReferenceProductsService:
         }
 
     def self_participant(self) -> dict[str, Any]:
-        return self.queue(AgentJobType.PARTICIPANTS, {"inns": [self.config.own_inn]})
+        return self.queue(AgentJobType.PARTICIPANTS, {"inns": [active_tenant(self.db).participant_inn]})
 
     def status(self, request_id: str) -> dict[str, Any]:
-        row = self.db.get(AgentJobRecord, request_id)
+        row = scoped_agent_job(self.db, request_id)
         if row is None or row.purpose != REFERENCE_PRODUCTS_PURPOSE:
             raise KeyError(request_id)
         state = AgentJobState(row.state)

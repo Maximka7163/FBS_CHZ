@@ -82,16 +82,13 @@ def make_xlsx(tmp_path: Path) -> Callable[..., Path]:
 
 @pytest.fixture
 def wb_regression_rows() -> list[dict[str, Any]]:
-    """Synthetic regression, NOT the unavailable REF_WB_archive_9.xlsx.
+    """Fully synthetic 238-row WB regression with the historical decision distribution."""
 
-    Four verbatim representative records from the task, followed by synthetic
-    records matching only the verified counts. Long fiscal IDs are text.
-    """
-    rows = [
+    rows: list[dict[str, Any]] = [
         {
-            "№ задания": "5507586445",
-            "Стикер": "56873819376",
-            "КИЗ": "0102900897077841215nylqhB241sOO",
+            "№ задания": "TEST-TASK-000001",
+            "Стикер": "TEST-STICKER-000001",
+            "КИЗ": "SYNTHETIC-KIZ-00000001",
             "Номер чека": "",
             "Стоимость": 2367,
             "Валюта": "₽",
@@ -101,9 +98,9 @@ def wb_regression_rows() -> list[dict[str, Any]]:
             "Признак продажи юрлицу": "Нет",
         },
         {
-            "№ задания": "5494037512",
-            "Стикер": "56820039412",
-            "КИЗ": "0102900897077902215yT'U257>?uV,",
+            "№ задания": "TEST-TASK-000002",
+            "Стикер": "TEST-STICKER-000002",
+            "КИЗ": "SYNTHETIC-KIZ-00000002",
             "Номер чека": "",
             "Стоимость": 4939,
             "Валюта": "₽",
@@ -113,56 +110,56 @@ def wb_regression_rows() -> list[dict[str, Any]]:
             "Признак продажи юрлицу": "Нет",
         },
         {
-            "№ задания": "5471369116",
-            "Стикер": "56703662970",
-            "КИЗ": "0102901413694443215O*(HZaeKcg:T",
-            "Номер чека": "211671",
+            "№ задания": "TEST-TASK-000003",
+            "Стикер": "TEST-STICKER-000003",
+            "КИЗ": "SYNTHETIC-KIZ-00000003",
+            "Номер чека": "TEST-RECEIPT-000003",
             "Стоимость": 4542,
             "Валюта": "₽",
-            "Номер фискального накопителя": "7380440903834317",
+            "Номер фискального накопителя": "TEST-FN-000003",
             "Дата": "04:58:00 19.08.2026",
             "Тип операции": "Продажа",
             "Признак продажи юрлицу": "Нет",
         },
         {
-            "№ задания": "5470378133",
-            "Стикер": "56701613743",
-            "КИЗ": "0102900897077902215BOKABb=hS;'w",
-            "Номер чека": "246721",
+            "№ задания": "TEST-TASK-000004",
+            "Стикер": "TEST-STICKER-000004",
+            "КИЗ": "SYNTHETIC-KIZ-00000004",
+            "Номер чека": "TEST-RECEIPT-000004",
             "Стоимость": 4795,
             "Валюта": "₽",
-            "Номер фискального накопителя": "7384440901398402",
+            "Номер фискального накопителя": "TEST-FN-000004",
             "Дата": "22:45:00 15.08.2026",
             "Тип операции": "Возврат",
             "Признак продажи юрлицу": "Нет",
         },
     ]
-    # Totals including the representatives:
-    # sale: 63 dated + 13 undated; return: 5 dated + 157 undated.
-    for operation, dated, count in (
-        ("Продажа", True, 62),
-        ("Продажа", False, 12),
-        ("Возврат", True, 4),
-        ("Возврат", False, 156),
-    ):
+
+    def add(operation: str, dated: bool, count: int) -> None:
         for _ in range(count):
             number = len(rows) + 1
             rows.append({
-                "№ задания": str(5500000000 + number),
-                "Стикер": str(56800000000 + number),
-                "КИЗ": f"010290089707790221SYNTH{number:07d}",
-                "Номер чека": str(210000 + number) if dated else "",
+                "№ задания": f"TEST-TASK-{number:06d}",
+                "Стикер": f"TEST-STICKER-{number:06d}",
+                "КИЗ": f"SYNTHETIC-KIZ-{number:08d}",
+                "Номер чека": f"TEST-RECEIPT-{number:06d}" if dated else "",
                 "Стоимость": 2000 + number,
                 "Валюта": "₽",
-                "Номер фискального накопителя": (
-                    "7380440903834317" if dated else ""
-                ),
-                "Дата": (
-                    "04:58:00 19.08.2026"
-                    if dated and operation == "Продажа"
-                    else "22:45:00 15.08.2026" if dated else ""
-                ),
+                "Номер фискального накопителя": f"TEST-FN-{number:06d}" if dated else "",
+                "Дата": "04:58:00 19.08.2026" if dated else "",
                 "Тип операции": operation,
                 "Признак продажи юрлицу": "Нет",
             })
+
+    add("Продажа", False, 12)
+    add("Продажа", True, 62)
+    add("Возврат", False, 136)
+    add("Возврат", True, 2)
+    add("Возврат", False, 12)
+    add("Возврат", True, 2)
+    add("Возврат", False, 4)
+    add("Возврат", False, 4)
+
+    assert len(rows) == 238
     return rows
+

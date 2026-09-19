@@ -363,7 +363,8 @@ def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint()
     from wbcz_web.auth import hash_password
     from wbcz_web.config import WebConfig
     from wbcz_web.main import create_app
-    from wbcz_web.models import AgentJobRecord, Base, User
+    from wbcz_web.models import AgentJobRecord, Base
+    from wbcz_web.services.authorization import BootstrapService
 
     engine = create_engine(db_url, future=True)
     Base.metadata.drop_all(engine)
@@ -380,13 +381,24 @@ def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint()
     request_id = None
     try:
         with factory() as db:
-            db.add(User(username="owner", password_hash=hash_password("pw-strong-enough"), is_active=True, is_admin=True))
+            BootstrapService(db).bootstrap(
+                username="owner",password="pw-strong-enough",organisation_name="M1 Test Org",participant_inn="1234567890"
+            )
             db.commit()
         with TestClient(app) as client:
             assert client.post("/api/cis-inventory/info", json={"cises":[CIS]}).status_code in (401, 403)
             csrf = client.get("/api/auth/csrf").json()["csrf_token"]
             login = client.post("/api/auth/login", json={"username":"owner","password":"pw-strong-enough"}, headers={"X-CSRF-Token":csrf})
             assert login.status_code == 200
+            scopes=client.get("/api/security/scopes")
+            assert scopes.status_code==200 and scopes.json()["scopes"]
+            target=scopes.json()["scopes"][0]
+            switched=client.post(
+                "/api/security/scope",
+                json={"organisation_id":target["organisation_id"],"participant_id":target["participants"][0]["id"]},
+                headers={"X-CSRF-Token":csrf},
+            )
+            assert switched.status_code==200
             queued = client.post("/api/cis-inventory/info", json={"cises":[CIS]}, headers={"X-CSRF-Token":csrf})
             assert queued.status_code == 200
             request_id = queued.json()["request_id"]

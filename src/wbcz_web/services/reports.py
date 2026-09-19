@@ -48,6 +48,7 @@ from wbcz.windows_agent import AgentJob, AgentJobType, AgentResult, P0_PG
 from wbcz_web.models.reports import ReportArtifactRecord, ReportJobRecord, ReportSnapshotRecord
 from wbcz_web.repositories.agent import SqlAlchemyAgentJobStore
 from wbcz_web.repositories.reports import ClaimedReportJob, SqlReportRepository, SqlUploadBindingStore
+from wbcz_web.services.tenant import bind_tenant_scope
 
 
 class EnvironmentArtifactKeyProvider(ArtifactKeyProvider):
@@ -831,6 +832,17 @@ class TrueApiReportOrchestrator:
         delay_seconds: int = 0,
     ) -> AgentJob:
         normalized = validate_report_agent_payload(job_type.value, payload)
+        report = self.db.get(ReportJobRecord, report_job_id)
+        if report is None:
+            raise KeyError(report_job_id)
+        if report.organisation_id and report.participant_id:
+            scope = bind_tenant_scope(
+                self.db,
+                organisation_id=report.organisation_id,
+                participant_id=report.participant_id,
+            )
+            if scope.participant_inn != self.participant_inn:
+                raise ReportSecurityError("report tenant participant mismatch")
         job = AgentJob(
             job_id=_stable_report_agent_job_id(job_type.value, report_job_id, seed),
             job_type=job_type,

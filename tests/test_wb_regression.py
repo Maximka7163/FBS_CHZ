@@ -355,6 +355,9 @@ def test_regression_fixture_matches_verified_counts(
     rows = wb_regression_rows
     assert len(rows) == 238
     assert len({row["КИЗ"] for row in rows}) == 238
+    assert all(str(row["КИЗ"]).startswith("SYNTHETIC-KIZ-") for row in rows)
+    assert all(str(row["№ задания"]).startswith("TEST-TASK-") for row in rows)
+    assert all(str(row["Стикер"]).startswith("TEST-STICKER-") for row in rows)
     assert Counter(row["Тип операции"] for row in rows) == {
         "Продажа": 76, "Возврат": 162,
     }
@@ -377,6 +380,7 @@ def test_regression_fixture_matches_verified_counts(
     events = [row.event for row in parsed.rows]
     assert len({event.event_id for event in events}) == 238
     assert len({event.kiz for event in events}) == 238
+    assert all(event.kiz.startswith("SYNTHETIC-KIZ-") for event in events)
     assert Counter(event.operation for event in events) == {
         Operation.SALE: 76, Operation.RETURN: 162,
     }
@@ -392,15 +396,11 @@ def test_regression_fixture_matches_verified_counts(
     assert sum(event.fiscal_drive_number is None for event in events) == 170
     assert all(event.currency == "RUB" for event in events)
     assert all(event.legal_entity_sale is False for event in events)
-
     assert events[0].occurred_at is None
-    assert events[0].kiz == "0102900897077841215nylqhB241sOO"
-    assert events[1].kiz == "0102900897077902215yT'U257>?uV,"
+    assert events[1].occurred_at is None
     assert events[2].occurred_at == datetime(2026, 8, 19, 1, 58, tzinfo=timezone.utc)
-    assert events[2].fiscal_drive_number == "7380440903834317"
-    assert events[3].kiz == "0102900897077902215BOKABb=hS;'w"
+    assert events[2].fiscal_drive_number == "TEST-FN-000003"
     assert events[3].occurred_at == datetime(2026, 8, 15, 19, 45, tzinfo=timezone.utc)
-
 
 def test_regression_238_import_reopen_overlap_and_dry_run(
     tmp_path, wb_regression_rows, make_xlsx,

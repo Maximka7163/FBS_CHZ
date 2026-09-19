@@ -13,7 +13,7 @@ class StrictModel(BaseModel):
 
 class LoginRequest(StrictModel):
     username: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=1, max_length=1024)
+    password: str = Field(min_length=1, max_length=4096)
 
 
 class ControlRequest(StrictModel):

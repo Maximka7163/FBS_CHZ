@@ -23,10 +23,11 @@ from wbcz.windows_agent import (
 )
 from wbcz.write_pipeline import ExactDocument, InvalidWriteOperation, WriteState
 from wbcz_web.config import WebConfig
-from wbcz_web.models import AgentJobRecord, CheckRecord, ControlRun
+from wbcz_web.models import AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
 from wbcz.m11_reports import FilesystemReportArtifactStore
+from wbcz_web.services.tenant import active_tenant, bind_tenant_scope, optional_tenant
 from wbcz_web.services.reports import (
     EnvironmentArtifactKeyProvider,
     REPORT_AGENT_PURPOSE,
@@ -39,6 +40,14 @@ CONTROL_CIS = "CONTROL_CIS"
 WRITE = "WRITE"
 POLL = "POLL"
 RECONCILIATION_CIS = "RECONCILIATION_CIS"
+
+def _tenant_or_legacy_inn(db: Session, config: WebConfig) -> str:
+    scope = optional_tenant(db)
+    if scope is not None:
+        return scope.participant_inn
+    if db.get(BootstrapRecord, 1) is not None:
+        raise PermissionError("active tenant scope required")
+    return config.own_inn
 
 
 class ExactDocumentAssembler(Protocol):
@@ -92,10 +101,15 @@ class AgentControlService:
         self.config = config
         self.imports = ImportRepository(db)
         self.jobs = SqlAlchemyAgentJobStore(db, lease_seconds=config.agent_job_lease_seconds)
+        self.scope = optional_tenant(db)
+        if self.scope is None and db.get(BootstrapRecord, 1) is not None:
+            raise PermissionError("active tenant scope required")
 
     def run(self, import_id: str, user_id: int, mode: str, event_ids: list[str] | None = None) -> dict:
         selected = _select_event_ids(self.imports, import_id, event_ids)
         run = ControlRun(
+            organisation_id=self.scope.organisation_id if self.scope else None,
+            participant_id=self.scope.participant_id if self.scope else None,
             import_id=import_id,
             user_id=user_id,
             mode=getattr(mode, "value", str(mode)),
@@ -116,7 +130,7 @@ class AgentControlService:
                 job_type=AgentJobType.CIS_CHECK,
                 operation_id=operation_id,
                 pg=P0_PG,
-                expected_inn=self.config.own_inn,
+                expected_inn=self.scope.participant_inn if self.scope else self.config.own_inn,
                 cises=(event.kiz,),
             )
             self.jobs.enqueue(
@@ -214,6 +228,17 @@ class AgentOrchestrationBroker:
     def submit_result(self, machine_token: str, result: AgentResult) -> None:
         self.machine_auth.verify(machine_token)
         metadata = self.job_store.metadata(result.job_id, lock=True)
+        job_row = self.db.get(AgentJobRecord, result.job_id)
+        if job_row is None:
+            raise AgentReplayConflict("unknown agent job")
+        if job_row.organisation_id and job_row.participant_id:
+            bind_tenant_scope(
+                self.db,
+                organisation_id=job_row.organisation_id,
+                participant_id=job_row.participant_id,
+            )
+        elif self.db.get(BootstrapRecord, 1) is not None:
+            raise AgentReplayConflict("post-bootstrap agent job has no tenant ownership")
         if metadata.job.operation_id != result.operation_id:
             raise AgentReplayConflict("result operation_id mismatch")
 
@@ -235,7 +260,7 @@ class AgentOrchestrationBroker:
             self.job_store.complete(result)
             TrueApiReportOrchestrator(
                 self.db,
-                participant_inn=self.config.own_inn,
+                participant_inn=_tenant_or_legacy_inn(self.db, self.config),
                 agent_lease_seconds=self.config.agent_job_lease_seconds,
                 reports_enabled=self.config.true_api_reports_enabled,
             ).handle_agent_result(metadata, result)
@@ -243,9 +268,15 @@ class AgentOrchestrationBroker:
             return
 
         # Core applies write/poll state transitions before the application-level
-        # follow-up is scheduled. CIS checks are intentionally decision-free in
-        # the Windows process, so core only marks those jobs completed.
-        self.core.submit_result(machine_token, result)
+        # follow-up is scheduled. Construct the P0 core with the already verified
+        # active participant INN; frozen P0 code remains unchanged.
+        tenant_core = VpsAgentBroker(
+            write_store=self.write_store,
+            job_store=self.job_store,
+            machine_auth=self.machine_auth,
+            own_inn=_tenant_or_legacy_inn(self.db, self.config),
+        )
+        tenant_core.submit_result(machine_token, result)
         if metadata.purpose == CONTROL_CIS:
             self._apply_control_cis(metadata.event_id, metadata.control_run_id, result)
         elif metadata.purpose == WRITE:
@@ -292,7 +323,7 @@ class AgentOrchestrationBroker:
         snapshot: KiState | None = None
         try:
             snapshot = self._single_state(event, result)
-            outcome = decide(event, snapshot, self.config.own_inn)
+            outcome = decide(event, snapshot, _tenant_or_legacy_inn(self.db, self.config))
         except Exception as exc:
             outcome = Outcome(Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED", type(exc).__name__)
         if self.imports.history_order_ambiguous(event.kiz):
@@ -347,7 +378,7 @@ class AgentOrchestrationBroker:
             document_type=document_type,
             operation_reason=operation_reason,
             pg=P0_PG,
-            expected_inn=self.config.own_inn,
+            expected_inn=_tenant_or_legacy_inn(self.db, self.config),
             document=document,
         )
         req = self.write_store.signing_request(op.operation_id)
@@ -387,7 +418,7 @@ class AgentOrchestrationBroker:
             job_type=AgentJobType.POLL_DOCUMENT,
             operation_id=operation_id,
             pg=P0_PG,
-            expected_inn=self.config.own_inn,
+            expected_inn=_tenant_or_legacy_inn(self.db, self.config),
             document_id=document_id,
         )
         available = datetime.now(timezone.utc) + timedelta(seconds=self._poll_delay(attempt))
@@ -423,7 +454,7 @@ class AgentOrchestrationBroker:
                 job_type=AgentJobType.CIS_CHECK,
                 operation_id=op.operation_id,
                 pg=P0_PG,
-                expected_inn=self.config.own_inn,
+                expected_inn=_tenant_or_legacy_inn(self.db, self.config),
                 cises=(event.kiz,),
             )
             self.job_store.enqueue(job, purpose=RECONCILIATION_CIS, event_id=op.event_id)
@@ -442,7 +473,7 @@ class AgentOrchestrationBroker:
         event = record_to_event(row)
         try:
             state = self._single_state(event, result)
-            outcome = decide(event, state, self.config.own_inn)
+            outcome = decide(event, state, op.expected_inn)
             expected_reason = (
                 "SALE_ALREADY_WITHDRAWN_DISTANCE"
                 if op.document_type == "LK_RECEIPT"

@@ -1,12 +1,8 @@
-import os
-from pathlib import Path
 from fastapi.testclient import TestClient
 from wbcz_ui.api import create_app
 
-REF = Path(os.environ.get('WBCZ_REF_XLSX', '/mnt/data/REF_WB_archive_9.xlsx'))
 
-
-def test_status_and_history_api(tmp_path):
+def test_status_and_history_api(tmp_path, wb_regression_rows, make_xlsx):
     client = TestClient(create_app(tmp_path / 'api.sqlite'))
     status = client.get('/api/status').json()
     assert status['mode'] == 'offline-dry-run'
@@ -15,7 +11,8 @@ def test_status_and_history_api(tmp_path):
     assert status['document_signing'] is False
     assert status['submission'] is False
     assert status['product_group'] == 'lp'
-    with REF.open('rb') as f:
+    source=make_xlsx(wb_regression_rows,"REF_WB_archive_9.xlsx")
+    with source.open('rb') as f:
         response = client.post('/api/imports', files={'file': ('REF_WB_archive_9.xlsx', f, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
     assert response.status_code == 200
     data = response.json()
@@ -28,9 +25,10 @@ def test_status_and_history_api(tmp_path):
     assert history[0]['unique_kiz'] == 238
 
 
-def test_events_check_detail_preview_api(tmp_path):
+def test_events_check_detail_preview_api(tmp_path, wb_regression_rows, make_xlsx):
     client = TestClient(create_app(tmp_path / 'api.sqlite'))
-    with REF.open('rb') as f:
+    source=make_xlsx(wb_regression_rows,"REF_WB_archive_9.xlsx")
+    with source.open('rb') as f:
         imported = client.post('/api/imports', files={'file': ('REF_WB_archive_9.xlsx', f)}).json()
     fp = imported['fingerprint']
     before = client.get(f'/api/imports/{fp}/events').json()

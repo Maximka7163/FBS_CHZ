@@ -9,6 +9,7 @@ from wbcz_web.models import CheckRecord,ControlRun,PreviewItem,PreviewRecord
 from wbcz_web.repositories import AuditRepository,ImportRepository
 from .imports import record_to_event
 from .mock_true_api import DeterministicMockTrueApi
+from .tenant import active_tenant
 class OperationMode(StrEnum):AUTO="AUTO";CONTROL="CONTROL";WITHDRAW_ONLY="WITHDRAW_ONLY";RETURN_ONLY="RETURN_ONLY"
 _REASON_TEXT={"NOT_CHECKED":"Событие ещё не проверено","OWNER_MISMATCH":"Владелец КИЗ не совпадает с выбранной организацией","OWNER_UNKNOWN":"Владелец КИЗ не определён","SALE_RECEIPT_MISSING":"Продажа без данных чека — автоматический вывод отключён","RETURN_RECEIPT_MISSING":"Возврат без данных чека — автоматический возврат отключён","WRONG_PRODUCT_GROUP":"КИЗ относится к другой товарной группе","UNKNOWN_CHZ_STATUS":"Неизвестное состояние Честного знака","NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL":"Причина выбытия требует ручной проверки","LEGAL_ENTITY_RULES_UNDEFINED":"Требуется ручная проверка правила продажи","STATE_LOOKUP_OR_NORMALIZATION_FAILED":"Не удалось получить состояние КИЗ","SALE_ALREADY_WITHDRAWN_DISTANCE":"Операция уже не требуется","RETURN_ALREADY_IN_CIRCULATION":"Операция уже не требуется","HISTORY_ORDER_AMBIGUOUS":"История событий КИЗ неоднозначна","MODE_REQUIRES_RETURN":"По текущему состоянию требуется возврат в оборот","MODE_REQUIRES_WITHDRAW":"По текущему состоянию требуется вывод из оборота"}
 class ControlService:
@@ -22,7 +23,7 @@ class ControlService:
    if not requested:raise ValueError("Не выбран ни один КИЗ")
    if any(x not in aset for x in requested):raise ValueError("КИЗ не относится к выбранному импорту")
    wanted=set(requested);selected=[x for x in allowed if x in wanted]
-  provider=DeterministicMockTrueApi((record_to_event(r) for r in ordered),self.own_inn);run=ControlRun(import_id=import_id,user_id=user_id,mode=mode.value,provider="mock-v04-deterministic");self.db.add(run);self.db.flush();outcomes=[]
+  scope=active_tenant(self.db);provider=DeterministicMockTrueApi((record_to_event(r) for r in ordered),self.own_inn);run=ControlRun(organisation_id=scope.organisation_id,participant_id=scope.participant_id,import_id=import_id,user_id=user_id,mode=mode.value,provider="mock-v04-deterministic");self.db.add(run);self.db.flush();outcomes=[]
   for eid in selected:
    row=self.imports.event(eid);event=record_to_event(row);snapshot=None
    try:snapshot=provider.get_ki_state(event.kiz);outcome=decide(event,snapshot,self.own_inn)
@@ -45,7 +46,7 @@ class ControlService:
    if eligible:included.append(item)
    else:reason=reason or (check.reason if check else "NOT_CHECKED");item.update({"reason":reason,"reason_text":_REASON_TEXT.get(reason,reason)});excluded.append(item)
    snap.append((eid,eligible,decision,reason))
-  withdraw=sum(x["decision"]==Decision.READY_TO_WITHDRAW.value for x in included);returns=sum(x["decision"]==Decision.READY_TO_RETURN.value for x in included);p=PreviewRecord(import_id=import_id,user_id=user_id,mode=mode.value,selected_count=len(selected),eligible_count=len(included),withdraw_count=withdraw,return_count=returns,excluded_count=len(excluded));self.db.add(p);self.db.flush()
+  withdraw=sum(x["decision"]==Decision.READY_TO_WITHDRAW.value for x in included);returns=sum(x["decision"]==Decision.READY_TO_RETURN.value for x in included);scope=active_tenant(self.db);p=PreviewRecord(organisation_id=scope.organisation_id,participant_id=scope.participant_id,import_id=import_id,user_id=user_id,mode=mode.value,selected_count=len(selected),eligible_count=len(included),withdraw_count=withdraw,return_count=returns,excluded_count=len(excluded));self.db.add(p);self.db.flush()
   for eid,inc,d,r in snap:self.db.add(PreviewItem(preview_id=p.id,event_id=eid,included=inc,decision=d,reason=r))
   self.audit.append("PREVIEW_CREATED",user_id=user_id,entity_type="preview",entity_id=p.id,metadata={"import_id":import_id,"mode":mode.value,"selected":len(selected)});return {"preview_id":p.id,"mode":mode.value,"selected_count":len(selected),"eligible_count":len(included),"withdraw_count":withdraw,"return_count":returns,"excluded_count":len(excluded),"included":included,"excluded":excluded,"provider":"mock","production_submission_available":False}
 def event_view(db,row,latest_check=None)->dict:

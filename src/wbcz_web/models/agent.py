@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -20,7 +20,9 @@ class WriteOperationRecord(Base):
     __tablename__ = "write_operations"
 
     operation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    business_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    business_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     event_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     document_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -37,7 +39,7 @@ class WriteOperationRecord(Base):
     certificate_inn: Mapped[str | None] = mapped_column(String(12), nullable=True)
     certificate_valid_from: Mapped[str | None] = mapped_column(String(64), nullable=True)
     certificate_valid_to: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    document_id: Mapped[str | None] = mapped_column(String(512), nullable=True, unique=True)
+    document_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     submit_http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     submit_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     submit_body_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -48,6 +50,8 @@ class WriteOperationRecord(Base):
         CheckConstraint("document_type IN ('LK_RECEIPT','LP_RETURN')", name="ck_write_operations_document_type"),
         CheckConstraint("operation_reason IN ('DISTANCE','REMOTE_SALE_RETURN')", name="ck_write_operations_reason"),
         CheckConstraint("pg = 'lp'", name="ck_write_operations_pg"),
+        UniqueConstraint("organisation_id", "participant_id", "business_fingerprint", name="uq_write_operations_tenant_business_fingerprint"),
+        UniqueConstraint("organisation_id", "participant_id", "document_id", name="uq_write_operations_tenant_document_id"),
         CheckConstraint(
             "state IN (" + ",".join(f"'{value}'" for value in _WRITE_STATES) + ")",
             name="ck_write_operations_state",
@@ -59,7 +63,7 @@ class WriteAuditRecord(Base):
     __tablename__ = "write_audit"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    operation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    operation_id: Mapped[str] = mapped_column(String(64), ForeignKey("write_operations.operation_id", ondelete="CASCADE"), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
     from_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     to_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -71,6 +75,8 @@ class AgentJobRecord(Base):
     __tablename__ = "agent_jobs"
 
     job_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     purpose: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
@@ -100,20 +106,27 @@ class DocumentLifecycleLedgerRecord(Base):
     __tablename__ = "document_lifecycle_ledger"
 
     operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     job_type: Mapped[str] = mapped_column(String(32), nullable=False)
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "participant_id", "request_id", name="uq_document_lifecycle_ledger_tenant_request_id"),
+    )
 
 
 class TurnoverOperationLedgerRecord(Base):
     __tablename__ = "turnover_operation_ledger"
 
     operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     operation_kind: Mapped[str] = mapped_column(String(64), nullable=False)
     document_type: Mapped[str] = mapped_column(String(64), nullable=False)
     document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -134,6 +147,7 @@ class TurnoverOperationLedgerRecord(Base):
             "reconciliation_state IN ('RECONCILIATION_PENDING','RECONCILED','MANUAL_REVIEW')",
             name="ck_turnover_reconciliation_state",
         ),
+        UniqueConstraint("organisation_id", "participant_id", "request_id", name="uq_turnover_operation_ledger_tenant_request_id"),
     )
 
 
@@ -141,7 +155,9 @@ class AggregationOperationLedgerRecord(Base):
     __tablename__ = "aggregation_operation_ledger"
 
     operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     operation_kind: Mapped[str] = mapped_column(String(64), nullable=False)
     document_type: Mapped[str] = mapped_column(String(64), nullable=False)
     document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -161,6 +177,7 @@ class AggregationOperationLedgerRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
+        UniqueConstraint("organisation_id", "participant_id", "request_id", name="uq_aggregation_operation_ledger_tenant_request_id"),
         CheckConstraint("relation_delta IN ('FORM','ADD','REMOVE','DISAGGREGATE')", name="ck_aggregation_relation_delta"),
         CheckConstraint(
             "reconciliation_state IN ('RECONCILIATION_PENDING','RECONCILED','MANUAL_REVIEW')",

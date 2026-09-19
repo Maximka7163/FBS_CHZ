@@ -10,11 +10,12 @@ from wbcz.document_assembler import DocumentAssemblyManualReview
 from wbcz.models import Decision
 from wbcz.write_pipeline import InvalidWriteOperation, WriteState
 from wbcz_web.config import WebConfig
-from wbcz_web.models import AgentJobRecord, CheckRecord, WriteOperationRecord
+from wbcz_web.models import AgentJobRecord, BootstrapRecord, CheckRecord, WriteOperationRecord
 from wbcz_web.repositories import AuditRepository, ImportRepository
 from wbcz_web.services.agent_orchestration import CONTROL_CIS, POLL, RECONCILIATION_CIS, WRITE
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.imports import import_view, record_to_event
+from wbcz_web.services.tenant import active_tenant, optional_tenant
 
 
 READY_DECISIONS = frozenset({Decision.READY_TO_WITHDRAW.value, Decision.READY_TO_RETURN.value})
@@ -400,11 +401,16 @@ def execute_bulk_actions(db: Session, config: WebConfig, import_id: str, user_id
         check = imports.latest_check(row.event_id)
         if check is None or check.decision not in READY_DECISIONS:
             continue
-        existing = db.scalar(
-            select(WriteOperationRecord)
-            .where(WriteOperationRecord.event_id == row.event_id)
-            .limit(1)
-        )
+        scope = optional_tenant(db)
+        if scope is None and db.get(BootstrapRecord,1) is not None:
+            raise PermissionError("active tenant scope required")
+        existing_stmt=select(WriteOperationRecord).where(WriteOperationRecord.event_id==row.event_id)
+        if scope is not None:
+            existing_stmt=existing_stmt.where(
+                WriteOperationRecord.organisation_id==scope.organisation_id,
+                WriteOperationRecord.participant_id==scope.participant_id,
+            )
+        existing=db.scalar(existing_stmt.limit(1))
         if existing is not None:
             already_started += 1
             continue

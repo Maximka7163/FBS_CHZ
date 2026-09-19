@@ -1,23 +1,66 @@
 from __future__ import annotations
 import secrets
-from collections.abc import Iterator
+from collections.abc import Callable,Iterator
 from dataclasses import dataclass
-from fastapi import Depends,Header,HTTPException,Request,status
+from fastapi import Depends,Header,HTTPException,Request
 from sqlalchemy.orm import Session
 from wbcz_web.services import AuthService,AuthenticationError
+from wbcz_web.services.authorization import ActiveScope,AuthorizationError,AuthorizationService,Permission,ScopeRequired
 
 def get_db(request:Request)->Iterator[Session]:
  db=request.app.state.session_factory()
  try:yield db;db.commit()
  except Exception:db.rollback();raise
  finally:db.close()
-def require_csrf(request:Request,x_csrf_token:str|None=Header(default=None,alias="X-CSRF-Token"))->None:
- cookie=request.cookies.get(request.app.state.config.csrf_cookie_name)
- if not cookie or not x_csrf_token or not secrets.compare_digest(cookie,x_csrf_token):raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="CSRF token is missing or invalid")
-@dataclass(frozen=True,slots=True)
-class AuthenticatedIdentity:user_id:int;username:str;is_admin:bool;session_id:str
-def require_user(request:Request,db:Session=Depends(get_db))->AuthenticatedIdentity:
+
+def _session_auth(request:Request,db:Session):
  token=request.cookies.get(request.app.state.config.session_cookie_name)
- try:
-  user,session=AuthService(db,request.app.state.config).authenticate_token(token);return AuthenticatedIdentity(user.id,user.username,user.is_admin,session.id)
- except AuthenticationError as exc:raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail=str(exc)) from exc
+ return AuthService(db,request.app.state.config).authenticate_token(token)
+
+def require_csrf(request:Request,x_csrf_token:str|None=Header(default=None,alias="X-CSRF-Token"),db:Session=Depends(get_db))->None:
+ cookie=request.cookies.get(request.app.state.config.csrf_cookie_name)
+ if not cookie or not x_csrf_token or not secrets.compare_digest(cookie,x_csrf_token):
+  raise HTTPException(status_code=403,detail="CSRF token is missing or invalid")
+ session_token=request.cookies.get(request.app.state.config.session_cookie_name)
+ if session_token:
+  try:_,session=_session_auth(request,db)
+  except AuthenticationError as exc:raise HTTPException(status_code=401,detail="Сессия недействительна") from exc
+  if not AuthService(db,request.app.state.config).csrf_matches(session,x_csrf_token):
+   raise HTTPException(status_code=403,detail="CSRF token is missing or invalid")
+
+@dataclass(frozen=True,slots=True)
+class SessionIdentity:user_id:int;username:str;session_id:str
+
+@dataclass(frozen=True,slots=True)
+class AuthenticatedIdentity:
+ user_id:int;username:str;session_id:str;organisation_id:str|None;participant_id:str|None
+ participant_inn:str|None;role:str|None;permissions:frozenset[str];is_admin:bool=False
+
+def require_session_user(request:Request,db:Session=Depends(get_db))->SessionIdentity:
+ try:user,session=_session_auth(request,db);return SessionIdentity(user.id,user.username,session.id)
+ except AuthenticationError as exc:raise HTTPException(status_code=401,detail="Требуется авторизация") from exc
+
+def require_user(request:Request,db:Session=Depends(get_db))->AuthenticatedIdentity:
+ try:user,session=_session_auth(request,db)
+ except AuthenticationError as exc:raise HTTPException(status_code=401,detail="Требуется авторизация") from exc
+ scope:ActiveScope|None=None
+ try:scope=AuthorizationService(db).resolve_session_scope(user,session,require_participant=False)
+ except ScopeRequired:scope=None
+ except AuthorizationError as exc:raise HTTPException(status_code=403,detail="Permission denied") from exc
+ if user.password_must_change and request.url.path not in {"/api/auth/change-password","/api/auth/logout","/api/me"}:
+  raise HTTPException(status_code=403,detail="Password change required")
+ return AuthenticatedIdentity(
+  user.id,user.username,session.id,
+  scope.organisation_id if scope else None,scope.participant_id if scope else None,
+  scope.participant_inn if scope else None,scope.role.value if scope else None,
+  frozenset(p.value for p in scope.permissions) if scope else frozenset(),False,
+ )
+
+def require_permission(permission:Permission,*,participant_required:bool=True)->Callable:
+ def dependency(identity:AuthenticatedIdentity=Depends(require_user))->AuthenticatedIdentity:
+  if permission.value not in identity.permissions:
+   raise HTTPException(status_code=403,detail="Permission denied")
+  if participant_required and (not identity.organisation_id or not identity.participant_id or not identity.participant_inn):
+   raise HTTPException(status_code=403,detail="Active organisation/participant scope required")
+  return identity
+ return dependency

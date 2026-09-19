@@ -74,6 +74,15 @@ class WebConfig:
     activity_fias_id: str | None = None
     activity_kpp: str | None = None
     remote_sale_return_paid: bool | None = None
+    session_idle_timeout_seconds: int = 30 * 60
+    login_throttle_window_seconds: int = 15 * 60
+    login_throttle_max_failures: int = 10
+    password_history_count: int = 5
+    public_registration_enabled: bool = False
+    login_account_free_failures: int = 5
+    login_account_initial_delay_seconds: int = 30
+    login_account_delay_cap_seconds: int = 15 * 60
+    login_account_lock_failures: int = 100
 
     def organisation_document_config(self) -> P0OrganisationConfig | None:
         if self.organisation_type is None:
@@ -96,6 +105,24 @@ class WebConfig:
         validate_owner_inn(self.own_inn)
         if self.session_ttl_seconds < 300 or self.session_ttl_seconds > 30 * 24 * 60 * 60:
             raise ValueError("WBCZ_SESSION_TTL_SECONDS is out of range")
+        if self.session_idle_timeout_seconds < 300 or self.session_idle_timeout_seconds > self.session_ttl_seconds:
+            raise ValueError("WBCZ_SESSION_IDLE_TIMEOUT_SECONDS is out of range")
+        if not 60 <= self.login_throttle_window_seconds <= 24 * 60 * 60:
+            raise ValueError("WBCZ_LOGIN_THROTTLE_WINDOW_SECONDS is out of range")
+        if not 3 <= self.login_throttle_max_failures <= 100:
+            raise ValueError("WBCZ_LOGIN_THROTTLE_MAX_FAILURES is out of range")
+        if not 1 <= self.password_history_count <= 24:
+            raise ValueError("WBCZ_PASSWORD_HISTORY_COUNT is out of range")
+        if self.login_account_free_failures != 5:
+            raise ValueError("WBCZ_LOGIN_ACCOUNT_FREE_FAILURES must remain 5 for M12")
+        if not 1 <= self.login_account_initial_delay_seconds <= 60:
+            raise ValueError("WBCZ_LOGIN_ACCOUNT_INITIAL_DELAY_SECONDS is out of range")
+        if self.login_account_delay_cap_seconds < self.login_account_initial_delay_seconds or self.login_account_delay_cap_seconds > 15 * 60:
+            raise ValueError("WBCZ_LOGIN_ACCOUNT_DELAY_CAP_SECONDS is out of range")
+        if self.login_account_lock_failures != 100:
+            raise ValueError("WBCZ_LOGIN_ACCOUNT_LOCK_FAILURES must remain 100 for M12")
+        if self.public_registration_enabled:
+            raise ValueError("Public registration runtime remains disabled in M12")
         if not self.session_cookie_name or not self.csrf_cookie_name:
             raise ValueError("Cookie names must not be empty")
         if self.session_cookie_name == self.csrf_cookie_name:
@@ -199,6 +226,15 @@ class WebConfig:
             own_inn=own_inn,
             environment=env,
             session_ttl_seconds=ttl,
+            session_idle_timeout_seconds=int(os.getenv("WBCZ_SESSION_IDLE_TIMEOUT_SECONDS", "1800")),
+            login_throttle_window_seconds=int(os.getenv("WBCZ_LOGIN_THROTTLE_WINDOW_SECONDS", "900")),
+            login_throttle_max_failures=int(os.getenv("WBCZ_LOGIN_THROTTLE_MAX_FAILURES", "10")),
+            password_history_count=int(os.getenv("WBCZ_PASSWORD_HISTORY_COUNT", "5")),
+            public_registration_enabled=_env_bool("WBCZ_PUBLIC_REGISTRATION_ENABLED", False),
+            login_account_free_failures=int(os.getenv("WBCZ_LOGIN_ACCOUNT_FREE_FAILURES", "5")),
+            login_account_initial_delay_seconds=int(os.getenv("WBCZ_LOGIN_ACCOUNT_INITIAL_DELAY_SECONDS", "30")),
+            login_account_delay_cap_seconds=int(os.getenv("WBCZ_LOGIN_ACCOUNT_DELAY_CAP_SECONDS", "900")),
+            login_account_lock_failures=int(os.getenv("WBCZ_LOGIN_ACCOUNT_LOCK_FAILURES", "100")),
             cookie_secure=secure,
             session_cookie_name=os.getenv("WBCZ_SESSION_COOKIE_NAME", "wbcz_session").strip(),
             csrf_cookie_name=os.getenv("WBCZ_CSRF_COOKIE_NAME", "wbcz_csrf").strip(),

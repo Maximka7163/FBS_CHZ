@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 from collections import Counter
-import os
 from pathlib import Path
 
 from wbcz.models import Decision
 from wbcz_ui.application import UiApplication
 
-REF = Path(os.environ.get('WBCZ_REF_XLSX', '/mnt/data/REF_WB_archive_9.xlsx'))
 
-
-def test_real_import_history_repeat_and_reopen(tmp_path):
+def test_real_import_history_repeat_and_reopen(tmp_path, wb_regression_rows, make_xlsx):
     db = tmp_path / 'ui.sqlite'
     app = UiApplication(db)
-    first = app.import_bytes('REF_WB_archive_9.xlsx', REF.read_bytes())
+    source=make_xlsx(wb_regression_rows,"REF_WB_archive_9.xlsx")
+    first = app.import_bytes('REF_WB_archive_9.xlsx', source.read_bytes())
     assert first['event_count'] == 238
     assert first['unique_kiz'] == 238
     assert first['sales'] == 76
@@ -24,7 +22,7 @@ def test_real_import_history_repeat_and_reopen(tmp_path):
     assert first['new_events'] == 238
     assert first['duplicate_events'] == 0
 
-    second = app.import_bytes('REF_WB_archive_9.xlsx', REF.read_bytes())
+    second = app.import_bytes('REF_WB_archive_9.xlsx', source.read_bytes())
     assert second['new_events'] == 0
     assert second['duplicate_events'] == 238
     assert second['repeated_file'] is True
@@ -45,9 +43,10 @@ def test_real_import_history_repeat_and_reopen(tmp_path):
     assert reopened.list_imports()[0]['repeated'] is True
 
 
-def test_real_offline_check_and_preview(tmp_path):
+def test_real_offline_check_and_preview(tmp_path, wb_regression_rows, make_xlsx):
     app = UiApplication(tmp_path / 'ui.sqlite')
-    item = app.import_bytes('REF_WB_archive_9.xlsx', REF.read_bytes())
+    source=make_xlsx(wb_regression_rows,"REF_WB_archive_9.xlsx")
+    item = app.import_bytes('REF_WB_archive_9.xlsx', source.read_bytes())
     result = app.check_import(item['fingerprint'])
     assert result['checked'] == 238
     assert result['counts'] == {

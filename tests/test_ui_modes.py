@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import Counter
-import os
 from pathlib import Path
 
 import pytest
@@ -10,12 +9,11 @@ from wbcz.event_store import EventStore
 from wbcz.models import Decision, KiState, Outcome
 from wbcz_ui.application import OperationMode, UiApplication
 
-REF = Path(os.environ.get("WBCZ_REF_XLSX", "/mnt/data/REF_WB_archive_9.xlsx"))
 
-
-def _checked_real(tmp_path):
+def _checked_real(tmp_path, wb_regression_rows, make_xlsx):
     app = UiApplication(tmp_path / "modes.sqlite")
-    imported = app.import_bytes("REF_WB_archive_9.xlsx", REF.read_bytes())
+    source=make_xlsx(wb_regression_rows,"REF_WB_archive_9.xlsx")
+    imported = app.import_bytes("REF_WB_archive_9.xlsx", source.read_bytes())
     checked = app.check_import(imported["fingerprint"])
     events = app.events_for_import(imported["fingerprint"])
     ids = [event["event_id"] for event in events]
@@ -38,8 +36,8 @@ def _single_with_decision(tmp_path, wb_row, make_xlsx, decision: Decision, reaso
     return app, imported, event["event_id"]
 
 
-def test_auto_preview_groups_withdraw_and_return(tmp_path):
-    app, imported, checked, _, ids = _checked_real(tmp_path)
+def test_auto_preview_groups_withdraw_and_return(tmp_path, wb_regression_rows, make_xlsx):
+    app, imported, checked, _, ids = _checked_real(tmp_path, wb_regression_rows, make_xlsx)
     assert checked["counts"] == {
         "READY_TO_WITHDRAW": 51,
         "READY_TO_RETURN": 3,
@@ -52,8 +50,8 @@ def test_auto_preview_groups_withdraw_and_return(tmp_path):
     assert (preview["withdraw_count"], preview["return_count"], preview["excluded_count"]) == (51, 3, 184)
 
 
-def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path):
-    app, imported, _, _, ids = _checked_real(tmp_path)
+def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path, wb_regression_rows, make_xlsx):
+    app, imported, _, _, ids = _checked_real(tmp_path, wb_regression_rows, make_xlsx)
     preview = app.operation_preview(ids, OperationMode.WITHDRAW_ONLY, imported["fingerprint"])
     assert preview["eligible_count"] == 51
     assert preview["withdraw_count"] == 51
@@ -69,8 +67,8 @@ def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path):
     assert return_exclusion["reason_text"] == "По текущему состоянию требуется возврат в оборот"
 
 
-def test_return_only_accepts_only_ready_to_return(tmp_path):
-    app, imported, _, _, ids = _checked_real(tmp_path)
+def test_return_only_accepts_only_ready_to_return(tmp_path, wb_regression_rows, make_xlsx):
+    app, imported, _, _, ids = _checked_real(tmp_path, wb_regression_rows, make_xlsx)
     preview = app.operation_preview(ids, OperationMode.RETURN_ONLY, imported["fingerprint"])
     assert preview["eligible_count"] == 3
     assert preview["withdraw_count"] == 0
@@ -86,8 +84,8 @@ def test_return_only_accepts_only_ready_to_return(tmp_path):
     assert withdraw_exclusion["reason_text"] == "По текущему состоянию требуется вывод из оборота"
 
 
-def test_control_is_read_only_and_has_no_preview_or_documents(tmp_path):
-    app, imported, checked, _, ids = _checked_real(tmp_path)
+def test_control_is_read_only_and_has_no_preview_or_documents(tmp_path, wb_regression_rows, make_xlsx):
+    app, imported, checked, _, ids = _checked_real(tmp_path, wb_regression_rows, make_xlsx)
     assert checked["checked"] == 238
     with pytest.raises(ValueError, match="read-only"):
         app.operation_preview(ids, OperationMode.CONTROL, imported["fingerprint"])
@@ -179,8 +177,8 @@ def test_ambiguous_history_is_forced_to_manual_review_backend_side(tmp_path, wb_
     assert all(event["reason"] == "HISTORY_ORDER_AMBIGUOUS" for event in events)
 
 
-def test_all_modes_leave_production_documents_zero(tmp_path):
-    app, imported, _, _, ids = _checked_real(tmp_path)
+def test_all_modes_leave_production_documents_zero(tmp_path, wb_regression_rows, make_xlsx):
+    app, imported, _, _, ids = _checked_real(tmp_path, wb_regression_rows, make_xlsx)
     for mode in (OperationMode.AUTO, OperationMode.WITHDRAW_ONLY, OperationMode.RETURN_ONLY):
         app.operation_preview(ids, mode, imported["fingerprint"])
     with EventStore(app.db_path) as store:

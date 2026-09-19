@@ -18,6 +18,7 @@ from wbcz.m11_reports import (
     UploadBindingStore,
     sanitize_report_evidence,
 )
+from wbcz_web.models import BootstrapRecord
 from wbcz_web.models.reports import (
     ReportArtifactRecord,
     ReportArtifactUploadRecord,
@@ -97,8 +98,19 @@ class SqlReportRepository:
     ) -> ReportJobRecord:
         now = requested_at or _now()
         job_id = "rpt_" + uuid.uuid4().hex
+        scope = self.db.info.get("tenant_scope")
+        organisation_id = participant_id = None
+        if isinstance(scope, dict) and scope.get("organisation_id") and scope.get("participant_id"):
+            if participant_inn != scope.get("participant_inn"):
+                raise ReportSecurityError("report participant must match active tenant scope")
+            organisation_id = str(scope["organisation_id"])
+            participant_id = str(scope["participant_id"])
+        elif self.db.get(BootstrapRecord, 1) is not None:
+            raise ReportSecurityError("post-bootstrap report jobs require tenant scope")
         row = ReportJobRecord(
             id=job_id,
+            organisation_id=organisation_id,
+            participant_id=participant_id,
             origin=origin,
             participant_inn=participant_inn,
             report_type=report_type,

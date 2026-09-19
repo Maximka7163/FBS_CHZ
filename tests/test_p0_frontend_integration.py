@@ -33,6 +33,7 @@ from wbcz_web.repositories import ImportRepository
 from wbcz_web.services.agent_orchestration import AgentControlService, CONTROL_CIS, WRITE
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.imports import event_to_record
+from wbcz_web.services.authorization import BootstrapService
 from wbcz_web.services.workspace import bulk_preview, execute_bulk_actions, workspace_overview
 
 
@@ -335,13 +336,22 @@ def test_http_upload_restore_history_and_machine_secret_non_exposure(pg_factory)
     password = "very-secure-frontend-password"
     cfg = config(DB_URL, agent=True, org=True)
     with pg_factory() as db:
-        user = User(username="operator", password_hash=hash_password(password), is_active=True, is_admin=True)
-        db.add(user)
+        _,org,participant,_=BootstrapService(db).bootstrap(
+            username="operator",password=password,organisation_name="P0 Frontend Regression",
+            participant_inn=OWN,
+        )
+        org_id,participant_id=org.id,participant.id
         db.commit()
     app = create_app(cfg, session_factory=pg_factory)
     with TestClient(app) as client:
         login(client, password)
         csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        switched=client.post(
+            "/api/security/scope",
+            headers={"X-CSRF-Token":csrf},
+            json={"organisation_id":org_id,"participant_id":participant_id},
+        )
+        assert switched.status_code==200
         uploaded = client.post(
             "/api/files",
             headers={"X-CSRF-Token": csrf},

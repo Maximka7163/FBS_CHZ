@@ -27,7 +27,8 @@ from wbcz.write_pipeline import (
     WriteState,
     classify_poll_status,
 )
-from wbcz_web.models import AgentJobRecord, WriteAuditRecord, WriteOperationRecord
+from wbcz_web.models import AgentJobRecord, BootstrapRecord, WriteAuditRecord, WriteOperationRecord
+from wbcz_web.services.tenant import active_tenant, optional_tenant
 
 
 _WRITE_MAPPING = {
@@ -60,6 +61,14 @@ class SqlAlchemyWriteOperationStore:
 
     def _row(self, operation_id: str, *, lock: bool = False) -> WriteOperationRecord:
         stmt = select(WriteOperationRecord).where(WriteOperationRecord.operation_id == operation_id)
+        scope = optional_tenant(self.db)
+        if scope is not None:
+            stmt = stmt.where(
+                WriteOperationRecord.organisation_id == scope.organisation_id,
+                WriteOperationRecord.participant_id == scope.participant_id,
+            )
+        elif self.db.get(BootstrapRecord, 1) is not None:
+            raise KeyError(f"operation not found: {operation_id}")
         if lock:
             stmt = stmt.with_for_update()
         row = self.db.scalar(stmt)
@@ -162,12 +171,25 @@ class SqlAlchemyWriteOperationStore:
             "operation_reason": operation_reason,
             "pg": pg,
         }
-        fingerprint = hashlib.sha256(("wb-fbs-write:v1:" + canonical_json(source)).encode("utf-8")).hexdigest()
-        existing = self.db.scalar(
-            select(WriteOperationRecord)
-            .where(WriteOperationRecord.business_fingerprint == fingerprint)
-            .with_for_update()
+        scope = optional_tenant(self.db)
+        if scope is None and self.db.get(BootstrapRecord, 1) is not None:
+            raise PermissionError("post-bootstrap write operations require tenant scope")
+        if scope is not None and expected_inn != scope.participant_inn:
+            raise InvalidWriteOperation("expected_inn must match active participant")
+        namespace = (
+            "wb-fbs-write:m12:" + scope.organisation_id + ":" + scope.participant_id + ":"
+            if scope is not None else "wb-fbs-write:legacy:"
         )
+        fingerprint = hashlib.sha256((namespace + canonical_json(source)).encode("utf-8")).hexdigest()
+        existing_stmt = select(WriteOperationRecord).where(
+            WriteOperationRecord.business_fingerprint == fingerprint,
+        )
+        if scope is not None:
+            existing_stmt = existing_stmt.where(
+                WriteOperationRecord.organisation_id == scope.organisation_id,
+                WriteOperationRecord.participant_id == scope.participant_id,
+            )
+        existing = self.db.scalar(existing_stmt.with_for_update())
         if existing is not None:
             record = self._record(existing)
             if not (
@@ -183,6 +205,8 @@ class SqlAlchemyWriteOperationStore:
         now = _now()
         row = WriteOperationRecord(
             operation_id=operation_id,
+            organisation_id=scope.organisation_id if scope is not None else None,
+            participant_id=scope.participant_id if scope is not None else None,
             business_fingerprint=fingerprint,
             event_id=event_id,
             decision=decision.value,
@@ -424,7 +448,16 @@ class SqlAlchemyAgentJobStore:
             else "POLL" if job.job_type is AgentJobType.POLL_DOCUMENT
             else "CIS_CHECK"
         )
-        existing = self.db.scalar(select(AgentJobRecord).where(AgentJobRecord.job_id == job.job_id).with_for_update())
+        scope = optional_tenant(self.db)
+        if scope is None and self.db.get(BootstrapRecord, 1) is not None:
+            raise PermissionError("post-bootstrap agent jobs require tenant scope")
+        existing_stmt = select(AgentJobRecord).where(AgentJobRecord.job_id == job.job_id)
+        if scope is not None:
+            existing_stmt = existing_stmt.where(
+                AgentJobRecord.organisation_id == scope.organisation_id,
+                AgentJobRecord.participant_id == scope.participant_id,
+            )
+        existing = self.db.scalar(existing_stmt.with_for_update())
         if existing is not None:
             if existing.payload_sha256 != digest:
                 raise AgentReplayConflict("same job_id has different payload")
@@ -446,6 +479,8 @@ class SqlAlchemyAgentJobStore:
                 return self._job(prior_write)
         row = AgentJobRecord(
             job_id=job.job_id,
+            organisation_id=scope.organisation_id if scope else None,
+            participant_id=scope.participant_id if scope else None,
             job_type=job.job_type.value,
             operation_id=job.operation_id,
             purpose=purpose,

@@ -12,6 +12,7 @@ from wbcz.windows_agent import AgentJob, AgentJobState, AgentJobType, P0_PG
 from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentJobRecord
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
+from wbcz_web.services.tenant import participant_inn_for_runtime, scoped_agent_job
 
 
 CIS_INVENTORY_PURPOSE = "CIS_INVENTORY"
@@ -51,7 +52,7 @@ class CisInventoryService:
             job_type=job_type,
             operation_id=operation_id,
             pg=P0_PG,
-            expected_inn=self.config.own_inn,
+            expected_inn=participant_inn_for_runtime(self.db,self.config.own_inn),
             read_payload=canonical,
         )
         self.jobs.enqueue(job, purpose=CIS_INVENTORY_PURPOSE)
@@ -64,7 +65,7 @@ class CisInventoryService:
         }
 
     def status(self, request_id: str) -> dict[str, Any]:
-        row = self.db.get(AgentJobRecord, request_id)
+        row = scoped_agent_job(self.db, request_id)
         if row is None or row.purpose != CIS_INVENTORY_PURPOSE:
             raise KeyError(request_id)
         state = AgentJobState(row.state)

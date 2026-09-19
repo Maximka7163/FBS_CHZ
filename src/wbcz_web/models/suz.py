@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -12,10 +12,13 @@ from .db import Base
 class SuzConnectionRecord(Base):
     __tablename__ = "suz_connections"
 
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     participant_inn: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
     oms_id: Mapped[str] = mapped_column(Text, nullable=False)
-    oms_connection: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    oms_connection: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     environment: Mapped[str] = mapped_column(String(32), nullable=False)
     installation_name: Mapped[str] = mapped_column(Text, nullable=False)
     token_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -31,6 +34,7 @@ class SuzConnectionRecord(Base):
             "connection_state IN ('NOT_ACQUIRED','ACTIVE','EXPIRED','SUPERSEDED','INVALIDATED')",
             name="ck_suz_connection_state",
         ),
+        UniqueConstraint("organisation_id","participant_id","oms_connection",name="uq_suz_connections_tenant_oms_connection"),
     )
 
 
@@ -38,7 +42,8 @@ class SuzKmVaultRecord(Base):
     __tablename__ = "suz_km_vault"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    order_operation_id: Mapped[str] = mapped_column(String(128), ForeignKey("suz_orders.operation_id", ondelete="CASCADE"), nullable=False, index=True)
+    order_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    order_operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     gtin: Mapped[str] = mapped_column(Text, nullable=False)
     remote_block_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -54,13 +59,15 @@ class SuzKmVaultRecord(Base):
 
     __table_args__ = (
         CheckConstraint("code_count >= 0", name="ck_suz_km_vault_code_count_nonnegative"),
+        ForeignKeyConstraint(["order_id","order_operation_id"],["suz_orders.id","suz_orders.operation_id"],ondelete="CASCADE",name="fk_suz_km_vault_m12_order"),
     )
 
 
 class SuzOrderRecord(Base):
     __tablename__ = "suz_orders"
 
-    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    operation_id: Mapped[str] = mapped_column(String(128), nullable=False)
     connection_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("suz_connections.id", ondelete="RESTRICT"), nullable=False, index=True)
     remote_order_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -78,6 +85,8 @@ class SuzOrderRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
+        UniqueConstraint("connection_id","operation_id",name="uq_suz_orders_connection_operation"),
+        UniqueConstraint("id","operation_id",name="uq_suz_orders_id_operation"),
         CheckConstraint("requested_count > 0", name="ck_suz_order_requested_count_positive"),
         CheckConstraint("generated_count IS NULL OR generated_count >= 0", name="ck_suz_order_generated_count_nonnegative"),
         CheckConstraint("fetched_count IS NULL OR fetched_count >= 0", name="ck_suz_order_fetched_count_nonnegative"),
@@ -92,7 +101,8 @@ class SuzOrderItemRecord(Base):
     __tablename__ = "suz_order_items"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    order_operation_id: Mapped[str] = mapped_column(String(128), ForeignKey("suz_orders.operation_id", ondelete="CASCADE"), nullable=False, index=True)
+    order_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    order_operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     gtin: Mapped[str] = mapped_column(Text, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     serial_mode: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -105,7 +115,8 @@ class SuzOrderItemRecord(Base):
     producer: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("order_operation_id", "gtin", name="uq_suz_order_item_gtin"),
+        UniqueConstraint("order_id", "gtin", name="uq_suz_order_item_order_gtin"),
+        ForeignKeyConstraint(["order_id","order_operation_id"],["suz_orders.id","suz_orders.operation_id"],ondelete="CASCADE",name="fk_suz_order_items_m12_order"),
         CheckConstraint("quantity > 0", name="ck_suz_order_item_quantity_positive"),
         CheckConstraint("serial_count >= 0", name="ck_suz_order_item_serial_count_nonnegative"),
         CheckConstraint("serial_mode IN ('OPERATOR','SELF_MADE')", name="ck_suz_order_item_serial_mode"),
@@ -115,8 +126,10 @@ class SuzOrderItemRecord(Base):
 class SuzCodeBlockRecord(Base):
     __tablename__ = "suz_code_blocks"
 
-    local_block_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    order_operation_id: Mapped[str] = mapped_column(String(128), ForeignKey("suz_orders.operation_id", ondelete="CASCADE"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    local_block_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    order_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    order_operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     gtin: Mapped[str] = mapped_column(Text, nullable=False)
     remote_block_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     remote_package_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -130,6 +143,8 @@ class SuzCodeBlockRecord(Base):
 
     __table_args__ = (
         CheckConstraint("code_count >= 0", name="ck_suz_code_block_count_nonnegative"),
+        UniqueConstraint("order_id","local_block_id",name="uq_suz_code_blocks_order_local"),
+        ForeignKeyConstraint(["order_id","order_operation_id"],["suz_orders.id","suz_orders.operation_id"],ondelete="CASCADE",name="fk_suz_code_blocks_m12_order"),
     )
 
 
@@ -137,7 +152,8 @@ class SuzReconciliationEventRecord(Base):
     __tablename__ = "suz_reconciliation_events"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    order_operation_id: Mapped[str] = mapped_column(String(128), ForeignKey("suz_orders.operation_id", ondelete="CASCADE"), nullable=False, index=True)
+    order_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    order_operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     from_state: Mapped[str | None] = mapped_column(String(64), nullable=True)
     to_state: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -147,3 +163,7 @@ class SuzReconciliationEventRecord(Base):
     details_redacted: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     evidence_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(["order_id","order_operation_id"],["suz_orders.id","suz_orders.operation_id"],ondelete="CASCADE",name="fk_suz_reconciliation_events_m12_order"),
+    )

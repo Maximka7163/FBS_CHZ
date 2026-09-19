@@ -24,6 +24,7 @@ from wbcz.turnover import (
 from wbcz.windows_agent import AgentJob, AgentJobType, AgentReplayConflict, P0_PG
 from wbcz_web.config import WebConfig
 from wbcz_web.models import AuditLog, TurnoverOperationLedgerRecord
+from wbcz_web.services.tenant import active_tenant, tenant_operation_id
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
 
 
@@ -84,17 +85,23 @@ class TurnoverApplicationService:
         }
 
     def _ledger(self, operation_id: str, *, lock: bool = False) -> TurnoverOperationLedgerRecord | None:
+        scope = active_tenant(self.db)
         stmt = select(TurnoverOperationLedgerRecord).where(
-            TurnoverOperationLedgerRecord.operation_id == operation_id
+            TurnoverOperationLedgerRecord.operation_id == operation_id,
+            TurnoverOperationLedgerRecord.organisation_id == scope.organisation_id,
+            TurnoverOperationLedgerRecord.participant_id == scope.participant_id,
         )
         if lock:
             stmt = stmt.with_for_update()
         return self.db.scalar(stmt)
 
     def _audit(self, operation_id: str, action: str, metadata: Mapping[str, Any]) -> None:
+        scope = active_tenant(self.db)
         self.db.add(
             AuditLog(
                 action=action,
+                organisation_id=scope.organisation_id,
+                participant_id=scope.participant_id,
                 entity_type="turnover_operation",
                 entity_id=operation_id,
                 metadata_json=dict(metadata),
@@ -112,6 +119,7 @@ class TurnoverApplicationService:
         """Queue only after OperationPreconditionService has validated fresh M1/M2 evidence."""
         if not operation_id or len(operation_id) > 128:
             raise ValueError("operation_id must be 1..128 characters")
+        operation_id = tenant_operation_id(self.db, "m5-turnover", operation_id, prefix="m5_")
         if prepared.pg != P0_PG:
             raise ValueError("M5 turnover is scoped to pg=lp")
         definition = TURNOVER_OPERATION_REGISTRY[prepared.operation_kind]
@@ -158,8 +166,11 @@ class TurnoverApplicationService:
             }
 
         request_id = f"job_m5_{uuid4().hex}"
+        scope = active_tenant(self.db)
         ledger = TurnoverOperationLedgerRecord(
             operation_id=operation_id,
+            organisation_id=scope.organisation_id,
+            participant_id=scope.participant_id,
             request_id=request_id,
             operation_kind=prepared.operation_kind.value,
             document_type=prepared.document_type,
@@ -180,7 +191,7 @@ class TurnoverApplicationService:
             job_type=AgentJobType(prepared.document_type),
             operation_id=operation_id,
             pg=P0_PG,
-            expected_inn=self.config.own_inn,
+            expected_inn=scope.participant_inn,
             document_type=prepared.document_type,
             document_sha256=prepared.exact_document.sha256,
             product_document_base64=prepared.exact_document.product_document_base64,

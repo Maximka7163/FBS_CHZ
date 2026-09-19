@@ -24,6 +24,7 @@ from wbcz.windows_agent import AgentJob, AgentJobState, AgentJobType, AgentRepla
 from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentJobRecord, AuditLog, DocumentLifecycleLedgerRecord, WriteOperationRecord
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
+from wbcz_web.services.tenant import active_tenant, scoped_agent_job, tenant_operation_id
 
 
 DOCUMENT_LIFECYCLE_PURPOSE = "DOCUMENT_LIFECYCLE"
@@ -52,15 +53,23 @@ class DocumentLifecycleService:
         return hashlib.sha256(cls._request_body(job_type, payload)).hexdigest()
 
     def _ledger_row(self, operation_id: str, *, lock: bool = False) -> DocumentLifecycleLedgerRecord | None:
-        stmt = select(DocumentLifecycleLedgerRecord).where(DocumentLifecycleLedgerRecord.operation_id == operation_id)
+        scope = active_tenant(self.db)
+        stmt = select(DocumentLifecycleLedgerRecord).where(
+            DocumentLifecycleLedgerRecord.operation_id == operation_id,
+            DocumentLifecycleLedgerRecord.organisation_id == scope.organisation_id,
+            DocumentLifecycleLedgerRecord.participant_id == scope.participant_id,
+        )
         if lock:
             stmt = stmt.with_for_update()
         return self.db.scalar(stmt)
 
     def _audit(self, *, user_id: int | None, operation_id: str, action: str, metadata: dict[str, Any]) -> None:
+        scope = active_tenant(self.db)
         self.db.add(
             AuditLog(
                 action=action,
+                organisation_id=scope.organisation_id,
+                participant_id=scope.participant_id,
                 user_id=user_id,
                 entity_type="document_lifecycle",
                 entity_id=operation_id,
@@ -112,7 +121,8 @@ class DocumentLifecycleService:
         if job_type.value not in M4_READ_JOB_TYPES:
             raise ValueError("unsupported document lifecycle job type")
         canonical = validate_m4_job_payload(job_type.value, payload)
-        operation_id = operation_id or f"m4read:{uuid4().hex}"
+        external_operation_id = operation_id or f"m4read:{uuid4().hex}"
+        operation_id = tenant_operation_id(self.db, "m4-document", external_operation_id, prefix="m4_")
         if not operation_id or len(operation_id) > 128:
             raise ValueError("operation_id must be 1..128 characters")
 
@@ -130,8 +140,11 @@ class DocumentLifecycleService:
             )
 
         request_id = f"job_m4_{uuid4().hex}"
+        scope = active_tenant(self.db)
         ledger = DocumentLifecycleLedgerRecord(
             operation_id=operation_id,
+            organisation_id=scope.organisation_id,
+            participant_id=scope.participant_id,
             request_id=request_id,
             job_type=job_type.value,
             request_sha256=request_hash,
@@ -161,7 +174,7 @@ class DocumentLifecycleService:
             job_type=job_type,
             operation_id=operation_id,
             pg=P0_PG,
-            expected_inn=self.config.own_inn,
+            expected_inn=scope.participant_inn,
             read_payload=canonical,
         )
         self.jobs.enqueue(job, purpose=DOCUMENT_LIFECYCLE_PURPOSE)
@@ -198,7 +211,12 @@ class DocumentLifecycleService:
         if bool(document_id) == bool(write_operation_id):
             raise ValueError("provide exactly one of document_id or write_operation_id")
         if write_operation_id:
-            row = self.db.get(WriteOperationRecord, write_operation_id)
+            scope = active_tenant(self.db)
+            row = self.db.scalar(select(WriteOperationRecord).where(
+                WriteOperationRecord.operation_id == write_operation_id,
+                WriteOperationRecord.organisation_id == scope.organisation_id,
+                WriteOperationRecord.participant_id == scope.participant_id,
+            ))
             if row is None:
                 raise KeyError(write_operation_id)
             if not row.document_id:
@@ -213,10 +231,15 @@ class DocumentLifecycleService:
         )
 
     def status(self, request_id: str) -> dict[str, Any]:
-        row = self.db.get(AgentJobRecord, request_id)
+        row = scoped_agent_job(self.db, request_id)
         if row is None or row.purpose != DOCUMENT_LIFECYCLE_PURPOSE:
             raise KeyError(request_id)
-        ledger = self.db.scalar(select(DocumentLifecycleLedgerRecord).where(DocumentLifecycleLedgerRecord.request_id == request_id))
+        scope = active_tenant(self.db)
+        ledger = self.db.scalar(select(DocumentLifecycleLedgerRecord).where(
+            DocumentLifecycleLedgerRecord.request_id == request_id,
+            DocumentLifecycleLedgerRecord.organisation_id == scope.organisation_id,
+            DocumentLifecycleLedgerRecord.participant_id == scope.participant_id,
+        ))
         if ledger is None:
             raise KeyError(request_id)
         state = AgentJobState(row.state)

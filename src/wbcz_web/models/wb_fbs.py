@@ -12,6 +12,9 @@ from .db import Base
 class WbConnectionRecord(Base):
     __tablename__ = "wb_connections"
 
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     environment: Mapped[str] = mapped_column(String(24), nullable=False)
     participant_inn: Mapped[str] = mapped_column(String(12), nullable=False, index=True)

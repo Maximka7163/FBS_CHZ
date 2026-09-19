@@ -21,6 +21,7 @@ from wbcz.models import canonical_json
 from wbcz.windows_agent import AgentJob, AgentJobType, AgentReplayConflict
 from wbcz_web.config import WebConfig
 from wbcz_web.models import AggregationOperationLedgerRecord, AuditLog
+from wbcz_web.services.tenant import active_tenant, tenant_operation_id
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
 
 AGGREGATION_PURPOSE = "AGGREGATION_M6"
@@ -61,13 +62,19 @@ class AggregationApplicationService:
         }
 
     def _ledger(self, operation_id: str, *, lock: bool = False) -> AggregationOperationLedgerRecord | None:
-        stmt = select(AggregationOperationLedgerRecord).where(AggregationOperationLedgerRecord.operation_id == operation_id)
+        scope = active_tenant(self.db)
+        stmt = select(AggregationOperationLedgerRecord).where(
+            AggregationOperationLedgerRecord.operation_id == operation_id,
+            AggregationOperationLedgerRecord.organisation_id == scope.organisation_id,
+            AggregationOperationLedgerRecord.participant_id == scope.participant_id,
+        )
         if lock:
             stmt = stmt.with_for_update()
         return self.db.scalar(stmt)
 
     def _audit(self, operation_id: str, action: str, metadata: Mapping[str, Any]) -> None:
-        self.db.add(AuditLog(action=action, entity_type="aggregation_operation", entity_id=operation_id, metadata_json=dict(metadata)))
+        scope = active_tenant(self.db)
+        self.db.add(AuditLog(action=action, organisation_id=scope.organisation_id, participant_id=scope.participant_id, entity_type="aggregation_operation", entity_id=operation_id, metadata_json=dict(metadata)))
 
     @staticmethod
     def _relation_delta(kind: AggregationOperationKind) -> str:
@@ -93,6 +100,7 @@ class AggregationApplicationService:
     ) -> dict[str, Any]:
         if not operation_id or len(operation_id) > 128:
             raise ValueError("operation_id must be 1..128 characters")
+        operation_id = tenant_operation_id(self.db, "m6-aggregation", operation_id, prefix="m6_")
         if prepared.pg != M6_PG or prepared.document_format != "MANUAL":
             raise ValueError("M6 supports JSON MANUAL with pg=lp")
         definition = M6_OPERATION_REGISTRY[prepared.operation_kind]
@@ -123,8 +131,11 @@ class AggregationApplicationService:
             return {"request_id": existing.request_id, "operation_id": operation_id, "status": "deduplicated", "idempotency_key": existing.idempotency_key}
 
         request_id = f"job_m6_{uuid4().hex}"
+        scope = active_tenant(self.db)
         row = AggregationOperationLedgerRecord(
             operation_id=operation_id,
+            organisation_id=scope.organisation_id,
+            participant_id=scope.participant_id,
             request_id=request_id,
             operation_kind=prepared.operation_kind.value,
             document_type=prepared.document_type,
@@ -149,7 +160,7 @@ class AggregationApplicationService:
                 job_type=AgentJobType(prepared.document_type),
                 operation_id=operation_id,
                 pg=M6_PG,
-                expected_inn=self.config.own_inn,
+                expected_inn=scope.participant_inn,
                 document_type=prepared.document_type,
                 document_sha256=prepared.exact_document.sha256,
                 product_document_base64=prepared.exact_document.product_document_base64,

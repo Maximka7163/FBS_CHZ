@@ -22,6 +22,7 @@ from wbcz_web.services.agent_orchestration import AgentControlService
 from wbcz_web.services.cis_inventory import CisInventoryService, CisInventoryUnavailable
 from wbcz_web.services.reference_products import ReferenceProductsService, ReferenceProductsUnavailable
 from wbcz_web.services.document_lifecycle import DocumentLifecycleService, DocumentLifecycleUnavailable
+from wbcz_web.services.authorization import Permission
 from wbcz_web.services.workspace import (
     BulkActionUnavailable,
     bulk_preview,
@@ -30,7 +31,7 @@ from wbcz_web.services.workspace import (
     workspace_overview,
 )
 
-from .dependencies import AuthenticatedIdentity, get_db, require_csrf, require_user
+from .dependencies import AuthenticatedIdentity, get_db, require_csrf, require_permission, require_user
 from .schemas import (
     BulkActionRequest,
     CisInventoryCisesRequest,
@@ -71,9 +72,17 @@ def version(request: Request) -> dict:
 
 
 @router.get("/auth/csrf")
-def csrf(request: Request, response: Response) -> dict:
+def csrf(request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
     token = new_csrf_token()
     config = request.app.state.config
+    session_token = request.cookies.get(config.session_cookie_name)
+    if session_token:
+        try:
+            _, session = AuthService(db, config).authenticate_token(session_token)
+            session.csrf_token_hash = __import__("wbcz_web.auth", fromlist=["token_hash"]).token_hash(token)
+            db.flush()
+        except AuthenticationError:
+            pass
     response.set_cookie(
         config.csrf_cookie_name,
         token,
@@ -95,7 +104,20 @@ def login(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        user, token = AuthService(db, request.app.state.config).login(payload.username, payload.password)
+        config = request.app.state.config
+        csrf_token = request.cookies.get(config.csrf_cookie_name)
+        auth = AuthService(db, config)
+        user, token = auth.login(
+            payload.username,
+            payload.password,
+            csrf_token=csrf_token,
+            remote_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        auth.revoke_presented_session(
+            request.cookies.get(config.session_cookie_name),
+            reason="login_rotation",
+        )
     except AuthenticationError as exc:
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
@@ -109,7 +131,7 @@ def login(
         path="/",
         max_age=config.session_ttl_seconds,
     )
-    return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
+    return {"id": user.id, "username": user.username, "is_admin": False}
 
 
 @router.post("/auth/logout")
@@ -127,7 +149,12 @@ def logout(
 
 @router.get("/me")
 def me(identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
-    return {"id": identity.user_id, "username": identity.username, "is_admin": identity.is_admin, "is_active": True}
+    return {
+        "id": identity.user_id, "username": identity.username, "is_admin": False, "is_active": True,
+        "organisation_id": identity.organisation_id, "participant_id": identity.participant_id,
+        "participant_inn": identity.participant_inn, "role": identity.role,
+        "permissions": sorted(identity.permissions),
+    }
 
 
 @router.get("/capabilities")
@@ -144,7 +171,7 @@ def capabilities(request: Request, _: AuthenticatedIdentity = Depends(require_us
 
 
 @router.get("/workspace")
-def workspace(_: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def workspace(_: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_READ)), db: Session = Depends(get_db)) -> dict:
     history = workspace_history(db, limit=10)
     return {
         "active_import_id": history[0]["id"] if history else None,
@@ -157,7 +184,7 @@ async def upload_file(
     request: Request,
     upload: UploadFile = File(..., alias="file"),
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_CREATE)),
     db: Session = Depends(get_db),
 ) -> dict:
     filename = upload.filename or "upload.xlsx"
@@ -174,12 +201,12 @@ async def upload_file(
 
 
 @router.get("/files")
-def list_files(identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_files(identity: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_READ)), db: Session = Depends(get_db)) -> list[dict]:
     return [import_view(row) for row in ImportRepository(db).list_recent()]
 
 
 @router.get("/files/{import_id}")
-def get_file(import_id: str, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def get_file(import_id: str, identity: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_READ)), db: Session = Depends(get_db)) -> dict:
     row = ImportRepository(db).get(import_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Импорт не найден")
@@ -187,7 +214,7 @@ def get_file(import_id: str, identity: AuthenticatedIdentity = Depends(require_u
 
 
 @router.get("/files/{import_id}/events")
-def file_events(import_id: str, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+def file_events(import_id: str, identity: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_READ)), db: Session = Depends(get_db)) -> list[dict]:
     repo = ImportRepository(db)
     if repo.get(import_id) is None:
         raise HTTPException(status_code=404, detail="Импорт не найден")
@@ -198,7 +225,7 @@ def file_events(import_id: str, identity: AuthenticatedIdentity = Depends(requir
 def file_workspace(
     import_id: str,
     request: Request,
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -210,7 +237,7 @@ def file_workspace(
 @router.get("/files/{import_id}/bulk-preview")
 def file_bulk_preview(
     import_id: str,
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -225,7 +252,7 @@ def file_bulk_actions(
     payload: BulkActionRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.DOCUMENTS_WRITE)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -239,7 +266,7 @@ def file_bulk_actions(
 
 
 @router.get("/events/{event_id}")
-def event_detail(event_id: str, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def event_detail(event_id: str, identity: AuthenticatedIdentity = Depends(require_permission(Permission.IMPORTS_READ)), db: Session = Depends(get_db)) -> dict:
     repo = ImportRepository(db)
     row = repo.event(event_id)
     if row is None:
@@ -256,14 +283,14 @@ def control(
     payload: ControlRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CONTROL_RUN)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
         config = request.app.state.config
         if config.agent_enabled:
             return AgentControlService(db, config).run(import_id, identity.user_id, payload.mode, payload.event_ids)
-        return ControlService(db, config.own_inn).run(import_id, identity.user_id, payload.mode, payload.event_ids)
+        return ControlService(db, identity.participant_inn or "").run(import_id, identity.user_id, payload.mode, payload.event_ids)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -275,11 +302,11 @@ def operation_preview(
     payload: PreviewRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CONTROL_RUN)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        return ControlService(db, request.app.state.config.own_inn).preview(payload.import_id, identity.user_id, payload.mode, payload.event_ids)
+        return ControlService(db, identity.participant_inn or "").preview(payload.import_id, identity.user_id, payload.mode, payload.event_ids)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -297,7 +324,7 @@ def cis_inventory_info(
     payload: CisInventoryCisesRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -311,7 +338,7 @@ def cis_inventory_search(
     payload: CisInventorySearchRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     body = payload.model_dump(exclude_none=True)
@@ -326,7 +353,7 @@ def cis_inventory_history(
     payload: CisInventorySingleRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -340,7 +367,7 @@ def cis_inventory_aggregates(
     payload: CisInventoryCisesRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -354,7 +381,7 @@ def cis_inventory_aggregation_history(
     payload: CisInventorySingleRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -368,7 +395,7 @@ def cis_inventory_product_info(
     payload: CisInventoryProductRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -385,7 +412,7 @@ def cis_inventory_enrich(
     payload: CisInventoryCisesRequest,
     request: Request,
     _: None = Depends(require_csrf),
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -398,7 +425,7 @@ def cis_inventory_enrich(
 def cis_inventory_request_status(
     request_id: str,
     request: Request,
-    identity: AuthenticatedIdentity = Depends(require_user),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.CIS_READ)),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -415,7 +442,7 @@ def _reference_products_service(request: Request, db: Session) -> ReferenceProdu
 
 
 @router.post("/reference-products/participants")
-def reference_participants(payload: ReferenceParticipantsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_participants(payload: ReferenceParticipantsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).queue(AgentJobType.PARTICIPANTS, {"inns": payload.inns})
     except ValueError as exc:
@@ -423,7 +450,7 @@ def reference_participants(payload: ReferenceParticipantsRequest, request: Reque
 
 
 @router.post("/reference-products/participants/self")
-def reference_self_participant(request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_self_participant(request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).self_participant()
     except ValueError as exc:
@@ -431,7 +458,7 @@ def reference_self_participant(request: Request, _: None = Depends(require_csrf)
 
 
 @router.post("/reference-products/mods/list")
-def reference_mods(payload: ReferenceModsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_mods(payload: ReferenceModsRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).queue(AgentJobType.MODS_LIST, payload.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -439,7 +466,7 @@ def reference_mods(payload: ReferenceModsRequest, request: Request, _: None = De
 
 
 @router.post("/reference-products/mods/validate-lp")
-def reference_validate_lp_mod(payload: ReferenceModValidateRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_validate_lp_mod(payload: ReferenceModValidateRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     body = {"productGroups": ["lp"], "inns": [payload.inn], "limit": 1000, "page": 0}
     if payload.kpp is not None: body["kpp"] = payload.kpp
     if payload.fiasId is not None: body["fiasId"] = payload.fiasId
@@ -450,7 +477,7 @@ def reference_validate_lp_mod(payload: ReferenceModValidateRequest, request: Req
 
 
 @router.post("/reference-products/tn-ved/search")
-def reference_tnved(payload: ReferenceTnVedRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_tnved(payload: ReferenceTnVedRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).queue(AgentJobType.TN_VED_SEARCH, payload.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -458,7 +485,7 @@ def reference_tnved(payload: ReferenceTnVedRequest, request: Request, _: None = 
 
 
 @router.post("/reference-products/product-info")
-def reference_product_info(payload: CisInventoryProductRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_product_info(payload: CisInventoryProductRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).queue(AgentJobType.PRODUCT_INFO, {"gtins": payload.gtins, "rdInfo": payload.rdInfo})
     except ValueError as exc:
@@ -466,7 +493,7 @@ def reference_product_info(payload: CisInventoryProductRequest, request: Request
 
 
 @router.post("/reference-products/product-gtins")
-def reference_product_gtins(payload: ReferenceProductGtinRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_product_gtins(payload: ReferenceProductGtinRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).queue(AgentJobType.PRODUCT_GTIN_LIST, {"pg": "lp", **payload.model_dump()})
     except ValueError as exc:
@@ -474,7 +501,7 @@ def reference_product_gtins(payload: ReferenceProductGtinRequest, request: Reque
 
 
 @router.post("/reference-products/regulatory-documents")
-def reference_regulatory_documents(payload: ReferenceRdListRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_regulatory_documents(payload: ReferenceRdListRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).queue(AgentJobType.RD_LIST, payload.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -482,7 +509,7 @@ def reference_regulatory_documents(payload: ReferenceRdListRequest, request: Req
 
 
 @router.get("/reference-products/requests/{request_id}")
-def reference_request_status(request_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def reference_request_status(request_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _reference_products_service(request, db).status(request_id)
     except KeyError as exc:
@@ -490,12 +517,12 @@ def reference_request_status(request_id: str, request: Request, identity: Authen
 
 
 @router.get("/reference-products/references")
-def reference_registry_categories(identity: AuthenticatedIdentity = Depends(require_user)) -> list[dict]:
+def reference_registry_categories(identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ))) -> list[dict]:
     return reference_categories()
 
 
 @router.get("/reference-products/references/{category}")
-def reference_registry_entries(category: str, identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
+def reference_registry_entries(category: str, identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ))) -> dict:
     try:
         return reference_entries(category)
     except KeyError as exc:
@@ -503,7 +530,7 @@ def reference_registry_entries(category: str, identity: AuthenticatedIdentity = 
 
 
 @router.get("/reference-products/references/{category}/{value}")
-def reference_registry_lookup(category: str, value: str, identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
+def reference_registry_lookup(category: str, value: str, identity: AuthenticatedIdentity = Depends(require_permission(Permission.REFERENCE_READ))) -> dict:
     try:
         return lookup_reference_value(category, value)
     except KeyError as exc:
@@ -519,7 +546,7 @@ def _document_lifecycle_service(request: Request, db: Session) -> DocumentLifecy
 
 
 @router.post("/documents/list")
-def document_list(payload: DocumentListRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def document_list(payload: DocumentListRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.DOCUMENTS_READ)), db: Session = Depends(get_db)) -> dict:
     body = payload.model_dump(exclude_none=True)
     operation_id = body.pop("operation_id", None)
     try:
@@ -531,7 +558,7 @@ def document_list(payload: DocumentListRequest, request: Request, _: None = Depe
 
 
 @router.post("/documents/info")
-def document_info(payload: DocumentInfoRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def document_info(payload: DocumentInfoRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.DOCUMENTS_READ)), db: Session = Depends(get_db)) -> dict:
     body = payload.model_dump(exclude_none=True)
     operation_id = body.pop("operation_id", None)
     try:
@@ -543,7 +570,7 @@ def document_info(payload: DocumentInfoRequest, request: Request, _: None = Depe
 
 
 @router.post("/documents/cises")
-def document_cises(payload: DocumentCisesRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def document_cises(payload: DocumentCisesRequest, request: Request, _: None = Depends(require_csrf), identity: AuthenticatedIdentity = Depends(require_permission(Permission.DOCUMENTS_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _document_lifecycle_service(request, db).queue_cises(
             document_id=payload.document_id,
@@ -560,7 +587,7 @@ def document_cises(payload: DocumentCisesRequest, request: Request, _: None = De
 
 
 @router.get("/documents/requests/{request_id}")
-def document_request_status(request_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def document_request_status(request_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_permission(Permission.DOCUMENTS_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _document_lifecycle_service(request, db).status(request_id)
     except KeyError as exc:
@@ -568,7 +595,7 @@ def document_request_status(request_id: str, request: Request, identity: Authent
 
 
 @router.get("/documents/ledger/{operation_id}")
-def document_ledger(operation_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def document_ledger(operation_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_permission(Permission.DOCUMENTS_READ)), db: Session = Depends(get_db)) -> dict:
     try:
         return _document_lifecycle_service(request, db).ledger(operation_id)
     except KeyError as exc:
@@ -576,5 +603,5 @@ def document_ledger(operation_id: str, request: Request, identity: Authenticated
 
 
 @router.get("/documents/registries")
-def document_registries(identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
+def document_registries(identity: AuthenticatedIdentity = Depends(require_permission(Permission.DOCUMENTS_READ))) -> dict:
     return DocumentLifecycleService.registries()

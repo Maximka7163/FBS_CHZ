@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Integer, JSON, String, Text, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -12,7 +12,11 @@ from .db import Base
 class EdoLiteLedgerRecord(Base):
     __tablename__ = "edo_lite_ledger"
 
-    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+
+    operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     edo_document_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     edo_group_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -49,6 +53,7 @@ class EdoLiteLedgerRecord(Base):
 
     __table_args__ = (
         CheckConstraint("direction IN ('INCOMING','OUTGOING','UNKNOWN')", name="ck_edo_lite_direction"),
+        UniqueConstraint("organisation_id","participant_id","operation_id",name="uq_edo_lite_ledger_tenant_operation"),
     )
 
 
@@ -84,7 +89,11 @@ class EdoLiteSchemaRegistryRecord(Base):
 class EdoLiteAnnualQuotaRecord(Base):
     __tablename__ = "edo_lite_annual_quota"
 
-    year: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
     local_observed_outgoing_count: Mapped[int] = mapped_column(Integer, nullable=False)
     last_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     source_evidence: Mapped[str] = mapped_column(Text, nullable=False)
@@ -93,4 +102,5 @@ class EdoLiteAnnualQuotaRecord(Base):
     __table_args__ = (
         CheckConstraint("local_observed_outgoing_count >= 0", name="ck_edo_lite_quota_nonnegative"),
         CheckConstraint("authoritative_remote_remaining IS NULL", name="ck_edo_lite_no_fake_remote_remaining"),
+        UniqueConstraint("organisation_id","participant_id","year",name="uq_edo_lite_quota_tenant_year"),
     )

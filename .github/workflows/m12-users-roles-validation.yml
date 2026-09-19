@@ -1,0 +1,251 @@
+name: M12 users roles backend validation
+on:
+  push:
+    branches: [m12/users-roles-001]
+  workflow_dispatch:
+
+env:
+  WBCZ_ENV: test
+  WBCZ_OWN_INN: "1234567890"
+  WBCZ_PUBLIC_REGISTRATION_ENABLED: "false"
+  M12_ACCEPTED_BASE: "3f5507a374ff43cfd8a68e048f507d247d9bd42e"
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: wbcz_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres -d wbcz_test"
+          --health-interval=2s --health-timeout=3s --health-retries=20
+    env:
+      WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+
+      - name: Accepted base ancestry
+        run: git merge-base --is-ancestor "$M12_ACCEPTED_BASE" HEAD
+
+      - name: Historical migrations unchanged
+        shell: bash
+        run: |
+          bad="$(git diff --name-only "$M12_ACCEPTED_BASE" HEAD -- migrations/versions | grep -E '^migrations/versions/(000[1-9]|001[0-2])_' || true)"
+          if [ -n "$bad" ]; then
+            echo "Historical migrations changed:"
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: Frontend source unchanged
+        run: git diff --exit-code "$M12_ACCEPTED_BASE" HEAD -- frontend src/wbcz_ui
+
+      - name: M13 not started
+        shell: bash
+        run: |
+          if git ls-files | grep -Ei '(^|[/_.-])m13([/_.-]|$)'; then
+            echo "M13 artifacts found"
+            exit 1
+          fi
+
+      - name: Synthetic marking fixture security scan
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          source=Path("tests/conftest.py").read_text(encoding="utf-8")
+          if "SYNTHETIC-KIZ-" not in source:
+              raise SystemExit("synthetic WB regression marker missing")
+          # Generic GS1-like 01+GTIN+21+serial literals are forbidden in the
+          # M12 shared fixture; no historical business canary is embedded here.
+          if re.search(r'01\d{14}21[^"\s]{6,}', source):
+              raise SystemExit("GS1-like marking identifier found in shared fixture")
+          PY
+
+      - run: python -m pip install -e ".[ui,test,web]"
+      - run: python -m compileall -q src migrations
+
+      - name: Migration head is M12
+        shell: bash
+        run: |
+          head="$(alembic heads | awk '{print $1}')"
+          test "$head" = "0013_m12_users_roles"
+
+      - run: alembic upgrade head
+
+      - name: Full Python regression
+        run: python -m pytest -q tests
+
+      - name: Frontend regression
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+          npm run build
+
+  migration_path:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=2s --health-timeout=3s --health-retries=20
+    env:
+      MIGRATION_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m12_upgrade
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install -e ".[ui,test,web]"
+
+      - name: Create migration test database
+        run: |
+          python - <<'PY'
+          import psycopg
+          with psycopg.connect("postgresql://postgres:postgres@127.0.0.1:5432/postgres", autocommit=True) as db:
+              db.execute("DROP DATABASE IF EXISTS wbcz_m12_upgrade")
+              db.execute("CREATE DATABASE wbcz_m12_upgrade")
+          PY
+
+      - name: Upgrade through M11
+        env:
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m12_upgrade
+        run: alembic upgrade 0012_m11_reports
+
+      - name: Seed legacy 0012 rows
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          from uuid import uuid4
+          from sqlalchemy import create_engine, text
+          from wbcz_web.auth import hash_password, token_hash
+          url="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m12_upgrade"
+          engine=create_engine(url, future=True)
+          with engine.begin() as db:
+              user_id=db.scalar(text("""
+                  INSERT INTO users(username,password_hash,is_active,is_admin)
+                  VALUES ('legacy-owner',:password,true,true) RETURNING id
+              """),{"password":hash_password("legacy migration secure password")})
+              db.execute(text("""
+                  INSERT INTO sessions(id,user_id,token_hash,expires_at)
+                  VALUES (:id,:user_id,:token_hash,:expires_at)
+              """),{
+                  "id":str(uuid4()),"user_id":user_id,"token_hash":token_hash("legacy-session-token"),
+                  "expires_at":datetime.now(timezone.utc)+timedelta(hours=1),
+              })
+              db.execute(text("""
+                  INSERT INTO agent_jobs(
+                    job_id,job_type,operation_id,purpose,poll_attempt,payload_sha256,payload_json,state
+                  ) VALUES (
+                    'legacy-job','CIS_INFO','legacy-operation','CIS_INVENTORY',0,:digest,
+                    CAST(:payload AS json),'PENDING'
+                  )
+              """),{
+                  "digest":"1"*64,
+                  "payload":'{"job_id":"legacy-job","job_type":"CIS_INFO","operation_id":"legacy-operation","pg":"lp","expected_inn":"1234567890","cises":[]}',
+              })
+          engine.dispose()
+          PY
+
+      - name: Upgrade exactly 0012 to 0013
+        env:
+          WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m12_upgrade
+        run: alembic upgrade 0013_m12_users_roles
+
+      - name: Verify FIX-01 identity schema
+        run: |
+          python - <<'PY'
+          from sqlalchemy import create_engine, inspect
+          url="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m12_upgrade"
+          engine=create_engine(url,future=True)
+          ins=inspect(engine)
+          tables=set(ins.get_table_names())
+          assert {"participant_claims","login_throttle_state","organisation_invitations","participants","users"} <= tables
+          user_cols={c["name"] for c in ins.get_columns("users")}
+          assert {"email_normalized","email_verified_at","account_state"} <= user_cols
+          invite_cols={c["name"] for c in ins.get_columns("organisation_invitations")}
+          assert {"invitee_username","invited_user_id","invited_email_normalized"} <= invite_cols
+          claim_cols={c["name"] for c in ins.get_columns("participant_claims")}
+          assert {"claimant_user_id","target_organisation_id","claimed_inn","state","verification_metadata","evidence_refs"} <= claim_cols
+          uniques={tuple(x.get("column_names") or ()) for x in ins.get_unique_constraints("users")}
+          assert ("email_normalized",) in uniques
+          engine.dispose()
+          PY
+
+      - name: Bootstrap and verify deterministic legacy backfill
+        run: |
+          python - <<'PY'
+          from sqlalchemy import create_engine, select
+          from sqlalchemy.orm import sessionmaker
+          from wbcz.windows_agent import AgentJob, AgentJobType, P0_PG
+          from wbcz_web.models import AgentJobRecord, BootstrapRecord, MembershipRecord, SessionRecord
+          from wbcz_web.repositories import SqlAlchemyAgentJobStore
+          from wbcz_web.services.authorization import AuthorizationError, BootstrapService
+          url="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m12_upgrade"
+          engine=create_engine(url,future=True)
+          factory=sessionmaker(bind=engine,expire_on_commit=False)
+          with factory() as db:
+              user,org,participant,_=BootstrapService(db).bootstrap(
+                  username="legacy-owner",
+                  password="legacy migration secure password",
+                  organisation_name="Migrated Legacy Org",
+                  participant_inn="1234567890",
+              )
+              db.commit()
+              row=db.get(AgentJobRecord,"legacy-job")
+              assert row is not None
+              assert (row.organisation_id,row.participant_id)==(org.id,participant.id)
+              assert db.scalar(select(SessionRecord).where(SessionRecord.user_id==user.id,SessionRecord.revoked_at.is_not(None))) is not None
+              assert db.scalar(select(MembershipRecord).where(
+                  MembershipRecord.organisation_id==org.id,
+                  MembershipRecord.user_id==user.id,
+                  MembershipRecord.role=="OWNER",
+                  MembershipRecord.is_active.is_(True),
+              )) is not None
+              assert db.get(BootstrapRecord,1) is not None
+              try:
+                  BootstrapService(db).bootstrap(
+                      username="legacy-owner",password="another migration secure password",
+                      organisation_name="Second",participant_inn="1234567890",
+                  )
+              except AuthorizationError:
+                  db.rollback()
+              else:
+                  raise AssertionError("second bootstrap unexpectedly succeeded")
+
+          with factory() as db:
+              assert db.get(BootstrapRecord,1) is not None
+              db.info.pop("tenant_scope",None)
+              job=AgentJob(
+                  job_id="post-bootstrap-null-job",job_type=AgentJobType.CIS_INFO,
+                  operation_id="post-bootstrap-null-operation",pg=P0_PG,
+                  expected_inn="1234567890",read_payload={"cises":["010460123456789021ABCDEFGHIJKL"]},
+              )
+              try:
+                  SqlAlchemyAgentJobStore(db).enqueue(job,purpose="CIS_INVENTORY")
+              except PermissionError:
+                  db.rollback()
+              else:
+                  raise AssertionError("post-bootstrap unscoped agent job unexpectedly succeeded")
+          engine.dispose()
+          PY

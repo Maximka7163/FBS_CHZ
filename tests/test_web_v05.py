@@ -10,6 +10,7 @@ from wbcz_web.auth import hash_password
 from wbcz_web.config import WebConfig
 from wbcz_web.main import create_app
 from wbcz_web.models import Base,User
+from wbcz_web.services.authorization import BootstrapService
 DB_URL=os.getenv("WBCZ_TEST_DATABASE_URL")
 pytestmark=pytest.mark.skipif(not DB_URL,reason="WBCZ_TEST_DATABASE_URL requires PostgreSQL")
 HEADERS=["№ задания","Стикер","КИЗ","Номер чека","Стоимость","Валюта","Номер фискального накопителя","Дата","Тип операции","Признак продажи юрлицу"]
@@ -30,12 +31,16 @@ def regression_xlsx():
 @pytest.fixture()
 def env():
  engine=create_engine(DB_URL,future=True);Base.metadata.drop_all(engine);Base.metadata.create_all(engine);factory=sessionmaker(bind=engine,expire_on_commit=False);cfg=WebConfig(DB_URL,"1234567890","test",3600,False);app=create_app(cfg,session_factory=factory)
- with factory() as db:db.add(User(username="owner",password_hash=hash_password("very-secure-password"),is_active=True,is_admin=True));db.commit()
+ with factory() as db:BootstrapService(db).bootstrap(username="owner",password="very-secure-password",organisation_name="Regression Org",participant_inn="1234567890");db.commit()
  with TestClient(app) as client:yield client,factory
  Base.metadata.drop_all(engine);engine.dispose()
 def csrf(c):return c.get("/api/auth/csrf").json()["csrf_token"]
 def auth(c):
- t=csrf(c);r=c.post("/api/auth/login",json={"username":"owner","password":"very-secure-password"},headers={"X-CSRF-Token":t});assert r.status_code==200;return t
+ t=csrf(c);r=c.post("/api/auth/login",json={"username":"owner","password":"very-secure-password"},headers={"X-CSRF-Token":t});assert r.status_code==200
+ scopes=c.get("/api/security/scopes");assert scopes.status_code==200 and scopes.json()["scopes"]
+ target=scopes.json()["scopes"][0]
+ sw=c.post("/api/security/scope",json={"organisation_id":target["organisation_id"],"participant_id":target["participants"][0]["id"]},headers={"X-CSRF-Token":t});assert sw.status_code==200
+ return t
 def upload(c,t,data,name="wb.xlsx"):return c.post("/api/files",files={"file":(name,data,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},headers={"X-CSRF-Token":t})
 def test_login_success(env):
  c,_=env;t=csrf(c);r=c.post("/api/auth/login",json={"username":"owner","password":"very-secure-password"},headers={"X-CSRF-Token":t});assert r.status_code==200 and r.json()["username"]=="owner"
