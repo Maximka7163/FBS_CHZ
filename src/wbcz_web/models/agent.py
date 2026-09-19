@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -79,9 +79,7 @@ class AgentJobRecord(Base):
     participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     causation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    agent_binding_id: Mapped[str | None] = mapped_column(
-        ForeignKey("agent_bindings.id", ondelete="RESTRICT"), nullable=True, index=True
-    )
+    agent_binding_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     purpose: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
@@ -103,6 +101,16 @@ class AgentJobRecord(Base):
     __table_args__ = (
         CheckConstraint("job_type IN ('CIS_CHECK','LK_RECEIPT','LP_RETURN','POLL_DOCUMENT','CIS_INFO','CIS_SEARCH','CIS_HISTORY','CIS_AGGREGATED_LIST','CIS_AGGREGATION_HISTORY','PRODUCT_INFO','CIS_TO_PRODUCT','PARTICIPANTS','MODS_LIST','TN_VED_SEARCH','PRODUCT_GTIN_LIST','RD_LIST','DOCUMENT_LIST','DOCUMENT_INFO','DOCUMENT_CISES','LP_INTRODUCE_GOODS','LK_INDI_COMMISSIONING','LP_GOODS_IMPORT','CROSSBORDER','LP_INTRODUCE_OST','LK_CONTRACT_COMMISSIONING','LP_FTS_INTRODUCE','LK_REMARK','WRITE_OFF','LK_RECEIPT_CANCEL','AGGREGATION_DOCUMENT','SETS_AGGREGATION','REAGGREGATION_DOCUMENT','DISAGGREGATION_DOCUMENT','ATK_AGGREGATION','ATK_TRANSFORMATION','ATK_DISAGGREGATION','EDO_PARTICIPANT','EDO_OUTGOING_LIST','EDO_INCOMING_LIST','EDO_OUTGOING_CONTENT','EDO_INCOMING_CONTENT','EDO_OUTGOING_PRINT','EDO_INCOMING_PRINT','EDO_OUTGOING_LEGAL_ZIP','EDO_INCOMING_LEGAL_ZIP','EDO_OUTGOING_UNSIGNED_EVENTS','EDO_INCOMING_UNSIGNED_EVENTS','EDO_EVENT_CONTENT','EDO_OUTGOING_RECEIPT','EDO_INCOMING_RECEIPT','EDO_OUTGOING_MCHD','EDO_INCOMING_MCHD','EDO_GIS_PROCESSING','REPORT_CREATE','REPORT_TASK_GET','REPORT_TASK_LIST','REPORT_RESULTS','REPORT_DOWNLOAD','REPORT_QUOTA_TYPE','REPORT_QUOTA_ID','INTEGRATION_HEALTH')", name="ck_agent_jobs_type"),
         CheckConstraint("state IN ('PENDING','LEASED','COMPLETED')", name="ck_agent_jobs_state"),
+        CheckConstraint(
+            "agent_binding_id IS NULL OR (organisation_id IS NOT NULL AND participant_id IS NOT NULL)",
+            name="ck_agent_jobs_binding_has_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["agent_binding_id","organisation_id","participant_id"],
+            ["agent_bindings.id","agent_bindings.organisation_id","agent_bindings.participant_id"],
+            name="fk_agent_jobs_agent_binding_tenant",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint("job_id", "payload_sha256", name="uq_agent_jobs_payload"),
     )
 
