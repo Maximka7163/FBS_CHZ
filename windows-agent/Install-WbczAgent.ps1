@@ -20,6 +20,7 @@ Copy-Item -LiteralPath (Join-Path $source 'app') -Destination $root -Recurse -Fo
 $helpers = @(
     'Runtime-Common.ps1',
     'Set-WbczAgentConfig.ps1',
+    'Enroll-WbczAgent.ps1',
     'Preflight-WbczAgent.ps1',
     'Start-WbczAgent.ps1',
     'Uninstall-WbczAgent.ps1',
