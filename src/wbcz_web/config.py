@@ -192,8 +192,8 @@ class WebConfig:
                 raise ValueError("WBCZ_ORGANISATION_TYPE is required when P0 organisation fields are configured")
         else:
             self.organisation_document_config()
-        if self.agent_enabled and self.agent_legacy_bootstrap_enabled and self.agent_machine_token:
-            token = self.agent_machine_token
+        if self.agent_enabled and self.agent_legacy_bootstrap_enabled:
+            token = self.agent_machine_token or ""
             minimum = 32 if self.environment == "production" else 16
             if len(token) < minimum:
                 raise ValueError(f"WBCZ_AGENT_MACHINE_TOKEN must be at least {minimum} characters when legacy bootstrap is enabled")
