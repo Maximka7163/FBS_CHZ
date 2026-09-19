@@ -3,6 +3,8 @@ name: M14 integration settings backend validation
 on:
   push:
     branches: [m14/integration-settings-001]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
