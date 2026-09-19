@@ -855,10 +855,11 @@ class IntegrationSettingsService:
             self._complete_check(check, overall="ERROR", components={"SECRET":{"status":"ERROR"}}, error_code="SECRET_PROVIDER_UNAVAILABLE", user_id=user_id)
             return {**self.health_dto(check), "reused": False}
         try:
+            rate_scope_ref = f"wb:{row.id}:{row.active_secret_version or token.version or 'v0'}"
             connection = WbConnection(
                 environment=WbEnvironment(row.environment),
                 participant_inn=self.scope.participant_inn,
-                secret_ref=ref,
+                secret_ref=rate_scope_ref,
                 token_type=WbTokenType(row.token_type),
                 token_categories=tuple(WbTokenCategory(v) for v in row.token_categories),
                 token_scopes=tuple(row.token_scopes or ()),
@@ -869,7 +870,7 @@ class IntegrationSettingsService:
             )
             class OneSecret:
                 def get_secret(self, secret_ref: str) -> str:
-                    if secret_ref != ref:
+                    if secret_ref != rate_scope_ref:
                         raise KeyError("secret not available")
                     return token.value
             response = WbReadTransport(
