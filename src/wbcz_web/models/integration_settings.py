@@ -158,7 +158,7 @@ class TrueApiConnectionRecord(Base):
             ["observed_certificate_observation_id", "organisation_id", "participant_id"],
             ["agent_certificate_observations.id", "agent_certificate_observations.organisation_id", "agent_certificate_observations.participant_id"],
             name="fk_true_api_observed_cert_tenant",
-            ondelete="SET NULL",
+            ondelete="RESTRICT",
         ),
         CheckConstraint("state IN ('ENABLED','DISABLED','ARCHIVED')", name="ck_true_api_connections_state"),
         CheckConstraint(
