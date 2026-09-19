@@ -5,19 +5,6 @@ from sqlalchemy import inspect
 
 from .base import Repository
 from wbcz_web.models import AuditLog
-from wbcz_web.services.audit_history import (
-    AUDIT_EVENT_REGISTRY,
-    ActorContext,
-    ActorKind,
-    AuditOutcome,
-    AuditService,
-    AuditTenantScope,
-    AuthorizationDecision,
-    SubjectRef,
-    SubjectType,
-    TraceContext,
-)
-
 _ALLOWED={
  "LOGIN_SUCCESS","LOGIN_FAILED","LOGIN_THROTTLED","LOGOUT","LOGOUT_ALL","SESSION_REVOKED",
  "PASSWORD_CHANGED","PASSWORD_AUTHENTICATOR_UNLOCKED","USER_CREATED","USER_DISABLED","FILE_IMPORTED","FILE_REPEATED","CONTROL_RUN",
@@ -68,13 +55,15 @@ class AuditRepository(Repository):
   self.db.info["m13_audit_available"]=available
   return available
 
- def _service(self)->AuditService:
+ def _service(self):
+  from wbcz_web.services.audit_history import AuditService
   key=self.db.info.get("audit_pseudonym_key")
   key_id=self.db.info.get("audit_pseudonym_key_id")
   return AuditService(self.db,pseudonym_key=key if isinstance(key,(bytes,bytearray)) else None,pseudonym_key_id=str(key_id) if key_id else None)
 
  @staticmethod
- def _subject_for(action:str,entity_type:str|None,entity_id:str|None,service:AuditService,org:str|None)->SubjectRef:
+ def _subject_for(action:str,entity_type:str|None,entity_id:str|None,service,org:str|None):
+  from wbcz_web.services.audit_history import SubjectRef,SubjectType
   raw=str(entity_id or "unknown")
   if action=="SCOPE_CHANGED":
    return SubjectRef(SubjectType.ORGANISATION,str(org or raw))
@@ -103,6 +92,10 @@ class AuditRepository(Repository):
   organisation_id:str|None,
   participant_id:str|None,
  )->None:
+  from wbcz_web.services.audit_history import (
+   AUDIT_EVENT_REGISTRY,ActorContext,ActorKind,AuditOutcome,AuditTenantScope,
+   AuthorizationDecision,TraceContext,
+  )
   event_type=_IMMUTABLE_EVENT_MAP.get(action)
   if event_type is None or not self._m13_available():return
   service=self._service()
