@@ -233,8 +233,6 @@ class WebConfig:
             if normalized in {"changeme", "change_me", "password", "secret", "agent-token", "replace_me"} or "replace_with" in normalized:
                 raise ValueError("WBCZ_AGENT_MACHINE_TOKEN is an unsafe placeholder")
         if self.environment == "production":
-            if not self.audit_pseudonym_key and not self.audit_key_path:
-                raise ValueError("WBCZ_AUDIT_KEY_PATH or WBCZ_AUDIT_PSEUDONYM_KEY is required in production")
             if not self.cookie_secure:
                 raise ValueError("WBCZ_COOKIE_SECURE must be true in production")
             if self.debug:
@@ -249,6 +247,8 @@ class WebConfig:
             password = str(url.password).strip().lower()
             if not password or password in {"password", "postgres", "wbcz", "changeme", "change_me"} or "replace_with" in password:
                 raise ValueError("Production database password is missing or unsafe placeholder")
+            if not self.audit_pseudonym_key and not self.audit_key_path:
+                raise ValueError("WBCZ_AUDIT_KEY_PATH or WBCZ_AUDIT_PSEUDONYM_KEY is required in production")
         if self.environment == "production" and self.m15_strict_production:
             self.validate_m15_production_runtime()
         return self
