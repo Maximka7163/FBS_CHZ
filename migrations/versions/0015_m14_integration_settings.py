@@ -88,7 +88,8 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.UniqueConstraint("credential_hash", name="uq_agent_bindings_credential_hash"),
-        sa.UniqueConstraint("participant_id","installation_id", name="uq_agent_bindings_participant_installation"),
+        sa.UniqueConstraint("organisation_id","participant_id","installation_id", name="uq_agent_bindings_participant_installation"),
+        sa.UniqueConstraint("id","organisation_id","participant_id", name="uq_agent_bindings_id_tenant"),
         sa.CheckConstraint("state IN ('PENDING','ACTIVE','DISABLED','ARCHIVED')", name="ck_agent_bindings_state"),
         sa.CheckConstraint("credential_version >= 1", name="ck_agent_bindings_credential_version"),
     )
@@ -104,7 +105,7 @@ def upgrade() -> None:
     op.create_table(
         "agent_certificate_observations",
         sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("agent_binding_id", sa.String(36), sa.ForeignKey("agent_bindings.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column("agent_binding_id", sa.String(36), nullable=False),
         sa.Column("organisation_id", sa.String(36), sa.ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=False),
         sa.Column("participant_id", sa.String(36), nullable=False),
         sa.Column("thumbprint", sa.String(160), nullable=False),
@@ -131,6 +132,13 @@ def upgrade() -> None:
             name="fk_agent_cert_obs_participant_organisation",
             ondelete="RESTRICT",
         ),
+        sa.ForeignKeyConstraint(
+            ["agent_binding_id","organisation_id","participant_id"],
+            ["agent_bindings.id","agent_bindings.organisation_id","agent_bindings.participant_id"],
+            name="fk_agent_cert_obs_binding_tenant",
+            ondelete="RESTRICT",
+        ),
+        sa.UniqueConstraint("id","organisation_id","participant_id", name="uq_agent_cert_obs_id_tenant"),
         sa.CheckConstraint("readiness_state IN ('READY','NOT_READY','UNKNOWN')", name="ck_agent_cert_obs_readiness"),
         sa.CheckConstraint("match_state IN ('MATCH','MISMATCH','UNKNOWN')", name="ck_agent_cert_obs_match"),
         sa.CheckConstraint("expiry_state IN ('EXPIRED','EXPIRING_CRITICAL','EXPIRING_SOON','VALID','UNKNOWN')", name="ck_agent_cert_obs_expiry"),
@@ -146,12 +154,12 @@ def upgrade() -> None:
         sa.Column("participant_id", sa.String(36), nullable=False),
         sa.Column("environment", sa.String(24), nullable=False, server_default="PRODUCTION"),
         sa.Column("state", sa.String(16), nullable=False, server_default="ENABLED"),
-        sa.Column("primary_agent_binding_id", sa.String(36), sa.ForeignKey("agent_bindings.id", ondelete="RESTRICT"), nullable=True),
+        sa.Column("primary_agent_binding_id", sa.String(36), nullable=True),
         sa.Column("desired_capabilities_json", sa.JSON(), nullable=False, server_default=sa.text("'[]'::json")),
         sa.Column("observed_capabilities_json", sa.JSON(), nullable=False, server_default=sa.text("'[]'::json")),
         sa.Column("desired_certificate_ref", sa.String(160), nullable=True),
         sa.Column("certificate_selection_state", sa.String(32), nullable=False, server_default="NONE"),
-        sa.Column("observed_certificate_observation_id", sa.String(36), sa.ForeignKey("agent_certificate_observations.id", ondelete="SET NULL"), nullable=True),
+        sa.Column("observed_certificate_observation_id", sa.String(36), nullable=True),
         sa.Column("last_auth_success_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_check_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error_code", sa.String(80), nullable=True),
@@ -163,6 +171,18 @@ def upgrade() -> None:
             ["participants.id","participants.organisation_id"],
             name="fk_true_api_connections_participant_organisation",
             ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["primary_agent_binding_id","organisation_id","participant_id"],
+            ["agent_bindings.id","agent_bindings.organisation_id","agent_bindings.participant_id"],
+            name="fk_true_api_primary_binding_tenant",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["observed_certificate_observation_id","organisation_id","participant_id"],
+            ["agent_certificate_observations.id","agent_certificate_observations.organisation_id","agent_certificate_observations.participant_id"],
+            name="fk_true_api_observed_cert_tenant",
+            ondelete="SET NULL",
         ),
         sa.CheckConstraint("state IN ('ENABLED','DISABLED','ARCHIVED')", name="ck_true_api_connections_state"),
         sa.CheckConstraint("certificate_selection_state IN ('NONE','PENDING_LOCAL_APPLY','READY','MISMATCH')", name="ck_true_api_certificate_selection_state"),
@@ -183,7 +203,7 @@ def upgrade() -> None:
         sa.Column("integration_type", sa.String(32), nullable=False),
         sa.Column("connection_type", sa.String(32), nullable=False),
         sa.Column("connection_id", sa.String(64), nullable=True),
-        sa.Column("agent_binding_id", sa.String(36), sa.ForeignKey("agent_bindings.id", ondelete="RESTRICT"), nullable=True),
+        sa.Column("agent_binding_id", sa.String(36), nullable=True),
         sa.Column("check_kind", sa.String(48), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
@@ -206,6 +226,12 @@ def upgrade() -> None:
             name="fk_integration_health_participant_organisation",
             ondelete="RESTRICT",
         ),
+        sa.ForeignKeyConstraint(
+            ["agent_binding_id","organisation_id","participant_id"],
+            ["agent_bindings.id","agent_bindings.organisation_id","agent_bindings.participant_id"],
+            name="fk_integration_health_binding_tenant",
+            ondelete="RESTRICT",
+        ),
         sa.CheckConstraint("overall_status IN ('CHECKING','READY','DEGRADED','ERROR','BLOCKED','NOT_TESTED')", name="ck_integration_health_overall_status"),
         sa.CheckConstraint("latency_ms IS NULL OR latency_ms >= 0", name="ck_integration_health_latency"),
     )
@@ -223,8 +249,13 @@ def upgrade() -> None:
 
     op.add_column("agent_jobs", sa.Column("agent_binding_id", sa.String(36), nullable=True))
     op.create_foreign_key(
-        "fk_agent_jobs_agent_binding", "agent_jobs", "agent_bindings",
-        ["agent_binding_id"], ["id"], ondelete="RESTRICT",
+        "fk_agent_jobs_agent_binding_tenant", "agent_jobs", "agent_bindings",
+        ["agent_binding_id","organisation_id","participant_id"],
+        ["id","organisation_id","participant_id"], ondelete="RESTRICT",
+    )
+    op.create_check_constraint(
+        "ck_agent_jobs_binding_has_tenant", "agent_jobs",
+        "agent_binding_id IS NULL OR (organisation_id IS NOT NULL AND participant_id IS NOT NULL)",
     )
     op.create_index("ix_agent_jobs_agent_binding_id", "agent_jobs", ["agent_binding_id"])
     op.drop_constraint("ck_agent_jobs_type", "agent_jobs", type_="check")
@@ -286,7 +317,8 @@ def downgrade() -> None:
         "job_type IN (" + _quoted(tuple(x for x in AGENT_JOB_TYPES if x != "INTEGRATION_HEALTH")) + ")",
     )
     op.drop_index("ix_agent_jobs_agent_binding_id", table_name="agent_jobs")
-    op.drop_constraint("fk_agent_jobs_agent_binding", "agent_jobs", type_="foreignkey")
+    op.drop_constraint("ck_agent_jobs_binding_has_tenant", "agent_jobs", type_="check")
+    op.drop_constraint("fk_agent_jobs_agent_binding_tenant", "agent_jobs", type_="foreignkey")
     op.drop_column("agent_jobs", "agent_binding_id")
 
     for name in (
