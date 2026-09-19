@@ -223,7 +223,7 @@ jobs:
           $root = Join-Path $PWD "out\sellari-wbcz-agent-p0-rc1-0.5.1-$short"
           New-Item -ItemType Directory -Path (Join-Path $root 'app') -Force | Out-Null
           Copy-Item -LiteralPath '.\dist\wbcz-agent' -Destination (Join-Path $root 'app\wbcz-agent') -Recurse
-          $files = @('Install-WbczAgent.ps1','Runtime-Common.ps1','Set-WbczAgentConfig.ps1','Preflight-WbczAgent.ps1','Start-WbczAgent.ps1','Uninstall-WbczAgent.ps1','README.txt')
+          $files = @('Install-WbczAgent.ps1','Runtime-Common.ps1','Set-WbczAgentConfig.ps1','Enroll-WbczAgent.ps1','Preflight-WbczAgent.ps1','Start-WbczAgent.ps1','Uninstall-WbczAgent.ps1','README.txt')
           foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path 'windows-agent' $f) -Destination (Join-Path $root $f) }
           $pyinstaller = python -c "import PyInstaller; print(PyInstaller.__version__)"
           $meta = [ordered]@{
@@ -241,6 +241,7 @@ jobs:
           $meta | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'VERSION.json') -Encoding UTF8
           if (Test-Path (Join-Path $root 'config.json')) { throw 'config must not be packaged' }
           if (Test-Path (Join-Path $root 'agent-credential.dpapi')) { throw 'credential must not be packaged' }
+          if (-not (Test-Path (Join-Path $root 'Enroll-WbczAgent.ps1'))) { throw 'enrollment helper missing' }
           $joined = (Get-ChildItem $root -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
           if ($joined -match '-----BEGIN .*PRIVATE KEY-----') { throw 'private key marker found' }
           New-Item -ItemType Directory -Path out -Force | Out-Null
@@ -305,8 +306,39 @@ jobs:
               "task_id": "P0-RC1-RUNTIME-RECONCILIATION-001",
               "source_sha": os.environ["GITHUB_SHA"],
               "base_sha": "ce71f9e049bc7d65a0221001b2c7e5aa701f2243",
+              "accepted_frontend_ancestor": "bcb567a8f1e4e9261d68fa800ccc96e76518c596",
               "migration_head": "0016_m15_production_hardening",
+              "migration_policy": "apply complete Alembic chain to exact head only in separately authorized deployment",
               "production_write_default": False,
+              "accepted_milestones": {
+                  "P0": "WB XLSX/control + write backend + immutable document bytes + Windows outbound agent",
+                  "M1": "CIS inventory/read evidence",
+                  "M2": "reference products",
+                  "M3": "auth/signing boundary",
+                  "M4": "document lifecycle",
+                  "M5": "turnover DISTANCE/REMOTE_SALE_RETURN",
+                  "M6": "aggregation",
+                  "M7": "EDO foundation; full XML write blocker retained",
+                  "M8": "SUZ foundation; full SUZ wire blocker retained",
+                  "M9": "WB FBS read-only integration",
+                  "M10": "Ozon safe foundation; executable wire disabled",
+                  "M11": "reports/exports",
+                  "M12": "tenant/auth/RBAC boundary",
+                  "M13": "audit/security evidence",
+                  "M14": "participant-bound agent enrollment/operations",
+                  "M15": "production hardening/runtime topology",
+              },
+              "runtime_components": [
+                  "VPS backend image and deterministic archive",
+                  "accepted frontend dist from exact RC source",
+                  "PostgreSQL migration chain through 0016_m15_production_hardening",
+                  "web + worker runtime topology",
+                  "Windows self-contained outbound agent",
+                  "participant-bound one-use enrollment + DPAPI permanent credential",
+                  "CryptoPro/GOST boundary with private key/PIN Windows-only",
+                  "polling/reconciliation/audit",
+                  "LK_RECEIPT/DISTANCE and LP_RETURN/REMOTE_SALE_RETURN orchestration",
+              ],
               "vps_runtime_artifact": {
                   "name": os.environ["VPS_NAME"],
                   "sha256": os.environ["VPS_SHA256"],
@@ -317,10 +349,30 @@ jobs:
                   "sha256": os.environ["WINDOWS_SHA256"],
                   "pyinstaller_version": os.environ["PYINSTALLER_VERSION"],
               },
+              "remaining_external_gates": [
+                  "architect acceptance of exact RC SHA and artifact checksums",
+                  "production secrets/DB roles/key material provisioned outside Git",
+                  "valid production HTTPS/reverse-proxy path",
+                  "verified backup/PITR and operator maintenance window",
+                  "current production migration/schema-drift verification",
+                  "separate authorization for production migration to 0016_m15_production_hardening",
+                  "P0 organisation metadata verified for the intended participant",
+                  "Windows CryptoPro/GOST tooling and approved certificate preinstalled locally",
+                  "one-use participant-bound agent enrollment",
+                  "safe Windows-agent preflight acceptance",
+                  "separate explicit authorization and approved CIS/KIZ for first real write",
+              ],
+              "known_independent_blockers": {
+                  "M7": "M7_FULL_XML_WRITE_BLOCKED_ON_OFFICIAL_XSD",
+                  "M8": "M8_FULL_SUZ_WIRE_BLOCKED_ON_OFFICIAL_CORE_SUZ_ARTIFACTS",
+                  "M10": "M10_WIRE_READY=NO;M10_EXECUTABLE_READ_CAPABILITIES=NONE",
+              },
               "real_true_api_called": False,
               "production_deployed": False,
               "production_migration_applied": False,
               "real_certificate_used": False,
+              "real_pin_used": False,
+              "secrets_accessed_or_modified": False,
           }
           Path("build/p0-rc1-manifest.json").write_text(json.dumps(data, indent=2, sort_keys=True)+"\n")
           PY
