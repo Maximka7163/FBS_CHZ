@@ -47,6 +47,7 @@ services:
       WBCZ_OWN_INN: ${WBCZ_OWN_INN:?WBCZ_OWN_INN is required}
       WBCZ_PUBLIC_REGISTRATION_ENABLED: "false"
       WBCZ_TRUE_API_WRITE_ENABLED: "false"
+      WBCZ_AGENT_ENABLED: "true"
       WBCZ_M15_STRICT_PRODUCTION: "false"
     command: ["alembic", "upgrade", "0016_m15_production_hardening"]
     networks:
