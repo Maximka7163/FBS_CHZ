@@ -7,6 +7,7 @@ from fastapi import Depends,Header,HTTPException,Request
 from sqlalchemy.orm import Session
 from wbcz_web.services import AuthService,AuthenticationError
 from wbcz_web.services.authorization import ActiveScope,AuthorizationError,AuthorizationService,Permission,ScopeRequired
+from wbcz_web.services.runtime_health import audit_key_material
 
 def get_db(request:Request)->Iterator[Session]:
  db=request.app.state.session_factory()
@@ -18,9 +19,10 @@ def get_db(request:Request)->Iterator[Session]:
  request.state.correlation_id=correlation_id
  db.info["audit_trace"]={"request_id":request_id,"correlation_id":correlation_id,"causation_id":None}
  config=request.app.state.config
- if getattr(config,"audit_pseudonym_key",None):
-  db.info["audit_pseudonym_key"]=config.audit_pseudonym_key.encode("utf-8")
-  db.info["audit_pseudonym_key_id"]=config.audit_pseudonym_key_id
+ audit_key,audit_key_id=audit_key_material(config)
+ if audit_key:
+  db.info["audit_pseudonym_key"]=audit_key
+  db.info["audit_pseudonym_key_id"]=audit_key_id
  try:yield db;db.commit()
  except Exception:db.rollback();raise
  finally:db.close()
