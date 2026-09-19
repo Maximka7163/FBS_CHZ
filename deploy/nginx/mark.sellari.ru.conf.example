@@ -1,30 +1,68 @@
-# TEMPLATE ONLY. Do not enable without the host's existing TLS certificate directives.
-# The operator must supply the already-managed listen/ssl_certificate settings for mark.sellari.ru.
+# TEMPLATE ONLY. Operators must supply the host-managed TLS certificate directives.
+server {
+    listen 80;
+    server_name mark.sellari.ru;
+    return 301 https://$host$request_uri;
+}
+
 server {
     server_name mark.sellari.ru;
 
-    # HTTPS termination belongs to the host nginx. Add the host-approved TLS lines here.
-    # No certificate path is intentionally hard-coded in this repository.
-
+    # HTTPS termination belongs to the host nginx. Add host-approved listen 443
+    # ssl / certificate directives before enabling this template.
     root /opt/sellari-marking/current/frontend;
     index index.html;
 
-    # Parser limit is 50 MiB; 52 MiB leaves multipart/protocol overhead.
-    client_max_body_size 52m;
+    # Default API/body budget is deliberately small. Large routes override it.
+    client_max_body_size 2m;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
     add_header Referrer-Policy "no-referrer" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
     add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'" always;
 
+    # Browser XLSX import: parser enforces 50 MiB; 52 MiB leaves multipart overhead.
+    location = /api/files {
+        client_max_body_size 52m;
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_read_timeout 120s;
+    }
+
+    # Agent report artifact ingress is separately bounded and streamed. It does
+    # not inherit the browser upload limit or buffer multi-GiB bodies in nginx.
+    location ^~ /api/agent/v1/report-artifacts/ {
+        client_max_body_size 2048m;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
     location /api/ {
         proxy_pass http://127.0.0.1:8765;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Overwrite spoofable incoming forwarding headers instead of appending.
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_connect_timeout 5s;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
