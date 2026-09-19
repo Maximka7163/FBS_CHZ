@@ -460,11 +460,9 @@ def test_login_throttle_state_persists_across_database_sessions():
             state = third.get(LoginThrottleStateRecord, user_id)
             assert state is not None and state.consecutive_failures == 2
     finally:
-        with factory() as cleanup:
-            user = cleanup.scalar(select(User).where(User.username == username))
-            if user is not None:
-                cleanup.delete(user)
-                cleanup.commit()
+        # M13 immutable actor attribution intentionally RESTRICTs hard deletion of
+        # users referenced by sealed audit evidence. This test uses a unique
+        # username, so teardown must not violate the production retention model.
         engine.dispose()
 
 
