@@ -23,7 +23,10 @@ def create_app(
     from .api.report_routes import reports_router
     from .api.audit_routes import audit_router
     from .api.integration_routes import integrations_router
+    from .api.health_routes import health_router
     from .services.integration_secrets import ReadOnlySecretProvider
+    from .services.production_secrets import build_production_secret_provider
+    from .middleware import RequestContextMiddleware
     from wbcz.wb_fbs import StatefulWbRateLimiter
     config = (config or WebConfig.from_env()).validate_for_startup()
     production = config.environment == "production"
@@ -33,6 +36,7 @@ def create_app(
         *reports_router.routes,
         *audit_router.routes,
         *integrations_router.routes,
+        *health_router.routes,
         *agent_router.routes,
     ]
     app = FastAPI(
@@ -46,13 +50,23 @@ def create_app(
     )
     app.state.config = config
     app.state.session_factory = session_factory or build_session_factory(config)
-    app.state.integration_secret_provider = integration_secret_provider or ReadOnlySecretProvider()
+    if integration_secret_provider is not None:
+        app.state.integration_secret_provider = integration_secret_provider
+    elif production and config.m15_strict_production:
+        app.state.integration_secret_provider = build_production_secret_provider(config)
+    else:
+        app.state.integration_secret_provider = ReadOnlySecretProvider()
     app.state.wb_http_adapter = wb_http_adapter
     app.state.wb_rate_limiter = wb_rate_limiter or StatefulWbRateLimiter()
+    app.state.draining = False
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.trusted_hosts))
+    app.add_middleware(RequestContextMiddleware)
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     required = {
         "/api/health",
+        "/api/live",
+        "/api/ready",
+        "/api/health/deep",
         "/api/security/scopes",
         "/api/security/scope",
         "/api/reports/{job_id}/artifacts/{artifact_id}/download",
