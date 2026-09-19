@@ -76,7 +76,7 @@ class AgentJobRecord(Base):
 
     job_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
-    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)\n    correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)\n    causation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     job_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     purpose: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
