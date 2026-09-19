@@ -265,6 +265,7 @@ class AgentOrchestrationBroker:
             Path(self.config.report_artifact_root),
             key_provider=build_artifact_key_provider(self.config),
             key_version=self.config.report_artifact_key_version,
+            min_free_disk_bytes=self.config.report_min_free_disk_bytes,
         )
         return ReportArtifactIngressService(
             self.db,
