@@ -13,13 +13,15 @@ def create_app(config: WebConfig | None = None, *, session_factory=None) -> Fast
     from .api.routes import router
     from .api.agent_routes import agent_router
     from .api.security_routes import security_router
-    from .api.report_routes import reports_router\n    from .api.audit_routes import audit_router
+    from .api.report_routes import reports_router
+    from .api.audit_routes import audit_router
     config = (config or WebConfig.from_env()).validate_for_startup()
     production = config.environment == "production"
     child_routes = [
         *router.routes,
         *security_router.routes,
         *reports_router.routes,
+        *audit_router.routes,
         *agent_router.routes,
     ]
     app = FastAPI(
@@ -39,7 +41,8 @@ def create_app(config: WebConfig | None = None, *, session_factory=None) -> Fast
         "/api/health",
         "/api/security/scopes",
         "/api/security/scope",
-        "/api/reports/{job_id}/artifacts/{artifact_id}/download",\n        "/api/audit/events",
+        "/api/reports/{job_id}/artifacts/{artifact_id}/download",
+        "/api/audit/events",
         "/api/agent/v1/jobs/next",
     }
     missing = required - paths
