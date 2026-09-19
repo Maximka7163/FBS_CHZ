@@ -372,14 +372,17 @@ def test_postgres_wb_rate_limiter_is_shared_by_connection_credential_and_environ
     clock = lambda: NOW
     with factory() as first:
         limiter = PostgresWbRateLimiter(first, clock=clock)
-        allowed = limiter.consume(
-            family="SELLER_INFO",
-            token_type=WbTokenType.PERSONAL,
-            environment=WbEnvironment.PRODUCTION,
-            token_secret_ref="wb:connection-a:v7",
-            now_monotonic=0.0,
-        )
-        assert allowed.allowed is True
+        # Accepted SELLER_INFO policy has burst=10. Consume the whole
+        # shared burst in process A, then process B must observe exhaustion.
+        for _ in range(10):
+            allowed = limiter.consume(
+                family="SELLER_INFO",
+                token_type=WbTokenType.PERSONAL,
+                environment=WbEnvironment.PRODUCTION,
+                token_secret_ref="wb:connection-a:v7",
+                now_monotonic=0.0,
+            )
+            assert allowed.allowed is True
         first.commit()
     with factory() as second:
         limiter = PostgresWbRateLimiter(second, clock=clock)
