@@ -40,6 +40,7 @@ class ParticipantRecord(Base):
 
     __table_args__ = (
         UniqueConstraint("organisation_id", "inn", name="uq_participants_organisation_inn"),
+        UniqueConstraint("id", "organisation_id", name="uq_participants_id_organisation_m13"),
         CheckConstraint(
             "verification_state IN ('UNVERIFIED','PENDING_VERIFICATION','VERIFIED','REJECTED')",
             name="ck_participants_verification_state",
