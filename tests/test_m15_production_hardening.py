@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
+import subprocess
+import sys
 from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
@@ -15,6 +18,7 @@ from wbcz_web.config import WebConfig
 from wbcz_web.main import create_app
 from wbcz_web.services.agent_enrollment import AgentHandshake, ProtocolCompatibility, evaluate_protocol
 from wbcz_web.services.production_hardening import (
+    MetricsRegistry,
     RetryClassification,
     classify_failure,
     parse_retry_after,
@@ -175,8 +179,10 @@ def test_live_does_not_touch_database_and_ready_fails_closed_when_database_is_do
         session_factory=BrokenSessionFactory(),
     )
     client = TestClient(app)
-    live = client.get("/api/live")
+    live = client.get("/api/live", headers={"X-Request-ID": "invalid id with spaces"})
     assert live.status_code == 200
+    assert live.headers["X-Request-ID"] != "invalid id with spaces"
+    assert live.headers["X-Correlation-ID"] == live.headers["X-Request-ID"]
     assert live.json()["status"] == "live"
     ready = client.get("/api/ready")
     assert ready.status_code == 503
@@ -255,3 +261,43 @@ def test_windows_agent_production_runtime_preserves_windows_cryptopro_boundary(m
     monkeypatch.delenv("WBCZ_AGENT_MACHINE_TOKEN", raising=False)
     with pytest.raises(ValueError, match="requires Windows \+ CryptoPro CSP"):
         WindowsAgentConfig.from_env()
+
+
+def test_metrics_reject_sensitive_high_cardinality_labels():
+    metrics = MetricsRegistry()
+    metrics.record("http_requests_total", labels={"route": "/api/live", "status_class": "2xx"})
+    with pytest.raises(ValueError, match="forbidden metric labels"):
+        metrics.record("http_requests_total", labels={"participant_id": "participant-canary"})
+
+
+def test_backup_contract_accepts_verified_synthetic_manifest_and_rejects_unverified(tmp_path: Path):
+    root = Path(__file__).parents[1]
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "postgres_base_backup": {"verified": True},
+        "wal_archive": {"verified": True},
+        "pg_dump_custom": {"verified": True},
+        "artifact_backup": {"verified": True},
+        "secret_store_backup": {"verified": True},
+        "crypto_recovery_material": {"verified": True},
+        "release_manifest": {"verified": True},
+        "project_targets": {
+            "db_rpo_minutes": 15,
+            "artifact_secret_rpo_minutes": 60,
+            "rto_hours": 4,
+        },
+    }
+    path = tmp_path / "backup-status.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    good = subprocess.run(
+        [sys.executable, str(root / "scripts/m15_backup_contract.py"), str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert good.returncode == 0
+    manifest["wal_archive"]["verified"] = False
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    bad = subprocess.run(
+        [sys.executable, str(root / "scripts/m15_backup_contract.py"), str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert bad.returncode != 0
