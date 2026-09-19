@@ -222,6 +222,7 @@ class ProductionWorkerRuntime:
             Path(self.config.report_artifact_root),
             key_provider=build_artifact_key_provider(self.config),
             key_version=self.config.report_artifact_key_version,
+            min_free_disk_bytes=self.config.report_min_free_disk_bytes,
         )
 
     def heartbeat(self, *, state: str = "RUNNING", scheduler: bool = False) -> None:
