@@ -65,8 +65,8 @@ def test_frontend_production_api_is_same_origin():
 
 def test_prod_compose_keeps_postgres_internal_and_backend_loopback_only():
     text = (Path(__file__).parents[1] / "docker-compose.prod.yml").read_text(encoding="utf-8")
-    postgres = text.split("  marking-postgres:", 1)[1].split("  marking-backend:", 1)[0]
-    backend = text.split("  marking-backend:", 1)[1].split("volumes:", 1)[0]
+    postgres = text.split("  marking-postgres:", 1)[1].split("  marking-migrate:", 1)[0]
+    backend = text.split("  marking-backend:", 1)[1].split("  marking-worker:", 1)[0]
     assert "\n    ports:" not in postgres
     assert "expose:" in postgres
     assert "- marking_internal" in postgres
@@ -78,10 +78,11 @@ def test_prod_compose_keeps_postgres_internal_and_backend_loopback_only():
     assert "marking_proxy:" in text
 
 
-def test_backend_dockerfile_healthcheck_targets_api_health():
+def test_backend_dockerfile_healthcheck_targets_api_readiness():
     text = (Path(__file__).parents[1] / "Dockerfile.backend").read_text(encoding="utf-8")
     assert "HEALTHCHECK" in text
-    assert "/api/health" in text
+    assert "/api/ready" in text
+    assert "/api/health" not in text
 
 
 @pytest.mark.skipif(not DB_URL, reason="WBCZ_TEST_DATABASE_URL requires PostgreSQL")
