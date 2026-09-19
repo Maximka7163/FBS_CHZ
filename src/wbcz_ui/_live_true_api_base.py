@@ -635,6 +635,9 @@ try {
     publicKeyOid=$cert.PublicKey.Oid.Value
     signatureOid=$cert.SignatureAlgorithm.Value
     providerName=$provider
+    subject=$cert.Subject
+    issuer=$cert.Issuer
+    serial=$cert.SerialNumber
   } | ConvertTo-Json -Compress
 } finally { $store.Close() }
 '''
@@ -680,8 +683,10 @@ try {
         if not_after.tzinfo is None:
             not_after = not_after.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        if not (not_before <= now <= not_after):
-            raise TrueApiError("Selected certificate is not currently valid")
+        if now < not_before:
+            raise TrueApiError("Selected certificate is not yet valid")
+        if now >= not_after:
+            raise TrueApiError("Selected certificate is expired")
         public_key_oid = str(data.get("publicKeyOid") or "")
         if public_key_oid not in _GOST_PUBLIC_KEY_OIDS:
             raise TrueApiError(
@@ -702,6 +707,11 @@ try {
             "thumbprint_match": True,
             "has_private_key": True,
             "not_expired": True,
+            "not_before": not_before.astimezone(timezone.utc).isoformat(),
+            "not_after": not_after.astimezone(timezone.utc).isoformat(),
+            "subject": str(data.get("subject") or "") or None,
+            "issuer": str(data.get("issuer") or "") or None,
+            "serial": str(data.get("serial") or "") or None,
             "public_key_oid": public_key_oid,
             "signature_oid": str(data.get("signatureOid") or ""),
             "provider": provider,
