@@ -1,0 +1,14 @@
+name: M14 integration settings validation
+on:
+  push:
+    branches: [m14/integration-settings-001]
+  workflow_dispatch:
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Accepted base ancestry
+        run: git merge-base --is-ancestor fda8dcd12d66f4c363e9239e6cc2783982ec4da3 HEAD
