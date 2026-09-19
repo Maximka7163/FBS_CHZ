@@ -258,7 +258,7 @@ def list_audit_events(
 @audit_router.get("/audit/events/{event_id}")
 def get_audit_event(
     event_id: str,
-    identity: AuthenticatedIdentity = Depends(require_permission(Permission.AUDIT_READ, participant_required=False)),
+    identity: AuthenticatedIdentity = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     scope = _scope(db, identity)
