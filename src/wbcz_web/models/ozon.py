@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -16,14 +16,30 @@ class OzonConnectionRecord(Base):
     participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    environment: Mapped[str] = mapped_column(String(24), nullable=False, default="PRODUCTION")
     participant_inn: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
     client_id: Mapped[str] = mapped_column(Text, nullable=False)
     api_key_secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    active_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active_secret_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pending_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_secret_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    secret_rotation_state: Mapped[str] = mapped_column(String(32), nullable=False, default="NONE")
+    secret_configured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     api_key_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     roles_metadata: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     capability_metadata: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     connection_state: Mapped[str] = mapped_column(String(32), nullable=False)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    local_validation_state: Mapped[str] = mapped_column(String(32), nullable=False, default="NOT_VALIDATED")
+    wire_readiness: Mapped[str] = mapped_column(String(32), nullable=False, default="BLOCKED")
+    blocker_code: Mapped[str] = mapped_column(String(96), nullable=False, default="M10_EXECUTABLE_READ_CAPABILITIES_NONE")
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    health_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
