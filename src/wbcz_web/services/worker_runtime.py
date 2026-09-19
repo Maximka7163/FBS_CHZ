@@ -11,13 +11,15 @@ import socket
 import time
 from uuid import uuid4
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session
 
 from wbcz.m11_reports import ArtifactLimitExceeded, FilesystemReportArtifactStore, ReportSecurityError
 from wbcz_web.models import (
-    AggregationOperationLedgerRecord, ReportJobRecord, TurnoverOperationLedgerRecord,
+    AgentEnrollmentTokenRecord, AggregationOperationLedgerRecord, InvitationRecord,
+    LoginAttemptRecord, LoginThrottleStateRecord, RemoteRateLimitStateRecord,
+    ReportJobRecord, SessionRecord, TurnoverOperationLedgerRecord,
     WorkerHeartbeatRecord, WriteOperationRecord,
 )
 from wbcz_web.repositories.reports import ClaimedReportJob, SqlReportRepository
@@ -329,6 +331,41 @@ class ProductionWorkerRuntime:
             self._handle_failure(claimed, exc)
         return True
 
+    def cleanup_ephemeral_db(self) -> int:
+        """Technical retention only. Business ledgers/audit/reviews/artifacts are untouched."""
+        now = _now()
+        removed = 0
+        with self.session_factory() as db:
+            removed += int(db.execute(delete(SessionRecord).where(
+                SessionRecord.expires_at < now - timedelta(days=7)
+            )).rowcount or 0)
+            removed += int(db.execute(delete(LoginAttemptRecord).where(
+                LoginAttemptRecord.attempted_at < now - timedelta(days=7)
+            )).rowcount or 0)
+            removed += int(db.execute(delete(LoginThrottleStateRecord).where(
+                LoginThrottleStateRecord.password_locked.is_(False),
+                LoginThrottleStateRecord.consecutive_failures == 0,
+                LoginThrottleStateRecord.updated_at < now - timedelta(days=7),
+            )).rowcount or 0)
+            removed += int(db.execute(delete(InvitationRecord).where(
+                InvitationRecord.state.in_(("EXPIRED", "REVOKED")),
+                InvitationRecord.expires_at < now - timedelta(days=30),
+            )).rowcount or 0)
+            removed += int(db.execute(delete(AgentEnrollmentTokenRecord).where(
+                AgentEnrollmentTokenRecord.state.in_(("EXPIRED", "REVOKED", "USED")),
+                AgentEnrollmentTokenRecord.expires_at < now - timedelta(days=1),
+            )).rowcount or 0)
+            removed += int(db.execute(delete(RemoteRateLimitStateRecord).where(
+                RemoteRateLimitStateRecord.updated_at < now - timedelta(days=1),
+            )).rowcount or 0)
+            removed += int(db.execute(delete(WorkerHeartbeatRecord).where(
+                WorkerHeartbeatRecord.worker_id != self.worker_id,
+                WorkerHeartbeatRecord.state == "STOPPED",
+                WorkerHeartbeatRecord.heartbeat_at < now - timedelta(days=7),
+            )).rowcount or 0)
+            db.commit()
+        return removed
+
     def cleanup_ephemeral(self, *, older_than_seconds: int = 3600) -> int:
         removed = 0
         now = time.time()
@@ -367,6 +404,7 @@ class ProductionWorkerRuntime:
             if now_mono >= next_scheduler:
                 self.scheduler_tick()
                 self.cleanup_ephemeral()
+                self.cleanup_ephemeral_db()
                 next_scheduler = now_mono + self.config.scheduler_interval_seconds
             worked = self.run_once()
             if not worked and not stop:
