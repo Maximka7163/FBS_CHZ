@@ -336,7 +336,7 @@ def test_m1_job_persists_across_backend_session_restart_and_duplicate_result_is_
         db.commit()
     with factory() as db:
         assert CisInventoryService(db, config).status(request_id)["status"] == "pending"
-        store = SqlAlchemyAgentJobStore(db)
+        store = SqlAlchemyAgentJobStore(db, legacy_unbound=True)
         job = store.fetch_one()
         assert job is not None and job.job_type is AgentJobType.CIS_INFO
         result = AgentResult(job.job_id, job.operation_id, "READ_COMPLETED", read_result={"type":"CIS_INFO","items":[]})
