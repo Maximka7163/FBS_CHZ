@@ -189,6 +189,13 @@ _COMMON_METADATA = frozenset({
     "attempt_count", "blind_retry", "lease_recovered", "result_outcome", "action",
     "child_set_hash", "relation_delta", "request_id", "document_id_present",
     "member_user_id", "controlled_recovery", "participant_verification_state",
+    "integration_type", "connection_type", "connection_id", "configuration_status",
+    "runtime_status", "contract_status", "feature_gate_status", "check_kind",
+    "overall_status", "component_statuses", "capability_names", "reused",
+    "binding_id", "installation_id", "protocol_version", "agent_version",
+    "credential_version", "is_primary", "certificate_thumbprint", "certificate_state",
+    "selection_state", "expiry_state", "match_state", "provider_capabilities",
+    "rotation_state", "old_version", "new_version", "enabled", "blocker_code",
 })
 
 
@@ -284,6 +291,21 @@ _EVENT_DEFINITIONS = [
     _ev("AGENT_REPLAY_CONVERGED", AuditCategory.AGENT, "REPLAY_CONVERGED", [A,W], [SubjectType.AGENT_JOB], TenantRequirement.SYSTEM_OR_ORGANISATION),
     _ev("AGENT_ARTIFACT_UPLOADED", AuditCategory.AGENT, "ARTIFACT_UPLOADED", [A], [SubjectType.AGENT_JOB,SubjectType.REPORT_ARTIFACT], TenantRequirement.PARTICIPANT),
     _ev("AGENT_DOCUMENT_SUBMITTED", AuditCategory.AGENT, "DOCUMENT_SUBMITTED", [A], [SubjectType.AGENT_JOB,SubjectType.WRITE_OPERATION], TenantRequirement.PARTICIPANT),
+    _ev("CONNECTION_CREATED", AuditCategory.INTEGRATION, "CONNECTION_CREATED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_type","connection_id","enabled"]),
+    _ev("CONNECTION_UPDATED", AuditCategory.INTEGRATION, "CONNECTION_UPDATED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_type","connection_id","changed_fields"]),
+    _ev("CONNECTION_ENABLED", AuditCategory.INTEGRATION, "CONNECTION_ENABLED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_type","connection_id"]),
+    _ev("CONNECTION_DISABLED", AuditCategory.INTEGRATION, "CONNECTION_DISABLED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_type","connection_id"]),
+    _ev("CONNECTION_ARCHIVED", AuditCategory.INTEGRATION, "CONNECTION_ARCHIVED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_type","connection_id"]),
+    _ev("SECRET_SET", AuditCategory.INTEGRATION, "SECRET_SET", [U,C], [SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_id","new_version","rotation_state"]),
+    _ev("SECRET_ROTATED", AuditCategory.INTEGRATION, "SECRET_ROTATED", [U,C], [SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_id","old_version","new_version","rotation_state"]),
+    _ev("SECRET_REVOKED", AuditCategory.INTEGRATION, "SECRET_REVOKED", [U,C], [SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_id","old_version"]),
+    _ev("CONNECTION_CHECK_STARTED", AuditCategory.INTEGRATION, "CONNECTION_CHECK_STARTED", [U,W], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["integration_type","connection_id","check_kind","reused"]),
+    _ev("CONNECTION_CHECK_COMPLETED", AuditCategory.INTEGRATION, "CONNECTION_CHECK_COMPLETED", [U,W,A], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, metadata=["integration_type","connection_id","check_kind","overall_status","component_statuses","capability_names","evidence_sha256"]),
+    _ev("CONNECTION_CHECK_FAILED", AuditCategory.INTEGRATION, "CONNECTION_CHECK_FAILED", [U,W,A], [SubjectType.INTEGRATION_CONNECTION,SubjectType.WB_CONNECTION,SubjectType.OZON_CONNECTION,SubjectType.SUZ_CONNECTION], TenantRequirement.PARTICIPANT, metadata=["integration_type","connection_id","check_kind","error_code","redacted_message"]),
+    _ev("CERTIFICATE_SELECTION_CHANGED", AuditCategory.INTEGRATION, "CERTIFICATE_SELECTION_CHANGED", [U,C,A], [SubjectType.INTEGRATION_CONNECTION], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["connection_id","certificate_thumbprint","selection_state"]),
+    _ev("AGENT_BINDING_CREATED", AuditCategory.INTEGRATION, "AGENT_BINDING_CREATED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.PARTICIPANT], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["binding_id","installation_id","protocol_version","credential_version","is_primary"]),
+    _ev("AGENT_BINDING_CHANGED", AuditCategory.INTEGRATION, "AGENT_BINDING_CHANGED", [U,C,A], [SubjectType.INTEGRATION_CONNECTION,SubjectType.PARTICIPANT], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["binding_id","changed_fields","credential_version","is_primary","state"]),
+    _ev("AGENT_BINDING_DISABLED", AuditCategory.INTEGRATION, "AGENT_BINDING_DISABLED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.PARTICIPANT], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["binding_id","state"]),
 ]
 
 AUDIT_EVENT_REGISTRY: dict[str, RegisteredAuditEvent] = {item.event_type: item for item in _EVENT_DEFINITIONS}
