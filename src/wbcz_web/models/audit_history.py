@@ -62,7 +62,7 @@ class AuditChainHeadRecord(Base):
             name="ck_audit_chain_scope_binding",
         ),
         CheckConstraint("head_sequence >= 0", name="ck_audit_chain_head_sequence"),
-        CheckConstraint("head_hash ~ '^[0-9a-f]{64}$'", name="ck_audit_chain_head_hash"),
+        CheckConstraint("length(head_hash) = 64", name="ck_audit_chain_head_hash"),
         Index(
             "uq_audit_chain_system",
             "scope_kind",
@@ -152,8 +152,8 @@ class AuditEventRecord(Base):
             name="ck_audit_event_secondary_subject_type",
         ),
         CheckConstraint("sequence >= 1", name="ck_audit_event_sequence"),
-        CheckConstraint("previous_event_hash ~ '^[0-9a-f]{64}$'", name="ck_audit_event_previous_hash"),
-        CheckConstraint("event_hash ~ '^[0-9a-f]{64}$'", name="ck_audit_event_hash"),
+        CheckConstraint("length(previous_event_hash) = 64", name="ck_audit_event_previous_hash"),
+        CheckConstraint("length(event_hash) = 64", name="ck_audit_event_hash"),
         CheckConstraint(
             "(participant_id IS NULL) OR (organisation_id IS NOT NULL)",
             name="ck_audit_event_participant_requires_org",
@@ -187,7 +187,7 @@ class AuditCheckpointRecord(Base):
     __table_args__ = (
         UniqueConstraint("chain_id", "through_sequence", name="uq_audit_checkpoint_chain_sequence"),
         CheckConstraint("through_sequence >= 1", name="ck_audit_checkpoint_sequence"),
-        CheckConstraint("head_event_hash ~ '^[0-9a-f]{64}$'", name="ck_audit_checkpoint_head_hash"),
-        CheckConstraint("previous_checkpoint_hash ~ '^[0-9a-f]{64}$'", name="ck_audit_checkpoint_previous_hash"),
-        CheckConstraint("checkpoint_hash ~ '^[0-9a-f]{64}$'", name="ck_audit_checkpoint_hash"),
+        CheckConstraint("length(head_event_hash) = 64", name="ck_audit_checkpoint_head_hash"),
+        CheckConstraint("length(previous_checkpoint_hash) = 64", name="ck_audit_checkpoint_previous_hash"),
+        CheckConstraint("length(checkpoint_hash) = 64", name="ck_audit_checkpoint_hash"),
     )
