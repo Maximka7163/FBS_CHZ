@@ -37,6 +37,9 @@ participant INN, PINs or private keys.
 
 - `WBCZ_TRUE_API_WRITE_ENABLED=false` remains hard-disabled in production compose.
 - `WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED=false`.
+- M15 web/worker runtime receives the accepted P0 organisation metadata variables
+  (`WBCZ_ORGANISATION_TYPE`, `WBCZ_ACTIVITY_FIAS_ID`, `WBCZ_ACTIVITY_KPP`,
+  `WBCZ_REMOTE_SALE_RETURN_PAID`) without enabling document writes.
 - Windows agent launch helpers force `WBCZ_AGENT_PRODUCTION_WRITE_ENABLED=false` and
   `WBCZ_TRUE_API_WRITE_ENABLED=false`.
 - True API production transport remains Windows outbound agent -> CryptoPro/GOST TLS -> True API.
@@ -61,6 +64,8 @@ A later separately authorized deployment requires all of the following before an
 6. Exact current production migration revision and schema-drift check.
 7. Separate approval to run migration `0016_m15_production_hardening`.
 8. Production write gate confirmed false before and after deployment.
+9. P0 organisation metadata verified for the intended participant; missing/ambiguous business
+   fields remain fail-closed/manual-review and are not invented by deployment tooling.
 
 The old `deploy/init-production-env.sh` from the pre-M15 packaging line is **not** an RC1
 bootstrap authority. M15 role-separated database and key material must be provisioned according to
@@ -89,7 +94,7 @@ real enrollment token.
 3. Run `Install-WbczAgent.ps1`.
 4. Run `Set-WbczAgentConfig.ps1` and provide only non-secret runtime metadata.
 5. Obtain a one-use enrollment token through the approved server-side flow.
-6. Run `Enroll-WbczAgent.ps1`; the token exists only in process environment for the exchange and
+6. Run the packaged `Enroll-WbczAgent.ps1`; the token exists only in process environment for the exchange and
    is cleared by the helper afterward. The returned permanent credential is stored by the agent
    through DPAPI.
 7. Run `Preflight-WbczAgent.ps1` without a CIS, or with an explicitly approved read-only test CIS.
