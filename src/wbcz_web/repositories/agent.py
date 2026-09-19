@@ -29,6 +29,10 @@ from wbcz.write_pipeline import (
 )
 from wbcz_web.models import AgentJobRecord, BootstrapRecord, WriteAuditRecord, WriteOperationRecord
 from wbcz_web.services.tenant import active_tenant, optional_tenant
+from wbcz_web.services.audit_history import (
+    ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
+    AuthorizationDecision,SubjectRef,SubjectType,TraceContext,
+)
 
 
 _WRITE_MAPPING = {
@@ -477,10 +481,15 @@ class SqlAlchemyAgentJobStore:
                 if prior_write.payload_sha256 != digest:
                     raise AgentReplayConflict("same write operation has different payload")
                 return self._job(prior_write)
+        trace_data=self.db.info.get("audit_trace")
+        correlation_id=trace_data.get("correlation_id") if isinstance(trace_data,dict) else None
+        causation_id=trace_data.get("request_id") if isinstance(trace_data,dict) else None
         row = AgentJobRecord(
             job_id=job.job_id,
             organisation_id=scope.organisation_id if scope else None,
             participant_id=scope.participant_id if scope else None,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
             job_type=job.job_type.value,
             operation_id=job.operation_id,
             purpose=purpose,
@@ -494,6 +503,31 @@ class SqlAlchemyAgentJobStore:
             delivery_count=0,
         )
         self.db.add(row)
+        self.db.flush()
+        audit=AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        )
+        tenant=AuditTenantScope(row.organisation_id,row.participant_id) if row.organisation_id else AuditTenantScope.system()
+        actor=ActorContext(ActorKind.USER,user_id=scope.user_id) if scope is not None and scope.user_id is not None else ActorContext(ActorKind.SYSTEM)
+        audit.append(
+            event_type="AGENT_JOB_CREATED",
+            actor=actor,
+            tenant=tenant,
+            subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
+            outcome=AuditOutcome.PENDING,
+            authorization_decision=AuthorizationDecision.ALLOW if actor.kind is ActorKind.USER else AuthorizationDecision.NOT_APPLICABLE,
+            trace=TraceContext(
+                correlation_id=row.correlation_id,causation_id=row.causation_id,
+                operation_id=row.operation_id,agent_job_id=row.job_id,
+                event_key=f"agent:{row.job_id}:created",
+            ),
+            metadata={
+                "job_type":row.job_type,"purpose":row.purpose,
+                "delivery_count":row.delivery_count,"payload_sha256":row.payload_sha256,
+            },
+        )
         self.db.flush()
         return job
 
@@ -525,6 +559,29 @@ class SqlAlchemyAgentJobStore:
         row.delivery_count += 1
         row.updated_at = now
         self.db.flush()
+        audit=AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        )
+        tenant=AuditTenantScope(row.organisation_id,row.participant_id) if row.organisation_id else AuditTenantScope.system()
+        audit.append(
+            event_type="AGENT_JOB_CLAIMED",
+            actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+            tenant=tenant,
+            subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
+            outcome=AuditOutcome.PENDING,
+            trace=TraceContext(
+                correlation_id=row.correlation_id,causation_id=row.causation_id,
+                operation_id=row.operation_id,agent_job_id=row.job_id,
+                event_key=f"agent:{row.job_id}:claimed:{row.delivery_count}",
+            ),
+            metadata={
+                "job_type":row.job_type,"purpose":row.purpose,
+                "delivery_count":row.delivery_count,"payload_sha256":row.payload_sha256,
+            },
+        )
+        self.db.flush()
         return self._job(row)
 
     def complete(self, result: AgentResult) -> None:
@@ -535,15 +592,77 @@ class SqlAlchemyAgentJobStore:
             raise AgentReplayConflict("result operation_id mismatch")
         payload = result.safe_dict()
         digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+        audit=AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        )
+        tenant=AuditTenantScope(row.organisation_id,row.participant_id) if row.organisation_id else AuditTenantScope.system()
         if row.state == AgentJobState.COMPLETED.value:
             if row.result_sha256 != digest:
                 raise AgentReplayConflict("incompatible duplicate agent result")
+            audit.append(
+                event_type="AGENT_REPLAY_CONVERGED",
+                actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+                tenant=tenant,
+                subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
+                outcome=AuditOutcome.SUCCESS,
+                trace=TraceContext(
+                    correlation_id=row.correlation_id,causation_id=row.causation_id,
+                    operation_id=row.operation_id,agent_job_id=row.job_id,
+                    event_key=f"agent:{row.job_id}:replay:{digest}",
+                ),
+                metadata={"job_type":row.job_type,"purpose":row.purpose,"result_sha256":digest},
+            )
+            self.db.flush()
             return
         row.state = AgentJobState.COMPLETED.value
         row.result_sha256 = digest
         row.result_json = payload
         row.lease_expires_at = None
         row.updated_at = _now()
+        self.db.flush()
+        result_outcome=str(result.outcome or "")
+        ambiguous="AMBIGUOUS" in result_outcome.upper() or "AMBIGUOUS" in str(result.error_code or "").upper()
+        failed=bool(result.error_code) or "FAIL" in result_outcome.upper()
+        event_type="AGENT_RESULT_AMBIGUOUS" if ambiguous else "AGENT_JOB_FAILED" if failed else "AGENT_JOB_COMPLETED"
+        audit.append(
+            event_type=event_type,
+            actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+            tenant=tenant,
+            subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
+            outcome=AuditOutcome.AMBIGUOUS if ambiguous else AuditOutcome.FAILED if failed else AuditOutcome.SUCCESS,
+            trace=TraceContext(
+                correlation_id=row.correlation_id,causation_id=row.causation_id,
+                operation_id=row.operation_id,agent_job_id=row.job_id,
+                event_key=f"agent:{row.job_id}:result:{digest}",
+            ),
+            metadata={
+                "job_type":row.job_type,"purpose":row.purpose,
+                "delivery_count":row.delivery_count,"result_sha256":digest,
+                "result_outcome":result_outcome,
+                "error_code":str(result.error_code)[:80] if result.error_code else None,
+            },
+        )
+        if row.job_type in {AgentJobType.LK_RECEIPT.value,AgentJobType.LP_RETURN.value} and result.document_id:
+            audit.append(
+                event_type="AGENT_DOCUMENT_SUBMITTED",
+                actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+                tenant=tenant,
+                subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
+                secondary_subject=SubjectRef(SubjectType.WRITE_OPERATION,row.operation_id),
+                outcome=AuditOutcome.SUCCESS,
+                trace=TraceContext(
+                    correlation_id=row.correlation_id,causation_id=row.job_id,
+                    operation_id=row.operation_id,agent_job_id=row.job_id,
+                    event_key=f"agent:{row.job_id}:document-submitted:{digest}",
+                ),
+                metadata={
+                    "job_type":row.job_type,"purpose":row.purpose,
+                    "remote_document_id":str(result.document_id)[:512],
+                    "http_status":result.http_status,"body_sha256":result.body_sha256,
+                },
+            )
         self.db.flush()
 
     def state(self, job_id: str) -> AgentJobState:
