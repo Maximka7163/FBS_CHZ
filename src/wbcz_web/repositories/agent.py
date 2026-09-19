@@ -604,6 +604,9 @@ class SqlAlchemyAgentJobStore:
                 AgentBindingRecord.is_primary.is_(True),
             ))
             if primary is not None:
+                from wbcz_web.services.agent_enrollment import binding_supports_job
+                if not binding_supports_job(primary, job.job_type.value):
+                    raise PermissionError("primary agent does not support this typed job")
                 binding_id = primary.id
             else:
                 has_local_binding = self.db.scalar(select(AgentBindingRecord.id).where(
