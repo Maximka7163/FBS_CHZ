@@ -35,6 +35,16 @@ def _networks(values: tuple[str, ...]):
     return tuple(result)
 
 
+def peer_is_trusted(peer: str | None, trusted_proxy_cidrs: tuple[str, ...]) -> bool:
+    if not peer:
+        return False
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(peer_ip in network for network in _networks(trusted_proxy_cidrs))
+
+
 def trusted_client_ip(peer: str | None, forwarded_for: str | None, trusted_proxy_cidrs: tuple[str, ...]) -> str | None:
     if not peer:
         return None
@@ -64,10 +74,17 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         request.state.correlation_id = correlation_id
         peer = request.client.host if request.client else None
+        proxy_cidrs = tuple(getattr(config, "trusted_proxy_cidrs", ()) or ())
         request.state.client_ip = trusted_client_ip(
             peer,
             request.headers.get("X-Forwarded-For"),
-            tuple(getattr(config, "trusted_proxy_cidrs", ()) or ()),
+            proxy_cidrs,
+        )
+        trusted_proxy = peer_is_trusted(peer, proxy_cidrs)
+        forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").strip().lower()
+        request.state.external_scheme = (
+            forwarded_proto if trusted_proxy and forwarded_proto in {"http", "https"}
+            else request.url.scheme
         )
 
         content_type = (request.headers.get("content-type") or "").lower()
