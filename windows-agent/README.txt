@@ -13,7 +13,8 @@ FUTURE OPERATOR FLOW — ONLY AFTER SEPARATE AUTHORIZATION
 1. Verify the ZIP SHA256 sidecar.
 2. Run .\Install-WbczAgent.ps1
 3. Run installed .\Set-WbczAgentConfig.ps1
-4. Complete the accepted M15 one-use enrollment flow using wbcz-agent enroll.
+4. Run .\Enroll-WbczAgent.ps1 and paste the one-use enrollment token into the hidden prompt.
+   The helper clears WBCZ_AGENT_ENROLLMENT_TOKEN after the exchange; the permanent credential is stored by wbcz-agent through DPAPI and is not printed.
 5. Run .\Preflight-WbczAgent.ps1
    Optional read-only CIS check:
    .\Preflight-WbczAgent.ps1 -Cis '<approved-test-cis>'
