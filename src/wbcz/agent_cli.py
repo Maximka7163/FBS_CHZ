@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import signal
+import random
 import sys
 import time
 from typing import Any
@@ -17,7 +18,7 @@ from wbcz.windows_agent import (
     WindowsCryptoProDocumentSigner,
     WindowsOutboundAgent,
 )
-from wbcz.windows_agent_runtime import DurableWindowsAgentExecutor, WindowsAgentReplayStore
+from wbcz.windows_agent_runtime import DurableDispenserRateLimiter, DurableWindowsAgentExecutor, WindowsAgentReplayStore
 from wbcz_ui.live_true_api import (
     CryptoProGostTlsTunnel,
     JsonlLiveAudit,
@@ -159,11 +160,13 @@ class WindowsAgentRuntime:
         self.config = config
         config.replay_db_path.parent.mkdir(parents=True, exist_ok=True)
         config.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.replay_store = WindowsAgentReplayStore(config.replay_db_path)
         self.tunnel = CryptoProGostTlsTunnel(config.stunnel_path)
         self.audit = JsonlLiveAudit(config.audit_log_path)
         self.transport = ProductionAgentTrueApiTransport(
             tunnel=self.tunnel,
             audit=self.audit,
+            report_rate_limiter=DurableDispenserRateLimiter(self.replay_store),
             production_true_api_reports=config.production_true_api_reports,
             remote_download_byte_ceiling=config.report_remote_download_byte_ceiling,
         )
@@ -188,7 +191,6 @@ class WindowsAgentRuntime:
             cryptcp_path=config.cryptcp_path,
             inspector=self.inspector,
         )
-        self.replay_store = WindowsAgentReplayStore(config.replay_db_path)
         self.backend = OutboundAgentHttpClient(StdlibHttpsAgentSender(config.backend_url))
         self.executor = DurableWindowsAgentExecutor(
             participant_inn=config.participant_inn,
@@ -240,11 +242,11 @@ class WindowsAgentRuntime:
                 # Exception type only: never print bearer/machine token/provider details.
                 failures += 1
                 print(f"agent iteration failed: {type(exc).__name__}", file=sys.stderr)
-                delay = min(
+                ceiling = min(
                     self.config.error_backoff_max_seconds,
                     self.config.idle_poll_seconds * (2 ** min(failures, 8)),
                 )
-                time.sleep(delay)
+                time.sleep(random.uniform(0.0, ceiling))
 
 
 def _safe_print_result(result: dict[str, Any]) -> None:
