@@ -557,6 +557,8 @@ class SqlAlchemyAgentJobStore:
 
     def metadata(self, job_id: str, *, lock: bool = False) -> AgentJobMetadata:
         stmt = select(AgentJobRecord).where(AgentJobRecord.job_id == job_id)
+        if self.agent_binding_id or self.legacy_unbound:
+            stmt = self._lease_scope(stmt)
         if lock:
             stmt = stmt.with_for_update()
         row = self.db.scalar(stmt)
