@@ -370,7 +370,7 @@ class SqlAlchemyWriteOperationStore:
             row,
             "TURNOVER_REMOTE_RESULT",
             actor_kind=ActorKind.WINDOWS_AGENT,
-            machine_principal=self._machine_principal(),
+            machine_principal="windows-agent",
             outcome=remote_outcome,
             metadata={
                 "operation_kind":row.operation_reason,
