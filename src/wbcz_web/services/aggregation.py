@@ -23,6 +23,10 @@ from wbcz_web.config import WebConfig
 from wbcz_web.models import AggregationOperationLedgerRecord, AuditLog
 from wbcz_web.services.tenant import active_tenant, tenant_operation_id
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
+from wbcz_web.services.audit_history import (
+    ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
+    AuthorizationDecision,SubjectRef,SubjectType,TraceContext,
+)
 
 AGGREGATION_PURPOSE = "AGGREGATION_M6"
 
@@ -75,6 +79,47 @@ class AggregationApplicationService:
     def _audit(self, operation_id: str, action: str, metadata: Mapping[str, Any]) -> None:
         scope = active_tenant(self.db)
         self.db.add(AuditLog(action=action, organisation_id=scope.organisation_id, participant_id=scope.participant_id, entity_type="aggregation_operation", entity_id=operation_id, metadata_json=dict(metadata)))
+
+    def _immutable(
+        self,
+        event_type: str,
+        operation_id: str,
+        *,
+        actor_kind: ActorKind,
+        machine_principal: str | None,
+        outcome: AuditOutcome,
+        metadata: Mapping[str, Any],
+        evidence_hashes: tuple[str, ...] = (),
+        event_key_suffix: str,
+    ) -> None:
+        scope=active_tenant(self.db)
+        actor=(
+            ActorContext(ActorKind.USER,user_id=scope.user_id)
+            if actor_kind is ActorKind.USER and scope.user_id is not None
+            else ActorContext(actor_kind,machine_principal=machine_principal)
+        )
+        trace_data=self.db.info.get("audit_trace")
+        AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        ).append(
+            event_type=event_type,
+            actor=actor,
+            tenant=AuditTenantScope(scope.organisation_id,scope.participant_id),
+            subject=SubjectRef(SubjectType.AGGREGATION_OPERATION,operation_id),
+            outcome=outcome,
+            authorization_decision=AuthorizationDecision.ALLOW if actor.kind is ActorKind.USER else AuthorizationDecision.NOT_APPLICABLE,
+            trace=TraceContext(
+                request_id=trace_data.get("request_id") if isinstance(trace_data,dict) else None,
+                correlation_id=trace_data.get("correlation_id") if isinstance(trace_data,dict) else None,
+                causation_id=trace_data.get("causation_id") if isinstance(trace_data,dict) else None,
+                operation_id=operation_id,
+                event_key=f"aggregation:{operation_id}:{event_key_suffix}"[:256],
+            ),
+            metadata=dict(metadata),
+            evidence_hashes=evidence_hashes,
+        )
 
     @staticmethod
     def _relation_delta(kind: AggregationOperationKind) -> str:
@@ -154,6 +199,24 @@ class AggregationApplicationService:
         )
         self.db.add(row)
         self.db.flush()
+        scope=active_tenant(self.db)
+        precondition_hash=hashlib.sha256(canonical_json(dict(precondition_snapshot)).encode("utf-8")).hexdigest()
+        self._immutable(
+            "AGGREGATION_INTENT_CREATED",
+            operation_id,
+            actor_kind=ActorKind.USER if scope.user_id is not None else ActorKind.WORKER,
+            machine_principal=None if scope.user_id is not None else "aggregation-worker",
+            outcome=AuditOutcome.PENDING,
+            metadata={
+                "request_id":request_id,"operation_kind":prepared.operation_kind.value,
+                "document_type":prepared.document_type,"document_sha256":prepared.exact_document.sha256,
+                "request_sha256":request_sha,"idempotency_fingerprint":idempotency_key,
+                "precondition_evidence_sha256":precondition_hash,"child_set_hash":child_set_hash,
+                "relation_delta":row.relation_delta,
+            },
+            evidence_hashes=(prepared.exact_document.sha256,request_sha,precondition_hash,child_set_hash),
+            event_key_suffix="intent",
+        )
         self.jobs.enqueue(
             AgentJob(
                 job_id=request_id,
@@ -179,6 +242,21 @@ class AggregationApplicationService:
             raise AgentReplayConflict("remote document id changed")
         row.remote_document_id = document_id
         self._audit(operation_id, "AGGREGATION_REMOTE_DOCUMENT_CONFIRMED", {"document_id": document_id})
+        self._immutable(
+            "AGGREGATION_REMOTE_RESULT",
+            operation_id,
+            actor_kind=ActorKind.WORKER,
+            machine_principal="aggregation-result-worker",
+            outcome=AuditOutcome.SUCCESS,
+            metadata={
+                "operation_kind":row.operation_kind,"document_type":row.document_type,
+                "document_sha256":row.document_sha256,"request_sha256":row.request_sha256,
+                "remote_document_id":document_id,"child_set_hash":row.child_set_hash,
+                "relation_delta":row.relation_delta,
+            },
+            evidence_hashes=(row.document_sha256,row.request_sha256,row.child_set_hash),
+            event_key_suffix=f"remote-result:{hashlib.sha256(document_id.encode()).hexdigest()}",
+        )
         self.db.flush()
 
     def record_reconciliation(self, operation_id: str, result: AggregationReconciliationResult, *, history_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
@@ -190,6 +268,25 @@ class AggregationApplicationService:
         row.reconciliation_json = {"reason": result.reason, "recorded_at": datetime.now(timezone.utc).isoformat()}
         row.raw_history_evidence = [dict(x) for x in history_evidence]
         self._audit(operation_id, "AGGREGATION_RECONCILIATION", {"state": result.state.value, "reason": result.reason, "discovered_parent_cis": result.discovered_parent_cis})
+        reconciliation_hash=hashlib.sha256(canonical_json({
+            "state":result.state.value,"reason":result.reason,"child_set_hash":row.child_set_hash,
+        }).encode("utf-8")).hexdigest()
+        self._immutable(
+            "AGGREGATION_RECONCILED",
+            operation_id,
+            actor_kind=ActorKind.WORKER,
+            machine_principal="aggregation-reconciliation-worker",
+            outcome=AuditOutcome.SUCCESS if result.state.value=="RECONCILED" else AuditOutcome.CONFLICT,
+            metadata={
+                "operation_kind":row.operation_kind,"document_type":row.document_type,
+                "document_sha256":row.document_sha256,"reconciliation_state":result.state.value,
+                "postcondition_evidence_sha256":reconciliation_hash,
+                "manual_review_reason":None if result.state.value=="RECONCILED" else result.reason,
+                "child_set_hash":row.child_set_hash,"relation_delta":row.relation_delta,
+            },
+            evidence_hashes=(row.document_sha256,row.child_set_hash,reconciliation_hash),
+            event_key_suffix=f"reconciled:{reconciliation_hash}",
+        )
         self.db.flush()
         return self.status(operation_id)
 
