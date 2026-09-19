@@ -298,6 +298,7 @@ def test_agent_enrollment_is_single_use_participant_bound_hashed_rotatable_and_r
     ).validate_for_startup()
     with factory() as db:
         user, org, participant = _tenant(db, "agent", "7800000000")
+        db.commit()
         _scope(db, user, org, participant)
         enrollment = AgentEnrollmentService(db, config=cfg)
         intent, raw_enrollment = enrollment.create_intent(
@@ -308,6 +309,7 @@ def test_agent_enrollment_is_single_use_participant_bound_hashed_rotatable_and_r
         assert raw_enrollment != intent.token_hash
         assert raw_enrollment not in repr(intent.__dict__)
         assert len(intent.token_hash) == 64
+        db.commit()
 
         with pytest.raises(PermissionError, match="participant"):
             enrollment.exchange(
@@ -320,14 +322,7 @@ def test_agent_enrollment_is_single_use_participant_bound_hashed_rotatable_and_r
                 supported_capabilities=("TYPED_JOBS",),
             )
         db.rollback()
-        # Rollback also rolls back the newly-created intent. Recreate to verify
-        # exact binding in an independent transaction.
         _scope(db, user, org, participant)
-        intent, raw_enrollment = enrollment.create_intent(
-            display_name="M15 Agent",
-            user_id=user.id,
-            requested_protocol_version="m15-v1",
-        )
         binding, permanent, compatibility = enrollment.exchange(
             raw_enrollment,
             installation_id=str(uuid4()),
@@ -426,15 +421,16 @@ def test_readiness_exact_revision_is_independent_of_agent_and_remote_availabilit
     assert payload["actual_migration_revision"] == "0016_m15_production_hardening"
 
     with factory() as db:
+        current = datetime.now(timezone.utc)
         db.add(WorkerHeartbeatRecord(
             worker_id="worker-stale",
             role="worker",
             instance_id="instance-stale",
             state="RUNNING",
             build_sha="a" * 40,
-            started_at=NOW - timedelta(hours=1),
-            heartbeat_at=NOW - timedelta(hours=1),
-            scheduler_heartbeat_at=NOW - timedelta(hours=1),
+            started_at=current - timedelta(hours=1),
+            heartbeat_at=current - timedelta(hours=1),
+            scheduler_heartbeat_at=current - timedelta(hours=1),
             metadata_json={},
         ))
         db.commit()
