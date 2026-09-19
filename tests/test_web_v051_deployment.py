@@ -103,6 +103,8 @@ def test_production_routes_health_version_auth_and_capabilities():
         ("mark.sellari.ru",),
         "0.5.1",
         "b" * 40,
+        audit_pseudonym_key="m13-production-test-audit-key-00000000000000000001",
+        audit_pseudonym_key_id="m13-test-v1",
     )
     app = create_app(config, session_factory=factory)
     with factory() as db:
