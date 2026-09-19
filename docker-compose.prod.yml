@@ -4,24 +4,59 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${WBCZ_POSTGRES_DB:?WBCZ_POSTGRES_DB is required}
-      POSTGRES_USER: ${WBCZ_POSTGRES_USER:?WBCZ_POSTGRES_USER is required}
-      POSTGRES_PASSWORD: ${WBCZ_POSTGRES_PASSWORD:?WBCZ_POSTGRES_PASSWORD is required}
+      POSTGRES_USER: ${WBCZ_POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${WBCZ_POSTGRES_SUPERUSER_PASSWORD:?bootstrap postgres password is required}
+      WBCZ_APP_DB_PASSWORD: ${WBCZ_APP_DB_PASSWORD:?app DB password is required}
+      WBCZ_MIGRATOR_DB_PASSWORD: ${WBCZ_MIGRATOR_DB_PASSWORD:?migrator DB password is required}
+      WBCZ_BACKUP_DB_PASSWORD: ${WBCZ_BACKUP_DB_PASSWORD:?backup DB password is required}
     expose:
       - "5432"
     volumes:
       - marking_pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init-m15-roles.sh:/docker-entrypoint-initdb.d/010-m15-roles.sh:ro
     networks:
       - marking_internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -U ${WBCZ_POSTGRES_SUPERUSER:-postgres} -d ${WBCZ_POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 20
       start_period: 5s
+    security_opt:
+      - no-new-privileges:true
     logging:
       options:
         max-size: "10m"
         max-file: "3"
+
+  marking-migrate:
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args:
+        APP_VERSION: ${WBCZ_APP_VERSION:?WBCZ_APP_VERSION is required}
+        BUILD_SHA: ${WBCZ_BUILD_SHA:?WBCZ_BUILD_SHA is required}
+    image: ${WBCZ_BACKEND_IMAGE:-sellari-marking-backend}:${WBCZ_BUILD_SHA:?WBCZ_BUILD_SHA is required}
+    depends_on:
+      marking-postgres:
+        condition: service_healthy
+    environment:
+      WBCZ_ENV: production
+      WBCZ_DATABASE_URL: ${WBCZ_MIGRATION_DATABASE_URL:?migrator DB URL is required}
+      WBCZ_OWN_INN: ${WBCZ_OWN_INN:?WBCZ_OWN_INN is required}
+      WBCZ_PUBLIC_REGISTRATION_ENABLED: "false"
+      WBCZ_TRUE_API_WRITE_ENABLED: "false"
+      WBCZ_M15_STRICT_PRODUCTION: "false"
+    command: ["alembic", "upgrade", "0016_m15_production_hardening"]
+    networks:
+      - marking_internal
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
 
   marking-backend:
     build:
@@ -35,32 +70,102 @@ services:
     depends_on:
       marking-postgres:
         condition: service_healthy
-    environment:
-      WBCZ_ENV: ${WBCZ_ENV:?WBCZ_ENV is required}
-      WBCZ_DATABASE_URL: ${WBCZ_DATABASE_URL:?WBCZ_DATABASE_URL is required}
+    environment: &runtime_environment
+      WBCZ_ENV: production
+      WBCZ_M15_STRICT_PRODUCTION: "true"
+      WBCZ_PROCESS_ROLE: web
+      WBCZ_DATABASE_URL: ${WBCZ_DATABASE_URL:?app DB URL is required}
       WBCZ_OWN_INN: ${WBCZ_OWN_INN:?WBCZ_OWN_INN is required}
+      WBCZ_APP_URL: ${WBCZ_APP_URL:?WBCZ_APP_URL is required}
       WBCZ_SESSION_TTL_SECONDS: ${WBCZ_SESSION_TTL_SECONDS:-43200}
-      WBCZ_COOKIE_SECURE: ${WBCZ_COOKIE_SECURE:?WBCZ_COOKIE_SECURE is required}
+      WBCZ_COOKIE_SECURE: "true"
       WBCZ_SESSION_COOKIE_NAME: ${WBCZ_SESSION_COOKIE_NAME:-wbcz_session}
       WBCZ_CSRF_COOKIE_NAME: ${WBCZ_CSRF_COOKIE_NAME:-wbcz_csrf}
-      WBCZ_DEBUG: ${WBCZ_DEBUG:-false}
+      WBCZ_DEBUG: "false"
       WBCZ_TRUSTED_HOSTS: ${WBCZ_TRUSTED_HOSTS:?WBCZ_TRUSTED_HOSTS is required}
+      WBCZ_TRUSTED_PROXY_CIDRS: ${WBCZ_TRUSTED_PROXY_CIDRS:?trusted proxy CIDRs are required}
+      WBCZ_PUBLIC_REGISTRATION_ENABLED: "false"
+      WBCZ_TRUE_API_WRITE_ENABLED: "false"
+      WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"
+      WBCZ_AGENT_MACHINE_TOKEN: ""
       WBCZ_APP_VERSION: ${WBCZ_APP_VERSION:?WBCZ_APP_VERSION is required}
       WBCZ_BUILD_SHA: ${WBCZ_BUILD_SHA:?WBCZ_BUILD_SHA is required}
       WBCZ_HEALTHCHECK_HOST: ${WBCZ_HEALTHCHECK_HOST:-mark.sellari.ru}
+      WBCZ_REPORT_ARTIFACT_ROOT: /var/lib/wbcz/artifacts
+      WBCZ_REPORT_TEMP_ROOT: /var/lib/wbcz/tmp
+      WBCZ_SECRET_PROVIDER_ROOT: /var/lib/wbcz/secret-store
+      WBCZ_SECRET_PROVIDER_MASTER_KEY_PATH: /run/wbcz-keys/secret-master.key
+      WBCZ_ARTIFACT_KEYRING_ROOT: /run/wbcz-keys/artifacts
+      WBCZ_REPORT_ARTIFACT_KEY_VERSION: ${WBCZ_REPORT_ARTIFACT_KEY_VERSION:?artifact key version is required}
+      WBCZ_AUDIT_KEY_PATH: /run/wbcz-keys/audit/current.key
+      WBCZ_AUDIT_PSEUDONYM_KEY_ID: ${WBCZ_AUDIT_PSEUDONYM_KEY_ID:?audit key version is required}
+      WBCZ_BACKUP_STATUS_PATH: /run/wbcz-status/backup-status.json
+      WBCZ_DB_POOL_SIZE: ${WBCZ_DB_POOL_SIZE:-5}
+      WBCZ_DB_MAX_OVERFLOW: ${WBCZ_DB_MAX_OVERFLOW:-5}
+      WBCZ_DB_POOL_TIMEOUT_SECONDS: ${WBCZ_DB_POOL_TIMEOUT_SECONDS:-30}
+      WBCZ_DB_POOL_RECYCLE_SECONDS: ${WBCZ_DB_POOL_RECYCLE_SECONDS:-1800}
+      WBCZ_DB_STATEMENT_TIMEOUT_MS: ${WBCZ_DB_STATEMENT_TIMEOUT_MS:-30000}
+      WBCZ_DB_LOCK_TIMEOUT_MS: ${WBCZ_DB_LOCK_TIMEOUT_MS:-5000}
+      WBCZ_DB_IDLE_TRANSACTION_TIMEOUT_MS: ${WBCZ_DB_IDLE_TRANSACTION_TIMEOUT_MS:-60000}
+      WBCZ_NORMAL_JSON_BODY_LIMIT_BYTES: ${WBCZ_NORMAL_JSON_BODY_LIMIT_BYTES:-1048576}
+      WBCZ_WORKER_CONCURRENCY: ${WBCZ_WORKER_CONCURRENCY:-1}
+      WBCZ_WORKER_HEARTBEAT_SECONDS: ${WBCZ_WORKER_HEARTBEAT_SECONDS:-15}
+      WBCZ_WORKER_STALE_SECONDS: ${WBCZ_WORKER_STALE_SECONDS:-90}
+      WBCZ_WORKER_LEASE_SECONDS: ${WBCZ_WORKER_LEASE_SECONDS:-120}
+      WBCZ_SCHEDULER_INTERVAL_SECONDS: ${WBCZ_SCHEDULER_INTERVAL_SECONDS:-30}
+      WBCZ_AGENT_PROTOCOL_CURRENT: m15-v1
+      WBCZ_AGENT_PROTOCOL_MINIMUM: m14-v1
+      WBCZ_AGENT_MINIMUM_VERSION: ${WBCZ_AGENT_MINIMUM_VERSION:-0.5.1}
     ports:
       - "127.0.0.1:${WBCZ_BACKEND_PORT:-8765}:8765"
+    volumes:
+      - marking_artifacts:/var/lib/wbcz/artifacts
+      - marking_secret_store:/var/lib/wbcz/secret-store
+      - /opt/sellari-marking/keys:/run/wbcz-keys:ro
+      - /opt/sellari-marking/runtime/backup-status.json:/run/wbcz-status/backup-status.json:ro
     networks:
       - marking_internal
       - marking_proxy
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=128m
+      - /var/lib/wbcz/tmp:rw,noexec,nosuid,size=512m
     init: true
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
+    cap_drop: ["ALL"]
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  marking-worker:
+    image: ${WBCZ_BACKEND_IMAGE:-sellari-marking-backend}:${WBCZ_BUILD_SHA:?WBCZ_BUILD_SHA is required}
+    restart: unless-stopped
+    depends_on:
+      marking-postgres:
+        condition: service_healthy
+    environment:
+      <<: *runtime_environment
+      WBCZ_PROCESS_ROLE: worker
+      WBCZ_DB_APPLICATION_NAME: wbcz-worker
+    command: ["python", "-m", "wbcz_web.worker"]
+    volumes:
+      - marking_artifacts:/var/lib/wbcz/artifacts
+      - marking_secret_store:/var/lib/wbcz/secret-store
+      - /opt/sellari-marking/keys:/run/wbcz-keys:ro
+      - /opt/sellari-marking/runtime/backup-status.json:/run/wbcz-status/backup-status.json:ro
+    networks:
+      - marking_internal
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+      - /var/lib/wbcz/tmp:rw,noexec,nosuid,size=512m
+    init: true
+    stop_grace_period: 2m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
     logging:
       options:
         max-size: "10m"
@@ -69,6 +174,10 @@ services:
 volumes:
   marking_pgdata:
     name: sellari_marking_pgdata
+  marking_artifacts:
+    name: sellari_marking_artifacts
+  marking_secret_store:
+    name: sellari_marking_secret_store
 
 networks:
   marking_internal:
