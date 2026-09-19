@@ -22,10 +22,42 @@ from wbcz_web.services.audit_history import (
     TraceContext,
 )
 
-from .dependencies import AuthenticatedIdentity, get_db, require_permission
+from .dependencies import AuthenticatedIdentity, get_db, require_user
 
 
 audit_router = APIRouter(prefix="/api")
+
+
+def _audit_denial(db: Session, *, identity: AuthenticatedIdentity, scope, reason: str, query_kind: str) -> None:
+    service = AuditService(
+        db,
+        pseudonym_key=db.info.get("audit_pseudonym_key"),
+        pseudonym_key_id=db.info.get("audit_pseudonym_key_id"),
+    )
+    if scope is None:
+        chain = service.system_chain()
+        tenant = AuditTenantScope.system()
+    else:
+        chain = service.chain_for_organisation(scope.organisation_id)
+        tenant = AuditTenantScope(scope.organisation_id, None)
+    trace_data = db.info.get("audit_trace")
+    request_id = trace_data.get("request_id") if isinstance(trace_data, dict) else None
+    correlation_id = trace_data.get("correlation_id") if isinstance(trace_data, dict) else request_id
+    service.append(
+        event_type="AUTHORIZATION_DENIED",
+        actor=ActorContext(ActorKind.USER, user_id=identity.user_id),
+        tenant=tenant,
+        subject=SubjectRef(SubjectType.AUDIT_CHAIN, chain.chain_id),
+        outcome=AuditOutcome.DENIED,
+        authorization_decision=AuthorizationDecision.DENY,
+        trace=TraceContext(
+            request_id=request_id,
+            correlation_id=correlation_id,
+            event_key=(f"audit-denial:{request_id}:{query_kind}"[:256] if request_id else None),
+        ),
+        metadata={"reason": reason[:80], "query_kind": query_kind[:80]},
+    )
+    db.commit()
 
 
 def _scope(db: Session, identity: AuthenticatedIdentity):
@@ -35,10 +67,20 @@ def _scope(db: Session, identity: AuthenticatedIdentity):
         raise HTTPException(401, "Session is invalid")
     try:
         scope = AuthorizationService(db).resolve_session_scope(user, session, require_participant=False)
-        AuthorizationService.require(scope, Permission.AUDIT_READ)
-        return scope
     except AuthorizationError as exc:
         raise HTTPException(403, "Permission denied") from exc
+    try:
+        AuthorizationService.require(scope, Permission.AUDIT_READ)
+    except AuthorizationError as exc:
+        _audit_denial(
+            db,
+            identity=identity,
+            scope=scope,
+            reason="audit_read_permission_denied",
+            query_kind="AUDIT_ACCESS",
+        )
+        raise HTTPException(403, "Permission denied") from exc
+    return scope
 
 
 def _event_view(row: AuditEventRecord) -> dict[str, Any]:
@@ -140,7 +182,7 @@ def list_audit_events(
     correlation_id: str | None = Query(default=None, min_length=1, max_length=128),
     before_sequence: int | None = Query(default=None, ge=1),
     limit: int = Query(default=100, ge=1, le=200),
-    identity: AuthenticatedIdentity = Depends(require_permission(Permission.AUDIT_READ, participant_required=False)),
+    identity: AuthenticatedIdentity = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     scope = _scope(db, identity)
@@ -157,6 +199,13 @@ def list_audit_events(
             ParticipantRecord.organisation_id == scope.organisation_id,
         ))
         if participant is None:
+            _audit_denial(
+                db,
+                identity=identity,
+                scope=scope,
+                reason="participant_filter_not_found_or_foreign",
+                query_kind="PARTICIPANT_FILTER",
+            )
             raise HTTPException(404, "Audit scope not found")
 
     stmt = select(AuditEventRecord).where(AuditEventRecord.chain_id == chain.chain_id)
@@ -224,6 +273,13 @@ def get_audit_event(
         AuditEventRecord.chain_id == chain.chain_id,
     ))
     if row is None:
+        _audit_denial(
+            db,
+            identity=identity,
+            scope=scope,
+            reason="event_not_found_or_foreign",
+            query_kind="EVENT_DETAIL",
+        )
         raise HTTPException(404, "Audit event not found")
     payload = _event_view(row)
     _query_audit(
