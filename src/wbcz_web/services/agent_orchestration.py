@@ -23,9 +23,13 @@ from wbcz.windows_agent import (
 )
 from wbcz.write_pipeline import ExactDocument, InvalidWriteOperation, WriteState
 from wbcz_web.config import WebConfig
-from wbcz_web.models import AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun
+from wbcz_web.models import AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun, ReportJobRecord
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
+from wbcz_web.services.audit_history import (
+    ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
+    AuthorizationDecision,SubjectRef,SubjectType,TraceContext,
+)
 from wbcz.m11_reports import FilesystemReportArtifactStore
 from wbcz_web.services.tenant import active_tenant, bind_tenant_scope, optional_tenant
 from wbcz_web.services.reports import (
@@ -222,6 +226,33 @@ class AgentOrchestrationBroker:
             chunks=chunks,
             observed_mime=observed_mime,
         )
+        job=self.db.get(ReportJobRecord,report_job_id)
+        if job is None or not job.organisation_id or not job.participant_id:
+            raise AgentReplayConflict("report artifact has no tenant-owned report job")
+        AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        ).append(
+            event_type="AGENT_ARTIFACT_UPLOADED",
+            actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+            tenant=AuditTenantScope(job.organisation_id,job.participant_id),
+            subject=SubjectRef(SubjectType.REPORT_ARTIFACT,artifact.artifact_id),
+            outcome=AuditOutcome.SUCCESS,
+            authorization_decision=AuthorizationDecision.NOT_APPLICABLE,
+            trace=TraceContext(
+                correlation_id=job.correlation_id,
+                causation_id=job.causation_id,
+                operation_id=job.id,
+                event_key=f"agent-artifact:{artifact_upload_id}:{artifact.artifact_id}"[:256],
+            ),
+            metadata={
+                "report_job_id":job.id,"artifact_id":artifact.artifact_id,
+                "artifact_sha256":artifact.sha256,"byte_size":artifact.byte_size,
+                "remote_result_part_id":remote_result_part_id,
+            },
+            evidence_hashes=(artifact.sha256,),
+        )
         self.db.flush()
         return artifact
 
@@ -237,6 +268,11 @@ class AgentOrchestrationBroker:
                 organisation_id=job_row.organisation_id,
                 participant_id=job_row.participant_id,
             )
+            self.db.info["audit_trace"]={
+                "request_id":job_row.job_id,
+                "correlation_id":job_row.correlation_id or job_row.job_id,
+                "causation_id":job_row.job_id,
+            }
         elif self.db.get(BootstrapRecord, 1) is not None:
             raise AgentReplayConflict("post-bootstrap agent job has no tenant ownership")
         if metadata.job.operation_id != result.operation_id:
