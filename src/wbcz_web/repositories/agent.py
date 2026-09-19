@@ -695,90 +695,151 @@ class SqlAlchemyAgentJobStore:
         return self._job(row)
 
     def complete(self, result: AgentResult) -> None:
-        row = self.db.scalar(select(AgentJobRecord).where(AgentJobRecord.job_id == result.job_id).with_for_update())
+        row = self.db.scalar(
+            select(AgentJobRecord)
+            .where(AgentJobRecord.job_id == result.job_id)
+            .with_for_update()
+        )
         if row is None:
             raise KeyError("unknown agent job")
         if row.operation_id != result.operation_id:
             raise AgentReplayConflict("result operation_id mismatch")
+
         payload = result.safe_dict()
         digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
-        audit=None
-        tenant=None
+
+        audit = None
+        tenant = None
         if row.organisation_id is not None or row.participant_id is not None:
             if not row.organisation_id or not row.participant_id:
                 raise PermissionError("tenant-owned agent job has incomplete tenant scope")
-            audit=AuditService(
+            audit = AuditService(
                 self.db,
                 pseudonym_key=self.db.info.get("audit_pseudonym_key"),
                 pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
             )
-            tenant=AuditTenantScope(row.organisation_id,row.participant_id)
+            tenant = AuditTenantScope(row.organisation_id, row.participant_id)
+
         if row.state == AgentJobState.COMPLETED.value:
             if row.result_sha256 != digest:
                 raise AgentReplayConflict("incompatible duplicate agent result")
             if audit is not None and tenant is not None:
                 audit.append(
                     event_type="AGENT_REPLAY_CONVERGED",
-                actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
-                tenant=tenant,
-                subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
-                outcome=AuditOutcome.SUCCESS,
-                trace=TraceContext(
-                    correlation_id=row.correlation_id,causation_id=row.causation_id,
-                    operation_id=row.operation_id,agent_job_id=row.job_id,
-                    event_key=f"agent:{row.job_id}:replay:{digest}",
-                ),
-                metadata={"job_type":row.job_type,"purpose":row.purpose,"result_sha256":digest},
-            )
+                    actor=ActorContext(
+                        ActorKind.WINDOWS_AGENT,
+                        machine_principal="windows-agent",
+                    ),
+                    tenant=tenant,
+                    subject=SubjectRef(SubjectType.AGENT_JOB, row.job_id),
+                    outcome=AuditOutcome.SUCCESS,
+                    trace=TraceContext(
+                        correlation_id=row.correlation_id,
+                        causation_id=row.causation_id,
+                        operation_id=row.operation_id,
+                        agent_job_id=row.job_id,
+                        event_key=f"agent:{row.job_id}:replay:{digest}",
+                    ),
+                    metadata={
+                        "job_type": row.job_type,
+                        "purpose": row.purpose,
+                        "result_sha256": digest,
+                    },
+                )
             self.db.flush()
             return
+
         row.state = AgentJobState.COMPLETED.value
         row.result_sha256 = digest
         row.result_json = payload
         row.lease_expires_at = None
         row.updated_at = _now()
         self.db.flush()
-        result_outcome=str(result.outcome or "")
-        ambiguous="AMBIGUOUS" in result_outcome.upper() or "AMBIGUOUS" in str(result.error_code or "").upper()
-        failed=bool(result.error_code) or "FAIL" in result_outcome.upper()
-        event_type="AGENT_RESULT_AMBIGUOUS" if ambiguous else "AGENT_JOB_FAILED" if failed else "AGENT_JOB_COMPLETED"
-        audit.append(
-            event_type=event_type,
-            actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
-            tenant=tenant,
-            subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
-            outcome=AuditOutcome.AMBIGUOUS if ambiguous else AuditOutcome.FAILED if failed else AuditOutcome.SUCCESS,
-            trace=TraceContext(
-                correlation_id=row.correlation_id,causation_id=row.causation_id,
-                operation_id=row.operation_id,agent_job_id=row.job_id,
-                event_key=f"agent:{row.job_id}:result:{digest}",
-            ),
-            metadata={
-                "job_type":row.job_type,"purpose":row.purpose,
-                "delivery_count":row.delivery_count,"result_sha256":digest,
-                "result_outcome":result_outcome,
-                "error_code":str(result.error_code)[:80] if result.error_code else None,
-            },
-        )
-        if row.job_type in {AgentJobType.LK_RECEIPT.value,AgentJobType.LP_RETURN.value} and result.document_id:
+
+        if audit is not None and tenant is not None:
+            result_outcome = str(result.outcome or "")
+            ambiguous = (
+                "AMBIGUOUS" in result_outcome.upper()
+                or "AMBIGUOUS" in str(result.error_code or "").upper()
+            )
+            failed = bool(result.error_code) or "FAIL" in result_outcome.upper()
+            event_type = (
+                "AGENT_RESULT_AMBIGUOUS"
+                if ambiguous
+                else "AGENT_JOB_FAILED"
+                if failed
+                else "AGENT_JOB_COMPLETED"
+            )
             audit.append(
-                event_type="AGENT_DOCUMENT_SUBMITTED",
-                actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+                event_type=event_type,
+                actor=ActorContext(
+                    ActorKind.WINDOWS_AGENT,
+                    machine_principal="windows-agent",
+                ),
                 tenant=tenant,
-                subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
-                secondary_subject=SubjectRef(SubjectType.WRITE_OPERATION,row.operation_id),
-                outcome=AuditOutcome.SUCCESS,
+                subject=SubjectRef(SubjectType.AGENT_JOB, row.job_id),
+                outcome=(
+                    AuditOutcome.AMBIGUOUS
+                    if ambiguous
+                    else AuditOutcome.FAILED
+                    if failed
+                    else AuditOutcome.SUCCESS
+                ),
                 trace=TraceContext(
-                    correlation_id=row.correlation_id,causation_id=row.job_id,
-                    operation_id=row.operation_id,agent_job_id=row.job_id,
-                    event_key=f"agent:{row.job_id}:document-submitted:{digest}",
+                    correlation_id=row.correlation_id,
+                    causation_id=row.causation_id,
+                    operation_id=row.operation_id,
+                    agent_job_id=row.job_id,
+                    event_key=f"agent:{row.job_id}:result:{digest}",
                 ),
                 metadata={
-                    "job_type":row.job_type,"purpose":row.purpose,
-                    "remote_document_id":str(result.document_id)[:512],
-                    "http_status":result.http_status,"body_sha256":result.body_sha256,
+                    "job_type": row.job_type,
+                    "purpose": row.purpose,
+                    "delivery_count": row.delivery_count,
+                    "result_sha256": digest,
+                    "result_outcome": result_outcome,
+                    "error_code": (
+                        str(result.error_code)[:80]
+                        if result.error_code
+                        else None
+                    ),
                 },
             )
+            if (
+                row.job_type
+                in {AgentJobType.LK_RECEIPT.value, AgentJobType.LP_RETURN.value}
+                and result.document_id
+            ):
+                audit.append(
+                    event_type="AGENT_DOCUMENT_SUBMITTED",
+                    actor=ActorContext(
+                        ActorKind.WINDOWS_AGENT,
+                        machine_principal="windows-agent",
+                    ),
+                    tenant=tenant,
+                    subject=SubjectRef(SubjectType.AGENT_JOB, row.job_id),
+                    secondary_subject=SubjectRef(
+                        SubjectType.WRITE_OPERATION,
+                        row.operation_id,
+                    ),
+                    outcome=AuditOutcome.SUCCESS,
+                    trace=TraceContext(
+                        correlation_id=row.correlation_id,
+                        causation_id=row.job_id,
+                        operation_id=row.operation_id,
+                        agent_job_id=row.job_id,
+                        event_key=(
+                            f"agent:{row.job_id}:document-submitted:{digest}"
+                        ),
+                    ),
+                    metadata={
+                        "job_type": row.job_type,
+                        "purpose": row.purpose,
+                        "remote_document_id": str(result.document_id)[:512],
+                        "http_status": result.http_status,
+                        "body_sha256": result.body_sha256,
+                    },
+                )
         self.db.flush()
 
     def state(self, job_id: str) -> AgentJobState:
