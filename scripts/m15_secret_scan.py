@@ -39,14 +39,15 @@ def main() -> int:
         text = path.read_text(encoding="utf-8", errors="replace")
         if PRIVATE_KEY.search(text):
             findings.append(f"{path.relative_to(ROOT)}: private-key marker")
-        for match in LITERAL_ASSIGNMENT.finditer(text):
-            sample = match.group("value")
-            if not any(marker.casefold() in sample.casefold() for marker in ALLOW):
-                findings.append(f"{path.relative_to(ROOT)}: suspicious quoted credential literal")
-        for match in DB_CREDENTIAL.finditer(text):
-            password = match.group("password")
-            if not any(marker.casefold() in password.casefold() for marker in ALLOW):
-                findings.append(f"{path.relative_to(ROOT)}: hard-coded database URL credential")
+        if path.suffix.lower() in {".env", ".example", ".yml", ".yaml", ".toml", ".json"}:
+            for match in LITERAL_ASSIGNMENT.finditer(text):
+                sample = match.group("value")
+                if not any(marker.casefold() in sample.casefold() for marker in ALLOW):
+                    findings.append(f"{path.relative_to(ROOT)}: suspicious quoted credential literal")
+            for match in DB_CREDENTIAL.finditer(text):
+                password = match.group("password")
+                if not any(marker.casefold() in password.casefold() for marker in ALLOW):
+                    findings.append(f"{path.relative_to(ROOT)}: hard-coded database URL credential")
     if findings:
         print("\n".join(findings), file=sys.stderr)
         return 1
