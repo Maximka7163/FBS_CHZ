@@ -297,6 +297,7 @@ class OutboundAgentEnrollmentClient:
         *,
         enrollment_token: str,
         installation_id: str,
+        participant_inn: str,
         protocol_version: str,
         agent_version: str,
         supported_job_types: list[str],
@@ -305,6 +306,7 @@ class OutboundAgentEnrollmentClient:
         payload = {
             "enrollment_token": enrollment_token,
             "installation_id": installation_id,
+            "participant_inn": participant_inn,
             "protocol_version": protocol_version,
             "agent_version": agent_version,
             "supported_job_types": list(supported_job_types),
