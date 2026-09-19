@@ -329,7 +329,7 @@ def test_persisted_m2_job_survives_postgres_reopen_and_duplicate_result_is_safe(
     Session2 = sessionmaker(bind=engine2, expire_on_commit=False)
     result = AgentResult(job.job_id, job.operation_id, "READ_COMPLETED", read_result={"type": "PARTICIPANTS", "items": []})
     with Session2.begin() as db:
-        store = SqlAlchemyAgentJobStore(db)
+        store = SqlAlchemyAgentJobStore(db, legacy_unbound=True)
         meta = store.metadata(job.job_id)
         assert meta.job.job_type is AgentJobType.PARTICIPANTS
         store.complete(result)
