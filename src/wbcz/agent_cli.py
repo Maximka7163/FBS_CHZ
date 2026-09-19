@@ -278,6 +278,8 @@ def _enroll_from_env() -> dict[str, Any]:
     credential_path = Path(os.getenv("WBCZ_AGENT_CREDENTIAL_PATH", str(data_dir / "agent-credential.dpapi"))).expanduser()
     protocol = os.getenv("WBCZ_AGENT_PROTOCOL_VERSION", "m15-v1").strip() or "m15-v1"
     version = os.getenv("WBCZ_AGENT_VERSION", "0.5.1").strip() or "0.5.1"
+    participant_inn = os.getenv("WBCZ_PARTICIPANT_INN", "").strip()
+    validate_owner_inn(participant_inn)
     with WindowsAgentReplayStore(replay_path) as replay:
         identity = replay.get_runtime_metadata("agent_identity") or {}
         installation_id = identity.get("installation_id")
@@ -292,6 +294,7 @@ def _enroll_from_env() -> dict[str, Any]:
     value = OutboundAgentEnrollmentClient(sender).exchange(
         enrollment_token=enrollment_token,
         installation_id=installation_id,
+        participant_inn=participant_inn,
         protocol_version=protocol,
         agent_version=version,
         supported_job_types=[item.value for item in AgentJobType],
