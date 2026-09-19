@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger, CheckConstraint, DateTime, ForeignKey, Index, JSON, String,
+    BigInteger, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, JSON, String,
     UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -133,7 +133,12 @@ class AuditEventRecord(Base):
     __table_args__ = (
         UniqueConstraint("chain_id", "sequence", name="uq_audit_events_chain_sequence"),
         UniqueConstraint("chain_id", "event_key", name="uq_audit_events_chain_event_key"),
-        ForeignKeyConstraint := None,
+        ForeignKeyConstraint(
+            ["participant_id", "organisation_id"],
+            ["participants.id", "participants.organisation_id"],
+            name="fk_audit_events_participant_organisation",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(f"category IN ({_quoted(AUDIT_CATEGORIES)})", name="ck_audit_event_category"),
         CheckConstraint(f"actor_kind IN ({_quoted(ACTOR_KINDS)})", name="ck_audit_event_actor_kind"),
         CheckConstraint(f"outcome IN ({_quoted(AUDIT_OUTCOMES)})", name="ck_audit_event_outcome"),
@@ -161,12 +166,6 @@ class AuditEventRecord(Base):
         Index("ix_audit_events_org_participant", "organisation_id", "participant_id"),
         Index("ix_audit_events_org_correlation", "organisation_id", "correlation_id"),
     )
-
-
-# SQLAlchemy cannot declare the composite participant->organisation FK through the
-# tuple above without importing ForeignKeyConstraint before class construction.
-# Add it after imports in a migration; runtime tenant validation in AuditService is
-# authoritative and the database migration adds the matching composite FK.
 
 
 class AuditCheckpointRecord(Base):
