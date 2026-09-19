@@ -1,5 +1,6 @@
 from __future__ import annotations
-import secrets\nfrom uuid import uuid4
+import secrets
+from uuid import uuid4
 from collections.abc import Callable,Iterator
 from dataclasses import dataclass
 from fastapi import Depends,Header,HTTPException,Request
