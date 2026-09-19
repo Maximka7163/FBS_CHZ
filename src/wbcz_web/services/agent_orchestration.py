@@ -30,6 +30,7 @@ from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, Sql
 from wbcz_web.services.imports import record_to_event
 from wbcz_web.services.agent_bindings import AgentBindingService, AgentPrincipal
 from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
+from wbcz_web.services.production_secrets import build_artifact_key_provider
 from wbcz_web.services.audit_history import (
     ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
     AuthorizationDecision,SubjectRef,SubjectType,TraceContext,
@@ -262,7 +263,7 @@ class AgentOrchestrationBroker:
             raise InvalidWriteOperation("M11 report artifact storage is not configured")
         store = FilesystemReportArtifactStore(
             Path(self.config.report_artifact_root),
-            key_provider=EnvironmentArtifactKeyProvider(),
+            key_provider=build_artifact_key_provider(self.config),
             key_version=self.config.report_artifact_key_version,
         )
         return ReportArtifactIngressService(
