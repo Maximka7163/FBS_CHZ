@@ -1,5 +1,5 @@
 from __future__ import annotations
-import secrets
+import secrets\nfrom uuid import uuid4
 from collections.abc import Callable,Iterator
 from dataclasses import dataclass
 from fastapi import Depends,Header,HTTPException,Request
@@ -9,6 +9,17 @@ from wbcz_web.services.authorization import ActiveScope,AuthorizationError,Autho
 
 def get_db(request:Request)->Iterator[Session]:
  db=request.app.state.session_factory()
+ request_id=getattr(request.state,"request_id",None)
+ if not request_id:
+  request_id="req_"+uuid4().hex
+  request.state.request_id=request_id
+ correlation_id=getattr(request.state,"correlation_id",None) or request_id
+ request.state.correlation_id=correlation_id
+ db.info["audit_trace"]={"request_id":request_id,"correlation_id":correlation_id,"causation_id":None}
+ config=request.app.state.config
+ if getattr(config,"audit_pseudonym_key",None):
+  db.info["audit_pseudonym_key"]=config.audit_pseudonym_key.encode("utf-8")
+  db.info["audit_pseudonym_key_id"]=config.audit_pseudonym_key_id
  try:yield db;db.commit()
  except Exception:db.rollback();raise
  finally:db.close()
