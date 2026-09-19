@@ -83,6 +83,8 @@ class WebConfig:
     login_account_initial_delay_seconds: int = 30
     login_account_delay_cap_seconds: int = 15 * 60
     login_account_lock_failures: int = 100
+    audit_pseudonym_key: str | None = None
+    audit_pseudonym_key_id: str = "audit-v1"
 
     def organisation_document_config(self) -> P0OrganisationConfig | None:
         if self.organisation_type is None:
@@ -123,6 +125,10 @@ class WebConfig:
             raise ValueError("WBCZ_LOGIN_ACCOUNT_LOCK_FAILURES must remain 100 for M12")
         if self.public_registration_enabled:
             raise ValueError("Public registration runtime remains disabled in M12")
+        if self.audit_pseudonym_key is not None and len(self.audit_pseudonym_key.encode("utf-8")) < 32:
+            raise ValueError("WBCZ_AUDIT_PSEUDONYM_KEY must be at least 32 UTF-8 bytes")
+        if not self.audit_pseudonym_key_id or len(self.audit_pseudonym_key_id) > 64:
+            raise ValueError("WBCZ_AUDIT_PSEUDONYM_KEY_ID is invalid")
         if not self.session_cookie_name or not self.csrf_cookie_name:
             raise ValueError("Cookie names must not be empty")
         if self.session_cookie_name == self.csrf_cookie_name:
@@ -180,6 +186,8 @@ class WebConfig:
             if normalized in {"changeme", "change_me", "password", "secret", "agent-token", "replace_me"} or "replace_with" in normalized:
                 raise ValueError("WBCZ_AGENT_MACHINE_TOKEN is an unsafe placeholder")
         if self.environment == "production":
+            if not self.audit_pseudonym_key:
+                raise ValueError("WBCZ_AUDIT_PSEUDONYM_KEY is required in production")
             if not self.cookie_secure:
                 raise ValueError("WBCZ_COOKIE_SECURE must be true in production")
             if self.debug:
@@ -235,6 +243,8 @@ class WebConfig:
             login_account_initial_delay_seconds=int(os.getenv("WBCZ_LOGIN_ACCOUNT_INITIAL_DELAY_SECONDS", "30")),
             login_account_delay_cap_seconds=int(os.getenv("WBCZ_LOGIN_ACCOUNT_DELAY_CAP_SECONDS", "900")),
             login_account_lock_failures=int(os.getenv("WBCZ_LOGIN_ACCOUNT_LOCK_FAILURES", "100")),
+            audit_pseudonym_key=os.getenv("WBCZ_AUDIT_PSEUDONYM_KEY", "").strip() or None,
+            audit_pseudonym_key_id=os.getenv("WBCZ_AUDIT_PSEUDONYM_KEY_ID", "audit-v1").strip() or "audit-v1",
             cookie_secure=secure,
             session_cookie_name=os.getenv("WBCZ_SESSION_COOKIE_NAME", "wbcz_session").strip(),
             csrf_cookie_name=os.getenv("WBCZ_CSRF_COOKIE_NAME", "wbcz_csrf").strip(),
