@@ -58,7 +58,7 @@ def test_windows_runtime_package_uses_current_enrollment_model_without_baked_cre
     assert "Remove-Item Env:WBCZ_AGENT_MACHINE_TOKEN" in common
     assert "agent-credential.dpapi" in config
     assert "production_write = $false" in config
-    assert "wbcz-agent enroll" in readme
+    assert "Enroll-WbczAgent.ps1" in readme
     assert "New-WbczMachineToken" not in readme
     assert "configure-agent-machine-secret" not in readme
 
