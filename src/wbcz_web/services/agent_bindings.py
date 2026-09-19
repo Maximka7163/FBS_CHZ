@@ -188,6 +188,7 @@ class AgentBindingService:
             select(AgentBindingRecord).where(
                 AgentBindingRecord.credential_hash == digest,
                 AgentBindingRecord.state == "ACTIVE",
+                AgentBindingRecord.protocol_compatibility_state == "COMPATIBLE",
             ).with_for_update()
         )
         if row is None or not hmac.compare_digest(row.credential_hash, digest):
@@ -236,6 +237,9 @@ class AgentBindingService:
             "installation_id": row.installation_id,
             "protocol_version": row.protocol_version,
             "agent_version": row.agent_version,
+            "protocol_compatibility_state": row.protocol_compatibility_state,
+            "supported_job_types": list(row.supported_job_types_json or ()),
+            "supported_capabilities": list(row.supported_capabilities_json or ()),
             "state": row.state,
             "is_primary": row.is_primary,
             "runtime_status": agent_runtime_status(
