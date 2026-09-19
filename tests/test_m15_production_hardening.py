@@ -184,7 +184,7 @@ def test_live_does_not_touch_database_and_ready_fails_closed_when_database_is_do
     assert "postgresql" not in repr(ready.json()).lower()
 
 
-def test_worker_drain_stops_new_claims_without_execution():
+def test_worker_drain_stops_new_claims_without_execution(monkeypatch):
     runtime = ProductionWorkerRuntime(
         session_factory=None,
         config=SimpleNamespace(),
@@ -193,9 +193,17 @@ def test_worker_drain_stops_new_claims_without_execution():
         draining=True,
     )
     calls = []
-    runtime.heartbeat = lambda **kwargs: calls.append(kwargs)
-    runtime._claim = lambda: (_ for _ in ()).throw(AssertionError("draining worker must not claim"))
-    runtime._execute = lambda _claim: (_ for _ in ()).throw(AssertionError("draining worker must not execute"))
+    monkeypatch.setattr(ProductionWorkerRuntime, "heartbeat", lambda self, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(
+        ProductionWorkerRuntime,
+        "_claim",
+        lambda self: (_ for _ in ()).throw(AssertionError("draining worker must not claim")),
+    )
+    monkeypatch.setattr(
+        ProductionWorkerRuntime,
+        "_execute",
+        lambda self, _claim: (_ for _ in ()).throw(AssertionError("draining worker must not execute")),
+    )
     assert runtime.run_once() is False
     assert calls == [{"state": "DRAINING"}]
 
@@ -240,10 +248,10 @@ def test_strict_production_config_rejects_legacy_agent_bootstrap_and_missing_run
         missing.validate_m15_production_runtime()
 
 
-def test_windows_agent_config_does_not_accept_missing_participant_credential(monkeypatch, tmp_path: Path):
+def test_windows_agent_production_runtime_preserves_windows_cryptopro_boundary(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("WBCZ_AGENT_BACKEND_URL", "https://agent.example.test")
     monkeypatch.setenv("WBCZ_PARTICIPANT_INN", "7800000000")
     monkeypatch.setenv("WBCZ_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("WBCZ_AGENT_MACHINE_TOKEN", raising=False)
-    with pytest.raises(ValueError, match="enrollment is required"):
+    with pytest.raises(ValueError, match="requires Windows \+ CryptoPro CSP"):
         WindowsAgentConfig.from_env()
