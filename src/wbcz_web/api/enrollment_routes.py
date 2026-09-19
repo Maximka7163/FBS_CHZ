@@ -21,6 +21,7 @@ class EnrollmentIntentRequest(BaseModel):
 class EnrollmentExchangeRequest(BaseModel):
     enrollment_token: str = Field(min_length=43, max_length=256)
     installation_id: str = Field(min_length=8, max_length=128)
+    participant_inn: str = Field(min_length=10, max_length=12)
     protocol_version: str = Field(min_length=3, max_length=32)
     agent_version: str = Field(min_length=1, max_length=64)
     supported_job_types: list[str] = Field(default_factory=list, max_length=100)
@@ -64,6 +65,7 @@ def exchange_enrollment_token(
         ).exchange(
             payload.enrollment_token,
             installation_id=payload.installation_id,
+            participant_inn=payload.participant_inn,
             protocol_version=payload.protocol_version,
             agent_version=payload.agent_version,
             supported_job_types=payload.supported_job_types,
