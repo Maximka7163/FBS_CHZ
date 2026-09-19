@@ -36,7 +36,7 @@ jobs:
       WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m1
       WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_m1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
 
@@ -53,11 +53,11 @@ jobs:
           test "$(git rev-parse origin/p0/test-candidate-001)" = "395701f1757711b5a11b9348d929182d40f51f0a"
           echo "M1_BASE_VERIFIED=$M1_BASE_SHA"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
 
@@ -126,7 +126,7 @@ jobs:
   windows-agent:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
 
@@ -138,7 +138,7 @@ jobs:
           $frozen=(git rev-parse origin/p0/test-candidate-001).Trim()
           if ($frozen -ne "395701f1757711b5a11b9348d929182d40f51f0a") { throw "frozen P0 branch changed: $frozen" }
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
 
