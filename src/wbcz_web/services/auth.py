@@ -141,16 +141,22 @@ class AuthService:
         user_agent: str | None = None,
     ) -> tuple[User, str]:
         username = username.strip()
+        user = self.users.by_username(username)
         if self._source_throttled(remote_address):
-            self.audit.append("LOGIN_THROTTLED", entity_type="auth", entity_id=_digest(remote_address), metadata={"scope":"source"})
+            self.audit.append(
+                "LOGIN_THROTTLED",
+                user_id=user.id if user is not None else None,
+                entity_type="user" if user is not None else "auth",
+                entity_id=str(user.id) if user is not None else _digest(remote_address),
+                metadata={"scope":"source"},
+            )
             raise AuthenticationError("Неверный логин или пароль")
 
-        user = self.users.by_username(username)
         now = _now()
         account_state = self._account_state(user.id, lock=True) if user is not None else None
         if account_state is not None and self._account_is_blocked(account_state, now=now):
             self._attempt(username, remote_address, False)
-            self.audit.append("LOGIN_THROTTLED", entity_type="auth", entity_id=_digest(username.casefold()))
+            self.audit.append("LOGIN_THROTTLED", user_id=user.id, entity_type="user", entity_id=str(user.id), metadata={"scope":"account"})
             raise AuthenticationError("Неверный логин или пароль")
 
         password_valid = user is not None and verify_password(user.password_hash, password)
@@ -163,7 +169,12 @@ class AuthService:
             self._attempt(username, remote_address, False)
             if user is not None and not password_valid and account_state is not None:
                 self._record_account_failure(account_state, now=now)
-            self.audit.append("LOGIN_FAILED", entity_type="auth", entity_id=_digest(username.casefold()))
+            self.audit.append(
+                "LOGIN_FAILED",
+                user_id=user.id if user is not None else None,
+                entity_type="user" if user is not None else "auth",
+                entity_id=str(user.id) if user is not None else _digest(username.casefold()),
+            )
             raise AuthenticationError("Неверный логин или пароль")
 
         assert account_state is not None
