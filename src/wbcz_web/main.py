@@ -7,7 +7,13 @@ from .config import WebConfig
 from .db import build_session_factory
 
 
-def create_app(config: WebConfig | None = None, *, session_factory=None) -> FastAPI:
+def create_app(
+    config: WebConfig | None = None,
+    *,
+    session_factory=None,
+    integration_secret_provider=None,
+    wb_http_adapter=None,
+) -> FastAPI:
     # Import routers only after create_app is called, avoiding partially initialized
     # router modules during auth/repository dependency cycles.
     from .api.routes import router
@@ -15,6 +21,8 @@ def create_app(config: WebConfig | None = None, *, session_factory=None) -> Fast
     from .api.security_routes import security_router
     from .api.report_routes import reports_router
     from .api.audit_routes import audit_router
+    from .api.integration_routes import integrations_router
+    from .services.integration_secrets import ReadOnlySecretProvider
     config = (config or WebConfig.from_env()).validate_for_startup()
     production = config.environment == "production"
     child_routes = [
@@ -22,6 +30,7 @@ def create_app(config: WebConfig | None = None, *, session_factory=None) -> Fast
         *security_router.routes,
         *reports_router.routes,
         *audit_router.routes,
+        *integrations_router.routes,
         *agent_router.routes,
     ]
     app = FastAPI(
@@ -35,6 +44,8 @@ def create_app(config: WebConfig | None = None, *, session_factory=None) -> Fast
     )
     app.state.config = config
     app.state.session_factory = session_factory or build_session_factory(config)
+    app.state.integration_secret_provider = integration_secret_provider or ReadOnlySecretProvider()
+    app.state.wb_http_adapter = wb_http_adapter
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.trusted_hosts))
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     required = {
@@ -43,6 +54,10 @@ def create_app(config: WebConfig | None = None, *, session_factory=None) -> Fast
         "/api/security/scope",
         "/api/reports/{job_id}/artifacts/{artifact_id}/download",
         "/api/audit/events",
+        "/api/integrations",
+        "/api/environment-capabilities",
+        "/api/agent/status",
+        "/api/certificate/status",
         "/api/agent/v1/jobs/next",
     }
     missing = required - paths
