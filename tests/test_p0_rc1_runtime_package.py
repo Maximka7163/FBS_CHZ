@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 M15_BASE = "ce71f9e049bc7d65a0221001b2c7e5aa701f2243"
 RUNTIME_COMMITS = {
-    "734c9139fa141cd49bc765a26afc3f25530acc8b": "OBSOLETE_SUPERSEDED",
+    "734c9139fa141cd49bc765a26afc3f25530acc8b": "REQUIRED_PORT",
     "bc29f798f214c35b0b0b48f27f85ecd13ad93a50": "OBSOLETE_SUPERSEDED",
     "072fa3d302197727222d2f17c76aa5b0a374ae2d": "OBSOLETE_SUPERSEDED",
     "d68505d36b2983c22fc2927a67fcb25b721fcf47": "REQUIRED_PORT",
@@ -61,6 +61,36 @@ def test_windows_runtime_package_uses_current_enrollment_model_without_baked_cre
     assert "wbcz-agent enroll" in readme
     assert "New-WbczMachineToken" not in readme
     assert "configure-agent-machine-secret" not in readme
+
+
+
+
+def test_p0_organisation_metadata_is_wired_into_m15_runtime_without_enabling_write() -> None:
+    compose = text("docker-compose.prod.yml")
+    for name in (
+        "WBCZ_ORGANISATION_TYPE",
+        "WBCZ_ACTIVITY_FIAS_ID",
+        "WBCZ_ACTIVITY_KPP",
+        "WBCZ_REMOTE_SALE_RETURN_PAID",
+    ):
+        assert f"{name}: ${{{name}:-}}" in compose
+    assert 'WBCZ_TRUE_API_WRITE_ENABLED: "false"' in compose
+    assert 'WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"' in compose
+
+
+def test_packaged_enrollment_helper_uses_hidden_one_use_token_and_clears_it() -> None:
+    helper = text("windows-agent/Enroll-WbczAgent.ps1")
+    installer = text("windows-agent/Install-WbczAgent.ps1")
+    runbook = text("docs/P0_RC1_RUNTIME_RUNBOOK.md")
+    assert "Read-Host 'One-use agent enrollment token' -AsSecureString" in helper
+    assert "$env:WBCZ_AGENT_ENROLLMENT_TOKEN = $token" in helper
+    assert "Remove-Item Env:WBCZ_AGENT_ENROLLMENT_TOKEN" in helper
+    assert "ZeroFreeBSTR" in helper
+    assert "ENROLLMENT_TOKEN_PRINTED=NO" in helper
+    assert "& $exe enroll" in helper
+    assert "WBCZ_AGENT_PRODUCTION_WRITE_ENABLED" not in helper
+    assert "Enroll-WbczAgent.ps1" in installer
+    assert "Enroll-WbczAgent.ps1" in runbook
 
 
 def test_windows_preflight_helper_cannot_create_business_document() -> None:
