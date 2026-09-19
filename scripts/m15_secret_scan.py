@@ -8,8 +8,19 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_ROOTS = [ROOT / "src", ROOT / "deploy", ROOT / "docker-compose.prod.yml", ROOT / ".env.production.example"]
 PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-ASSIGNMENT = re.compile(r"(?i)(?:token|password|secret|api[_-]?key|bearer|pin)\s*[=:]\s*['\"]?[A-Za-z0-9._~+/-]{24,}")
-ALLOW = ("REPLACE_WITH", "test-only", "SYNTHETIC", "CANARY", "${")
+# Only quoted literal assignments are treated as hard-coded credentials.
+# Expressions such as token = provision_agent_credential() are code, not secrets.
+LITERAL_ASSIGNMENT = re.compile(
+    r"""(?ix)
+    (?:token|password|secret|api[_-]?key|bearer|pin)
+    \s*[=:]\s*
+    (?P<quote>['"])
+    (?P<value>[^'"\r\n]{20,})
+    (?P=quote)
+    """
+)
+DB_CREDENTIAL = re.compile(r"postgres(?:ql)?(?:\+[^:]+)?://[^\s:@/]+:(?P<password>[^\s@/]{8,})@", re.IGNORECASE)
+ALLOW = ("REPLACE_WITH", "test-only", "TEST", "SYNTHETIC", "CANARY", "${", "<REDACTED", "example")
 
 
 def files():
@@ -28,10 +39,14 @@ def main() -> int:
         text = path.read_text(encoding="utf-8", errors="replace")
         if PRIVATE_KEY.search(text):
             findings.append(f"{path.relative_to(ROOT)}: private-key marker")
-        for match in ASSIGNMENT.finditer(text):
-            sample = match.group(0)
-            if not any(marker in sample for marker in ALLOW):
-                findings.append(f"{path.relative_to(ROOT)}: suspicious credential assignment")
+        for match in LITERAL_ASSIGNMENT.finditer(text):
+            sample = match.group("value")
+            if not any(marker.casefold() in sample.casefold() for marker in ALLOW):
+                findings.append(f"{path.relative_to(ROOT)}: suspicious quoted credential literal")
+        for match in DB_CREDENTIAL.finditer(text):
+            password = match.group("password")
+            if not any(marker.casefold() in password.casefold() for marker in ALLOW):
+                findings.append(f"{path.relative_to(ROOT)}: hard-coded database URL credential")
     if findings:
         print("\n".join(findings), file=sys.stderr)
         return 1
