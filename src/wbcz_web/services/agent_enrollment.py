@@ -11,7 +11,7 @@ from typing import Iterable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from wbcz_web.models import AgentBindingRecord, AgentEnrollmentTokenRecord
+from wbcz_web.models import AgentBindingRecord, AgentEnrollmentTokenRecord, ParticipantRecord
 from wbcz_web.services.agent_bindings import AgentBindingService
 from wbcz_web.services.tenant import active_tenant, bind_tenant_scope
 
@@ -111,6 +111,7 @@ class AgentEnrollmentService:
         raw_token: str,
         *,
         installation_id: str,
+        participant_inn: str,
         protocol_version: str,
         agent_version: str,
         supported_job_types: Iterable[str],
@@ -124,6 +125,9 @@ class AgentEnrollmentService:
         )
         if row is None or not hmac.compare_digest(row.token_hash, digest):
             raise PermissionError("invalid enrollment token")
+        participant = self.db.get(ParticipantRecord, row.participant_id)
+        if participant is None or participant.organisation_id != row.organisation_id or participant.inn != participant_inn:
+            raise PermissionError("enrollment participant mismatch")
         now = _now()
         if row.state != "PENDING":
             raise PermissionError("enrollment token already used or revoked")
