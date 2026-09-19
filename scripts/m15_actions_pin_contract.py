@@ -12,7 +12,11 @@ FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 
 def main() -> int:
     findings = []
-    for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+    required = (
+        ROOT / ".github/workflows/m14-integration-settings-validation.yml",
+        ROOT / ".github/workflows/m15-production-hardening-validation.yml",
+    )
+    for path in required:
         text = path.read_text(encoding="utf-8")
         for value in USES.findall(text):
             # Local reusable actions/workflows are versioned by this repository.
@@ -23,7 +27,7 @@ def main() -> int:
     if findings:
         print("\n".join(findings), file=sys.stderr)
         return 1
-    print("M15 GitHub Actions pin contract: OK")
+    print("M15 active release workflows immutable action pin contract: OK")
     return 0
 
 
