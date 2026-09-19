@@ -34,7 +34,8 @@ def test_rc1_bundle_targets_current_m15_runtime_not_legacy_p0_sha() -> None:
     assert 'EXPECTED_ALEMBIC_HEAD = "0016_m15_production_hardening"' in builder
     assert 'source_branch != "release/p0-rc1"' in builder
     assert "858a329b56c2cabae62e9814f540072e8a048d3f" not in builder
-    assert '"src/wbcz_ui"' not in builder
+    assert '"src/wbcz_ui",' not in builder
+    assert 'if (bundle / "src/wbcz_ui").exists()' in builder
     assert '"src/wbcz/agent_identity.py"' in builder
     assert '"src/wbcz_web/api/enrollment_routes.py"' in builder
     assert '"src/wbcz_web/worker.py"' in builder
