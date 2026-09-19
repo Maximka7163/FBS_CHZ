@@ -621,6 +621,36 @@ class IntegrationSettingsService:
             raise
         return self.dto(kind, row)
 
+    def revoke_secret(self, kind: str, object_id: str, *, user_id: int) -> dict[str, Any]:
+        if kind not in {"wb","ozon"}:
+            raise ValueError("secret revoke is supported only for WB/Ozon")
+        row = self._get(kind, object_id, lock=True)
+        ref = row.active_secret_ref
+        version = row.active_secret_version
+        if not ref or not version:
+            raise SecretProviderAtomicRotationUnsupported("SECRET_PROVIDER_ATOMIC_ROTATION_UNSUPPORTED")
+        if not (self.secret_provider.capabilities & SecretCapability.REVOKE):
+            raise SecretProviderWriteUnavailable("SECRET_PROVIDER_WRITE_UNAVAILABLE")
+        self.secret_provider.revoke(ref, version)
+        row.active_secret_ref = None
+        row.active_secret_version = None
+        row.pending_secret_ref = None
+        row.pending_secret_version = None
+        row.secret_rotation_state = "REVOKED"
+        row.secret_configured_at = None
+        if kind == "wb":
+            row.secret_ref = None
+        else:
+            row.api_key_secret_ref = None
+        self.db.flush()
+        self._audit(
+            "SECRET_REVOKED", subject_type=self._subject(kind), subject_id=str(row.id),
+            user_id=user_id,
+            metadata={"integration_type":kind.upper(),"connection_id":str(row.id),"old_version":version},
+            event_key_suffix=f"{row.id}:{version}:revoked",
+        )
+        return self.dto(kind, row)
+
     def reconcile_secret_rotation(self, kind: str, object_id: str, *, user_id: int) -> dict[str, Any]:
         if kind not in {"wb","ozon"}:
             raise ValueError("secret reconciliation is supported only for WB/Ozon")
