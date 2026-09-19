@@ -4,7 +4,7 @@ from .edo_lite import EdoLiteAnnualQuotaRecord, EdoLiteLedgerRecord, EdoLiteSche
 from .suz import SuzCodeBlockRecord, SuzConnectionRecord, SuzKmVaultRecord, SuzOrderItemRecord, SuzOrderRecord, SuzReconciliationEventRecord
 from .wb_fbs import WbConnectionRecord, WbOrderRecord, WbMarkingBindingRecord, WbEventRecord, WbReturnRecord, WbSyncCursorRecord, WbReconciliationRecord, WbPaidEvidenceRecord
 from .ozon import OzonConnectionRecord, OzonPostingRecord, OzonItemRecord, OzonMarkingBindingRecord, OzonEventRecord, OzonReturnRecord, OzonSyncCursorRecord, OzonReconciliationRecord, OzonPaidEvidenceRecord
-from .reports import ReportJobRecord, ReportSnapshotRecord, ReportArtifactRecord, ReportJobEventRecord, ReportArtifactUploadRecord
+from .reports import ReportJobRecord, ReportSnapshotRecord, ReportArtifactRecord, ReportJobEventRecord, ReportArtifactUploadRecord\nfrom .audit_history import AuditChainHeadRecord, AuditEventRecord, AuditCheckpointRecord
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -19,7 +19,7 @@ __all__ = [
     "OzonPostingRecord", "OzonItemRecord", "OzonMarkingBindingRecord", "OzonEventRecord",
     "OzonReturnRecord", "OzonSyncCursorRecord", "OzonReconciliationRecord", "OzonPaidEvidenceRecord",
     "ReportJobRecord", "ReportSnapshotRecord", "ReportArtifactRecord", "ReportJobEventRecord",
-    "ReportArtifactUploadRecord",
+    "ReportArtifactUploadRecord", "AuditChainHeadRecord", "AuditEventRecord", "AuditCheckpointRecord",
     "OrganisationRecord", "ParticipantRecord", "MembershipRecord", "PermissionRecord",
     "RolePermissionRecord", "InvitationRecord", "ParticipantClaimRecord", "PasswordHistoryRecord", "LoginAttemptRecord", "LoginThrottleStateRecord", "BootstrapRecord",
 ]
