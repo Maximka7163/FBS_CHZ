@@ -13,6 +13,8 @@ permissions:
 env:
   M15_BASE_COMMIT: "84afeee318c64ab3f09e3aef53f861e0ae5d24ba"
   M15_MIGRATION: "0016_m15_production_hardening"
+  WBCZ_AUDIT_PSEUDONYM_KEY: "m15-ci-only-audit-pseudonym-key-0000000000000001"
+  WBCZ_AUDIT_PSEUDONYM_KEY_ID: "m15-ci-v1"
 
 jobs:
   static-security:
