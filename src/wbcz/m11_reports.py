@@ -803,12 +803,20 @@ class FilesystemReportArtifactStore:
         key_provider: ArtifactKeyProvider | None = None,
         key_version: str = "m11-test-only",
         chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+        min_free_disk_bytes: int = 0,
     ) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.key_provider = key_provider
         self.key_version = key_version
         self.chunk_bytes = chunk_bytes
+        self.min_free_disk_bytes = max(0, int(min_free_disk_bytes))
+
+    def _admit_write(self, source_size: int) -> None:
+        free = shutil.disk_usage(self.root).free
+        required = self.min_free_disk_bytes + max(0, int(source_size))
+        if free < required:
+            raise ArtifactLimitExceeded("artifact storage free-space admission denied")
 
     def _new_storage_key(self, suffix: str) -> str:
         suffix = re.sub(r"[^A-Za-z0-9._-]", "", suffix)[:20]
@@ -832,6 +840,7 @@ class FilesystemReportArtifactStore:
     ) -> ArtifactWriteResult:
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
+        self._admit_write(source_path.stat().st_size)
         storage_key = self._new_storage_key(safe_suffix)
         target_path = self._resolve_storage_key(storage_key)
         tmp_path = self._resolve_storage_key(storage_key + ".tmp")
