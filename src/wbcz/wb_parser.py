@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import re
+import time as _time
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
@@ -32,6 +33,10 @@ WB_TIMEZONE = timezone(timedelta(hours=3))
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_UNPACKED_BYTES = 250 * 1024 * 1024
 MAX_ROWS = 200_000
+MAX_ZIP_ENTRIES = 4096
+MAX_ZIP_ENTRY_BYTES = 100 * 1024 * 1024
+MAX_HEADER_COLUMNS = 256
+MAX_PARSE_SECONDS = 30.0
 
 
 class WorkbookError(ValueError):
@@ -198,12 +203,33 @@ def _parse_row(values: dict[str, Any]) -> Event:
 
 
 def parse_excel(data: bytes) -> ParsedWorkbook:
+    started = _time.monotonic()
     if len(data) > MAX_FILE_BYTES:
         raise WorkbookError("Файл превышает допустимый размер 50 MiB")
     try:
         with ZipFile(BytesIO(data)) as archive:
-            if sum(item.file_size for item in archive.infolist()) > MAX_UNPACKED_BYTES:
+            entries = archive.infolist()
+            if len(entries) > MAX_ZIP_ENTRIES:
+                raise WorkbookError("Excel-архив содержит слишком много ZIP-записей")
+            if sum(item.file_size for item in entries) > MAX_UNPACKED_BYTES:
                 raise WorkbookError("Слишком большой распакованный Excel-архив")
+            for item in entries:
+                normalized = item.filename.replace("\\", "/")
+                parts = [part for part in normalized.split("/") if part not in ("", ".")]
+                if any(part == ".." for part in parts) or normalized.startswith("/"):
+                    raise WorkbookError("Excel-архив содержит небезопасный путь")
+                if item.flag_bits & 0x1:
+                    raise WorkbookError("Зашифрованные ZIP-записи Excel не поддерживаются")
+                if item.file_size > MAX_ZIP_ENTRY_BYTES:
+                    raise WorkbookError("Excel-архив содержит чрезмерно большую запись")
+                lowered = normalized.casefold()
+                if lowered.startswith("xl/externallinks/") or lowered.startswith("xl/embeddings/") or lowered.endswith("vbaproject.bin"):
+                    raise WorkbookError("Внешние ссылки, вложенные объекты и макросы не допускаются")
+            for item in entries:
+                if item.filename.casefold().endswith(".rels") and item.file_size <= 2 * 1024 * 1024:
+                    rel = archive.read(item)
+                    if b'TargetMode="External"' in rel or b"TargetMode='External'" in rel:
+                        raise WorkbookError("Внешние связи Excel не допускаются")
     except BadZipFile as exc:
         raise WorkbookError(
             "Ожидается Excel .xlsx; старый .xls, ZIP с вложенным Excel "
@@ -225,6 +251,8 @@ def parse_excel(data: bytes) -> ParsedWorkbook:
         first = next(iterator, None)
         if first is None:
             raise WorkbookError("Лист «КИЗ» пуст")
+        if len(first) > MAX_HEADER_COLUMNS:
+            raise WorkbookError(f"Слишком много колонок в листе «КИЗ»: максимум {MAX_HEADER_COLUMNS}")
         names = [_header(cell.value) for cell in first]
         missing = [name for name in HEADERS if name not in names]
         if missing:
@@ -236,6 +264,8 @@ def parse_excel(data: bytes) -> ParsedWorkbook:
         rows: list[ParsedRow] = []
         issues: list[RowIssue] = []
         for number, cells in enumerate(iterator, start=2):
+            if number % 1000 == 0 and _time.monotonic() - started > MAX_PARSE_SECONDS:
+                raise WorkbookError("Превышен безопасный лимит времени разбора Excel")
             if number > MAX_ROWS + 1:
                 raise WorkbookError(f"Превышен лимит строк: {MAX_ROWS}")
             values = {
