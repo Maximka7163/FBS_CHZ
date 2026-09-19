@@ -24,6 +24,7 @@ from .windows_agent import (
 _RESULT_PATH_RE = re.compile(r"^/api/agent/v1/jobs/([A-Za-z0-9._:-]{1,128})/result$")
 _REPORT_ARTIFACT_PATH_RE = re.compile(r"^/api/agent/v1/report-artifacts/(upl_[A-Fa-f0-9]{32})$")
 REPORT_ARTIFACT_INGRESS_PATH = "/api/agent/v1/report-artifacts/{artifact_upload_id}"
+AGENT_ENROLL_PATH = "/api/agent/v2/enroll"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +127,7 @@ class StdlibHttpsAgentSender:
     def _allowed(method: str, path: str) -> bool:
         if method in {"HEAD", "GET"} and path == AGENT_FETCH_PATH:
             return True
-        if method == "POST" and _RESULT_PATH_RE.fullmatch(path) is not None:
+        if method == "POST" and (_RESULT_PATH_RE.fullmatch(path) is not None or path == AGENT_ENROLL_PATH):
             return True
         return method == "PUT" and _REPORT_ARTIFACT_PATH_RE.fullmatch(path) is not None
 
@@ -283,6 +284,52 @@ class OutboundAgentHttpClient(AgentBackendChannel):
                 if response.status in (401, 403)
                 else f"agent backend artifact HTTP {response.status}"
             )
+
+
+class OutboundAgentEnrollmentClient:
+    """One exact unauthenticated endpoint used only to exchange a short-lived enrollment token."""
+
+    def __init__(self, sender: AgentHttpSender) -> None:
+        self.sender = sender
+
+    def exchange(
+        self,
+        *,
+        enrollment_token: str,
+        installation_id: str,
+        protocol_version: str,
+        agent_version: str,
+        supported_job_types: list[str],
+        supported_capabilities: list[str],
+    ) -> dict[str, Any]:
+        payload = {
+            "enrollment_token": enrollment_token,
+            "installation_id": installation_id,
+            "protocol_version": protocol_version,
+            "agent_version": agent_version,
+            "supported_job_types": list(supported_job_types),
+            "supported_capabilities": list(supported_capabilities),
+        }
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        response = self.sender.request(
+            "POST",
+            AGENT_ENROLL_PATH,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
+            body=body,
+        )
+        if response.status not in (200, 201):
+            raise AgentAuthError("agent enrollment rejected")
+        try:
+            value = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentSecurityError("invalid enrollment response") from exc
+        if not isinstance(value, dict):
+            raise AgentSecurityError("invalid enrollment response")
+        return value
 
 
 class VpsAgentHttpBoundary:
