@@ -6,6 +6,10 @@ from .wb_fbs import WbConnectionRecord, WbOrderRecord, WbMarkingBindingRecord, W
 from .ozon import OzonConnectionRecord, OzonPostingRecord, OzonItemRecord, OzonMarkingBindingRecord, OzonEventRecord, OzonReturnRecord, OzonSyncCursorRecord, OzonReconciliationRecord, OzonPaidEvidenceRecord
 from .reports import ReportJobRecord, ReportSnapshotRecord, ReportArtifactRecord, ReportJobEventRecord, ReportArtifactUploadRecord
 from .audit_history import AuditChainHeadRecord, AuditEventRecord, AuditCheckpointRecord
+from .integration_settings import (
+    AgentBindingRecord, AgentCertificateObservationRecord, TrueApiConnectionRecord,
+    IntegrationHealthCheckRecord,
+)
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -21,6 +25,8 @@ __all__ = [
     "OzonReturnRecord", "OzonSyncCursorRecord", "OzonReconciliationRecord", "OzonPaidEvidenceRecord",
     "ReportJobRecord", "ReportSnapshotRecord", "ReportArtifactRecord", "ReportJobEventRecord",
     "ReportArtifactUploadRecord", "AuditChainHeadRecord", "AuditEventRecord", "AuditCheckpointRecord",
+    "AgentBindingRecord", "AgentCertificateObservationRecord", "TrueApiConnectionRecord",
+    "IntegrationHealthCheckRecord",
     "OrganisationRecord", "ParticipantRecord", "MembershipRecord", "PermissionRecord",
     "RolePermissionRecord", "InvitationRecord", "ParticipantClaimRecord", "PasswordHistoryRecord", "LoginAttemptRecord", "LoginThrottleStateRecord", "BootstrapRecord",
 ]
