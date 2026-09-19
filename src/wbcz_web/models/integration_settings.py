@@ -32,6 +32,10 @@ class AgentBindingRecord(Base):
     last_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_true_api_auth_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     capabilities_sanitized: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    protocol_compatibility_state: Mapped[str] = mapped_column(String(32), nullable=False, default="COMPATIBLE")
+    supported_job_types_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    supported_capabilities_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -48,6 +52,10 @@ class AgentBindingRecord(Base):
         ),
         CheckConstraint("state IN ('PENDING','ACTIVE','DISABLED','ARCHIVED')", name="ck_agent_bindings_state"),
         CheckConstraint("credential_version >= 1", name="ck_agent_bindings_credential_version"),
+        CheckConstraint(
+            "protocol_compatibility_state IN ('COMPATIBLE','UPGRADE_REQUIRED','UNSUPPORTED')",
+            name="ck_agent_bindings_protocol_compatibility",
+        ),
         UniqueConstraint("organisation_id", "participant_id", "installation_id", name="uq_agent_bindings_participant_installation"),
         UniqueConstraint("id", "organisation_id", "participant_id", name="uq_agent_bindings_id_tenant"),
         Index(
