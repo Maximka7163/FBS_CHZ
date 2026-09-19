@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
+from wbcz.agent_cli import WindowsAgentConfig
+from wbcz.m11_reports import DISPENSER_CAPABILITIES, DispenserCapabilityName
+from wbcz.windows_agent_runtime import DurableDispenserRateLimiter, WindowsAgentReplayStore
+from wbcz_web.config import WebConfig
+from wbcz_web.main import create_app
 from wbcz_web.services.agent_enrollment import AgentHandshake, ProtocolCompatibility, evaluate_protocol
 from wbcz_web.services.production_hardening import (
     RetryClassification,
@@ -15,6 +22,7 @@ from wbcz_web.services.production_hardening import (
     sanitize_operational_data,
 )
 from wbcz_web.services.production_secrets import EncryptedVersionedFilesystemSecretProvider
+from wbcz_web.services.worker_runtime import ProductionWorkerRuntime
 from wbcz_web.services.integration_secrets import SecretProviderError
 
 
@@ -149,3 +157,93 @@ def test_production_compose_keeps_write_gate_off_and_wires_worker_artifact_secre
     assert "marking-postgres" in compose
     postgres = compose.split("  marking-postgres:", 1)[1].split("  marking-migrate:", 1)[0]
     assert "\n    ports:" not in postgres
+
+
+def test_live_does_not_touch_database_and_ready_fails_closed_when_database_is_down():
+    class BrokenSessionFactory:
+        def __call__(self):
+            raise RuntimeError("synthetic database outage")
+
+    cfg = replace(
+        WebConfig.from_env(),
+        environment="test",
+        trusted_hosts=("testserver",),
+        build_sha="a" * 40,
+    ).validate_for_startup()
+    app = create_app(
+        cfg,
+        session_factory=BrokenSessionFactory(),
+    )
+    client = TestClient(app)
+    live = client.get("/api/live")
+    assert live.status_code == 200
+    assert live.json()["status"] == "live"
+    ready = client.get("/api/ready")
+    assert ready.status_code == 503
+    assert ready.json()["reason_code"] == "DATABASE_UNAVAILABLE"
+    assert "postgresql" not in repr(ready.json()).lower()
+
+
+def test_worker_drain_stops_new_claims_without_execution():
+    runtime = ProductionWorkerRuntime(
+        session_factory=None,
+        config=SimpleNamespace(),
+        worker_id="worker-drain",
+        instance_id="instance-drain",
+        draining=True,
+    )
+    calls = []
+    runtime.heartbeat = lambda **kwargs: calls.append(kwargs)
+    runtime._claim = lambda: (_ for _ in ()).throw(AssertionError("draining worker must not claim"))
+    runtime._execute = lambda _claim: (_ for _ in ()).throw(AssertionError("draining worker must not execute"))
+    assert runtime.run_once() is False
+    assert calls == [{"state": "DRAINING"}]
+
+
+def test_m11_rate_window_survives_agent_restart(tmp_path: Path):
+    db_path = tmp_path / "replay.sqlite"
+    capability = DISPENSER_CAPABILITIES[DispenserCapabilityName.CREATE_EXPORT]
+    with WindowsAgentReplayStore(db_path) as first_store:
+        limiter = DurableDispenserRateLimiter(first_store, wall_clock=lambda: 1000.0)
+        for _ in range(capability.requests_per_minute):
+            assert limiter.consume(capability, scope_key="participant-a", now_monotonic=0.0).allowed
+    with WindowsAgentReplayStore(db_path) as second_store:
+        restarted = DurableDispenserRateLimiter(second_store, wall_clock=lambda: 1000.0)
+        decision = restarted.consume(capability, scope_key="participant-a", now_monotonic=0.0)
+        assert decision.allowed is False
+        assert decision.retry_after_seconds > 0
+
+
+def test_strict_production_config_rejects_legacy_agent_bootstrap_and_missing_runtime_paths():
+    base = WebConfig.from_env()
+    unsafe = replace(
+        base,
+        environment="production",
+        process_role="web",
+        app_url="https://mark.example.test",
+        trusted_proxy_cidrs=("127.0.0.1/32",),
+        agent_legacy_bootstrap_enabled=True,
+        agent_machine_token="X" * 40,
+        report_artifact_root="/var/lib/wbcz/artifacts",
+        report_temp_root="/var/lib/wbcz/tmp",
+        secret_provider_root="/var/lib/wbcz/secret-store",
+        secret_provider_master_key_path="/run/keys/secret.key",
+        artifact_keyring_root="/run/keys/artifacts",
+        audit_key_path="/run/keys/audit.key",
+        backup_status_path="/run/status/backup.json",
+    )
+    with pytest.raises(ValueError, match="LEGACY_BOOTSTRAP"):
+        unsafe.validate_m15_production_runtime()
+
+    missing = replace(unsafe, agent_legacy_bootstrap_enabled=False, agent_machine_token="", secret_provider_root=None)
+    with pytest.raises(ValueError, match="SECRET_PROVIDER_ROOT"):
+        missing.validate_m15_production_runtime()
+
+
+def test_windows_agent_config_does_not_accept_missing_participant_credential(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("WBCZ_AGENT_BACKEND_URL", "https://agent.example.test")
+    monkeypatch.setenv("WBCZ_PARTICIPANT_INN", "7800000000")
+    monkeypatch.setenv("WBCZ_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("WBCZ_AGENT_MACHINE_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="enrollment is required"):
+        WindowsAgentConfig.from_env()
