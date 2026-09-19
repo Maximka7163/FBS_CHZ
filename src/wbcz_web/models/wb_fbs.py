@@ -27,7 +27,7 @@ class WbConnectionRecord(Base):
     token_categories: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     token_scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_secret_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     pending_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
