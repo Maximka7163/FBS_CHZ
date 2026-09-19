@@ -90,6 +90,7 @@ def _service(request: Request, db: Session) -> IntegrationSettingsService:
         request.app.state.config,
         secret_provider=request.app.state.integration_secret_provider,
         wb_http_adapter=getattr(request.app.state, "wb_http_adapter", None),
+        wb_rate_limiter=request.app.state.wb_rate_limiter,
     )
 
 
