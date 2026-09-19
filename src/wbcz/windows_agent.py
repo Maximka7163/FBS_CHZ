@@ -1426,10 +1426,7 @@ class WindowsAgentExecutor:
             }
             cert_inn = certificate.get("certificate_inn")
             if cert_inn is None:
-                components["CERTIFICATE_PARTICIPANT_MATCH"] = {
-                    "status": "UNKNOWN",
-                    "reason_code": "CERTIFICATE_PARTICIPANT_INN_UNAVAILABLE",
-                }
+                components["CERTIFICATE_PARTICIPANT_MATCH"] = {"status": "UNKNOWN"}
             elif str(cert_inn) == self.participant_inn:
                 components["CERTIFICATE_PARTICIPANT_MATCH"] = {"status": "READY"}
             else:
@@ -1467,7 +1464,7 @@ class WindowsAgentExecutor:
                 self.session_manager.bearer_token()
                 components["TRUE_API_AUTH"] = {"status": "READY"}
                 outcome = "HEALTH_READY" if components["CERTIFICATE_PARTICIPANT_MATCH"]["status"] == "READY" else "HEALTH_DEGRADED"
-                error_code = None if outcome == "HEALTH_READY" else "CERTIFICATE_PARTICIPANT_INN_UNAVAILABLE"
+                error_code = None
             except TrueApiHttpError as exc:
                 getattr(self.session_manager, "observe_http_status", lambda _status: None)(exc.status)
                 components["TRUE_API_AUTH"] = {"status": "ERROR", "reason_code": "AUTH_FAILED"}
