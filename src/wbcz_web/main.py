@@ -13,6 +13,7 @@ def create_app(
     session_factory=None,
     integration_secret_provider=None,
     wb_http_adapter=None,
+    wb_rate_limiter=None,
 ) -> FastAPI:
     # Import routers only after create_app is called, avoiding partially initialized
     # router modules during auth/repository dependency cycles.
@@ -23,6 +24,7 @@ def create_app(
     from .api.audit_routes import audit_router
     from .api.integration_routes import integrations_router
     from .services.integration_secrets import ReadOnlySecretProvider
+    from wbcz.wb_fbs import StatefulWbRateLimiter
     config = (config or WebConfig.from_env()).validate_for_startup()
     production = config.environment == "production"
     child_routes = [
@@ -46,6 +48,7 @@ def create_app(
     app.state.session_factory = session_factory or build_session_factory(config)
     app.state.integration_secret_provider = integration_secret_provider or ReadOnlySecretProvider()
     app.state.wb_http_adapter = wb_http_adapter
+    app.state.wb_rate_limiter = wb_rate_limiter or StatefulWbRateLimiter()
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.trusted_hosts))
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     required = {
