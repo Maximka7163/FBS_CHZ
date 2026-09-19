@@ -190,6 +190,15 @@ class AuthService:
                 # exceeds today's new-password policy.
                 pass
 
+        active_sessions = self.sessions.active_for_user(user.id)
+        overflow = max(0, len(active_sessions) - self.config.max_active_sessions_per_user + 1)
+        for stale_session in active_sessions[:overflow]:
+            self.sessions.revoke(stale_session)
+            self.audit.append(
+                "SESSION_REVOKED", user_id=user.id, entity_type="session", entity_id=stale_session.id,
+                metadata={"reason":"active_session_limit"},
+            )
+
         token = new_session_token()
         row = SessionRecord(
             user_id=user.id,
