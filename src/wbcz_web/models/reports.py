@@ -19,7 +19,9 @@ class ReportJobRecord(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     organisation_id: Mapped[str | None] = mapped_column(ForeignKey("organisations.id", ondelete="RESTRICT"), nullable=True, index=True)
-    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)\n    correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)\n    causation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    causation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     origin: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     participant_inn: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
     report_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
