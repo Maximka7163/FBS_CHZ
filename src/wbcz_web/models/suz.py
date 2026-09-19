@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -16,6 +16,9 @@ class SuzConnectionRecord(Base):
     participant_id: Mapped[str | None] = mapped_column(ForeignKey("participants.id", ondelete="RESTRICT"), nullable=True, index=True)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     participant_inn: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
     oms_id: Mapped[str] = mapped_column(Text, nullable=False)
     oms_connection: Mapped[str] = mapped_column(Text, nullable=False, index=True)
@@ -26,6 +29,12 @@ class SuzConnectionRecord(Base):
     last_auth_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     token_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     connection_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    local_config_state: Mapped[str] = mapped_column(String(32), nullable=False, default="CONFIGURED")
+    wire_readiness: Mapped[str] = mapped_column(String(32), nullable=False, default="BLOCKED")
+    blocker_code: Mapped[str] = mapped_column(String(96), nullable=False, default="OFFICIAL_SUZ_PROGRAMMER_MANUAL_NOT_PINNED")
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    health_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
