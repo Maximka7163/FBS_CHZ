@@ -152,7 +152,7 @@ class IntegrationSettingsService:
                 causation_id=trace.get("causation_id"),
                 operation_id=str(subject_id),
                 event_key=(
-                    f"m14:{event_type}:{subject_id}:{event_key_suffix or trace.get('request_id') or 'event'}"
+                    f"m14:{event_type}:{subject_type.value}:{subject_id}:{event_key_suffix or trace.get('request_id') or 'event'}"
                 )[:256],
             ),
             metadata=dict(metadata),
