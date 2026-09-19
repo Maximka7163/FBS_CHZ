@@ -118,6 +118,49 @@ class SqlAlchemyWriteOperationStore:
             )
         )
 
+    def _immutable_write(
+        self,
+        row: WriteOperationRecord,
+        event_type: str,
+        *,
+        actor_kind: ActorKind,
+        machine_principal: str | None = None,
+        outcome: AuditOutcome,
+        metadata: Mapping[str, Any],
+        evidence_hashes: tuple[str, ...] = (),
+        event_key_suffix: str,
+    ) -> None:
+        scope=optional_tenant(self.db)
+        if scope is None:
+            return
+        actor=(
+            ActorContext(ActorKind.USER,user_id=scope.user_id)
+            if actor_kind is ActorKind.USER and scope.user_id is not None
+            else ActorContext(actor_kind,machine_principal=machine_principal)
+        )
+        trace_data=self.db.info.get("audit_trace")
+        correlation_id=trace_data.get("correlation_id") if isinstance(trace_data,dict) else None
+        causation_id=trace_data.get("request_id") if isinstance(trace_data,dict) else None
+        AuditService(
+            self.db,
+            pseudonym_key=self.db.info.get("audit_pseudonym_key"),
+            pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
+        ).append(
+            event_type=event_type,
+            actor=actor,
+            tenant=AuditTenantScope(scope.organisation_id,scope.participant_id),
+            subject=SubjectRef(SubjectType.WRITE_OPERATION,row.operation_id),
+            outcome=outcome,
+            authorization_decision=AuthorizationDecision.ALLOW if actor.kind is ActorKind.USER else AuthorizationDecision.NOT_APPLICABLE,
+            trace=TraceContext(
+                correlation_id=correlation_id,causation_id=causation_id,
+                operation_id=row.operation_id,
+                event_key=f"write:{row.operation_id}:{event_key_suffix}"[:256],
+            ),
+            metadata=dict(metadata),
+            evidence_hashes=evidence_hashes,
+        )
+
     def get(self, operation_id: str) -> OperationRecord:
         return self._record(self._row(operation_id))
 
@@ -226,6 +269,21 @@ class SqlAlchemyWriteOperationStore:
         )
         self.db.add(row)
         self.db.flush()
+        self._immutable_write(
+            row,
+            "TURNOVER_INTENT_CREATED",
+            actor_kind=ActorKind.USER if scope is not None and scope.user_id is not None else ActorKind.WORKER,
+            machine_principal=None if scope is not None and scope.user_id is not None else "write-worker",
+            outcome=AuditOutcome.PENDING,
+            metadata={
+                "operation_kind":operation_reason,
+                "document_type":document_type,
+                "document_sha256":document.sha256,
+                "idempotency_fingerprint":fingerprint,
+            },
+            evidence_hashes=(document.sha256,),
+            event_key_suffix="intent",
+        )
         self._audit(operation_id, "OPERATION_PREPARED", to_state=WriteState.PREPARED, details={"document_type": document_type, "pg": pg, "document_sha256": document.sha256})
         self._audit(operation_id, "SIGNING_REQUEST_PENDING", from_state=WriteState.PREPARED, to_state=WriteState.AWAITING_SIGNATURE)
         self.db.flush()
@@ -303,6 +361,31 @@ class SqlAlchemyWriteOperationStore:
         row.submit_body_sha256 = result.body_sha256
         row.updated_at = _now()
         self._audit(operation_id, "SUBMIT_RESULT", from_state=current, to_state=target, details={"http_status": result.http_status, "category": result.category.value, "body_sha256": result.body_sha256, "content_type": result.content_type, "document_id_present": result.document_id is not None})
+        remote_outcome=(
+            AuditOutcome.SUCCESS if target is WriteState.SUBMITTED
+            else AuditOutcome.AMBIGUOUS if target is WriteState.MANUAL_REVIEW
+            else AuditOutcome.FAILED
+        )
+        self._immutable_write(
+            row,
+            "TURNOVER_REMOTE_RESULT",
+            actor_kind=ActorKind.WINDOWS_AGENT,
+            machine_principal="windows-agent",
+            outcome=remote_outcome,
+            metadata={
+                "operation_kind":row.operation_reason,
+                "document_type":row.document_type,
+                "document_sha256":row.document_sha256,
+                "remote_document_id":row.document_id,
+                "http_status":row.submit_http_status,
+                "remote_status":row.submit_category,
+                "body_sha256":row.submit_body_sha256,
+                "ambiguity":target is WriteState.MANUAL_REVIEW,
+                "document_id_present":row.document_id is not None,
+            },
+            evidence_hashes=tuple(x for x in (row.document_sha256,row.submit_body_sha256) if x),
+            event_key_suffix=f"remote-result:{row.submit_body_sha256 or row.submit_category or 'none'}",
+        )
         self.db.flush()
         return self._record(row)
 
@@ -355,13 +438,35 @@ class SqlAlchemyWriteOperationStore:
         return op, classification
 
     def reconciliation_result(self, operation_id: str, *, confirmed: bool, details: Mapping[str, Any] | None = None) -> OperationRecord:
-        return self._transition(
+        result=self._transition(
             operation_id,
             expected={WriteState.RECONCILIATION_REQUIRED},
             target=WriteState.SUCCEEDED if confirmed else WriteState.MANUAL_REVIEW,
             action="RECONCILIATION_RESULT",
             details={"confirmed": confirmed, **dict(details or {})},
         )
+        row=self._row(operation_id)
+        evidence_payload={"confirmed":confirmed,"details":dict(details or {})}
+        evidence_hash=hashlib.sha256(canonical_json(evidence_payload).encode("utf-8")).hexdigest()
+        self._immutable_write(
+            row,
+            "TURNOVER_RECONCILED",
+            actor_kind=ActorKind.WORKER,
+            machine_principal="reconciliation-worker",
+            outcome=AuditOutcome.SUCCESS if confirmed else AuditOutcome.CONFLICT,
+            metadata={
+                "operation_kind":row.operation_reason,
+                "document_type":row.document_type,
+                "document_sha256":row.document_sha256,
+                "reconciliation_state":"RECONCILED" if confirmed else "MANUAL_REVIEW",
+                "postcondition_evidence_sha256":evidence_hash,
+                "manual_review_reason":None if confirmed else "postcondition_not_confirmed",
+            },
+            evidence_hashes=(row.document_sha256,evidence_hash),
+            event_key_suffix=f"reconciled:{evidence_hash}",
+        )
+        self.db.flush()
+        return result
 
     def audit_entries(self, operation_id: str) -> list[dict[str, Any]]:
         rows = list(self.db.scalars(select(WriteAuditRecord).where(WriteAuditRecord.operation_id == operation_id).order_by(WriteAuditRecord.id)))
