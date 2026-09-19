@@ -92,6 +92,36 @@ class WebConfig:
     login_account_lock_failures: int = 100
     audit_pseudonym_key: str | None = None
     audit_pseudonym_key_id: str = "audit-v1"
+    m15_strict_production: bool = False
+    process_role: str = "web"
+    app_url: str | None = None
+    migration_database_url: str | None = None
+    trusted_proxy_cidrs: tuple[str, ...] = ()
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    db_pool_timeout_seconds: int = 30
+    db_pool_recycle_seconds: int = 1800
+    db_statement_timeout_ms: int = 30000
+    db_lock_timeout_ms: int = 5000
+    db_idle_transaction_timeout_ms: int = 60000
+    db_application_name: str = "wbcz-web"
+    worker_concurrency: int = 1
+    worker_heartbeat_seconds: int = 15
+    worker_stale_seconds: int = 90
+    worker_lease_seconds: int = 120
+    scheduler_interval_seconds: int = 30
+    scheduler_max_age_seconds: int = 86400
+    secret_provider_root: str | None = None
+    secret_provider_master_key_path: str | None = None
+    artifact_keyring_root: str | None = None
+    audit_key_path: str | None = None
+    backup_status_path: str | None = None
+    normal_json_body_limit_bytes: int = 1024 * 1024
+    max_active_sessions_per_user: int = 10
+    agent_enrollment_ttl_seconds: int = 600
+    agent_protocol_current: str = "m15-v1"
+    agent_protocol_minimum: str = "m14-v1"
+    agent_minimum_version: str = "0.5.1"
 
     def organisation_document_config(self) -> P0OrganisationConfig | None:
         if self.organisation_type is None:
@@ -217,6 +247,68 @@ class WebConfig:
             password = str(url.password).strip().lower()
             if not password or password in {"password", "postgres", "wbcz", "changeme", "change_me"} or "replace_with" in password:
                 raise ValueError("Production database password is missing or unsafe placeholder")
+        if self.environment == "production" and self.m15_strict_production:
+            self.validate_m15_production_runtime()
+        return self
+
+    def validate_m15_production_runtime(self) -> "WebConfig":
+        if self.environment != "production":
+            return self
+        if self.process_role not in {"web", "worker"}:
+            raise ValueError("WBCZ_PROCESS_ROLE must be web or worker")
+        if not self.app_url or not self.app_url.startswith("https://"):
+            raise ValueError("WBCZ_APP_URL must be an https URL in strict production")
+        if not self.migration_database_url:
+            raise ValueError("WBCZ_MIGRATION_DATABASE_URL is required in strict production")
+        if self.migration_database_url == self.database_url:
+            raise ValueError("runtime and migrator database credentials must be separated")
+        if not self.trusted_proxy_cidrs:
+            raise ValueError("WBCZ_TRUSTED_PROXY_CIDRS is required in strict production")
+        if self.agent_legacy_bootstrap_enabled:
+            raise ValueError("WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED must be false after M15 cutover")
+        if self.agent_machine_token:
+            raise ValueError("WBCZ_AGENT_MACHINE_TOKEN global bootstrap is forbidden after M15 cutover")
+        required_paths = {
+            "WBCZ_REPORT_ARTIFACT_ROOT": self.report_artifact_root,
+            "WBCZ_REPORT_TEMP_ROOT": self.report_temp_root,
+            "WBCZ_SECRET_PROVIDER_ROOT": self.secret_provider_root,
+            "WBCZ_SECRET_PROVIDER_MASTER_KEY_PATH": self.secret_provider_master_key_path,
+            "WBCZ_ARTIFACT_KEYRING_ROOT": self.artifact_keyring_root,
+            "WBCZ_AUDIT_KEY_PATH": self.audit_key_path,
+            "WBCZ_BACKUP_STATUS_PATH": self.backup_status_path,
+        }
+        missing = [name for name, value in required_paths.items() if not value]
+        if missing:
+            raise ValueError("strict production paths missing: " + ",".join(sorted(missing)))
+        ints = {
+            "WBCZ_DB_POOL_SIZE": self.db_pool_size,
+            "WBCZ_DB_MAX_OVERFLOW": self.db_max_overflow,
+            "WBCZ_DB_POOL_TIMEOUT_SECONDS": self.db_pool_timeout_seconds,
+            "WBCZ_DB_POOL_RECYCLE_SECONDS": self.db_pool_recycle_seconds,
+            "WBCZ_DB_STATEMENT_TIMEOUT_MS": self.db_statement_timeout_ms,
+            "WBCZ_DB_LOCK_TIMEOUT_MS": self.db_lock_timeout_ms,
+            "WBCZ_DB_IDLE_TRANSACTION_TIMEOUT_MS": self.db_idle_transaction_timeout_ms,
+            "WBCZ_WORKER_CONCURRENCY": self.worker_concurrency,
+            "WBCZ_WORKER_HEARTBEAT_SECONDS": self.worker_heartbeat_seconds,
+            "WBCZ_WORKER_STALE_SECONDS": self.worker_stale_seconds,
+            "WBCZ_WORKER_LEASE_SECONDS": self.worker_lease_seconds,
+            "WBCZ_SCHEDULER_INTERVAL_SECONDS": self.scheduler_interval_seconds,
+            "WBCZ_AGENT_ENROLLMENT_TTL_SECONDS": self.agent_enrollment_ttl_seconds,
+            "WBCZ_NORMAL_JSON_BODY_LIMIT_BYTES": self.normal_json_body_limit_bytes,
+            "WBCZ_MAX_ACTIVE_SESSIONS_PER_USER": self.max_active_sessions_per_user,
+        }
+        if any(type(value) is not int or value <= 0 for value in ints.values()):
+            raise ValueError("M15 production numeric settings must be positive integers")
+        if self.worker_stale_seconds <= self.worker_heartbeat_seconds:
+            raise ValueError("worker stale threshold must exceed heartbeat interval")
+        if self.worker_lease_seconds <= self.worker_heartbeat_seconds:
+            raise ValueError("worker lease must exceed heartbeat interval")
+        if self.db_max_overflow < 0:
+            raise ValueError("WBCZ_DB_MAX_OVERFLOW must be non-negative")
+        if not re.fullmatch(r"m\d+-v\d+", self.agent_protocol_current):
+            raise ValueError("WBCZ_AGENT_PROTOCOL_CURRENT is invalid")
+        if not re.fullmatch(r"m\d+-v\d+", self.agent_protocol_minimum):
+            raise ValueError("WBCZ_AGENT_PROTOCOL_MINIMUM is invalid")
         return self
 
     @classmethod
@@ -260,6 +352,36 @@ class WebConfig:
             login_account_lock_failures=int(os.getenv("WBCZ_LOGIN_ACCOUNT_LOCK_FAILURES", "100")),
             audit_pseudonym_key=os.getenv("WBCZ_AUDIT_PSEUDONYM_KEY", "").strip() or None,
             audit_pseudonym_key_id=os.getenv("WBCZ_AUDIT_PSEUDONYM_KEY_ID", "audit-v1").strip() or "audit-v1",
+            m15_strict_production=_env_bool("WBCZ_M15_STRICT_PRODUCTION", False),
+            process_role=os.getenv("WBCZ_PROCESS_ROLE", "web").strip().lower() or "web",
+            app_url=os.getenv("WBCZ_APP_URL", "").strip() or None,
+            migration_database_url=os.getenv("WBCZ_MIGRATION_DATABASE_URL", "").strip() or None,
+            trusted_proxy_cidrs=_csv_hosts(os.getenv("WBCZ_TRUSTED_PROXY_CIDRS", "")),
+            db_pool_size=int(os.getenv("WBCZ_DB_POOL_SIZE", "5")),
+            db_max_overflow=int(os.getenv("WBCZ_DB_MAX_OVERFLOW", "5")),
+            db_pool_timeout_seconds=int(os.getenv("WBCZ_DB_POOL_TIMEOUT_SECONDS", "30")),
+            db_pool_recycle_seconds=int(os.getenv("WBCZ_DB_POOL_RECYCLE_SECONDS", "1800")),
+            db_statement_timeout_ms=int(os.getenv("WBCZ_DB_STATEMENT_TIMEOUT_MS", "30000")),
+            db_lock_timeout_ms=int(os.getenv("WBCZ_DB_LOCK_TIMEOUT_MS", "5000")),
+            db_idle_transaction_timeout_ms=int(os.getenv("WBCZ_DB_IDLE_TRANSACTION_TIMEOUT_MS", "60000")),
+            db_application_name=os.getenv("WBCZ_DB_APPLICATION_NAME", "wbcz-web").strip() or "wbcz-web",
+            worker_concurrency=int(os.getenv("WBCZ_WORKER_CONCURRENCY", "1")),
+            worker_heartbeat_seconds=int(os.getenv("WBCZ_WORKER_HEARTBEAT_SECONDS", "15")),
+            worker_stale_seconds=int(os.getenv("WBCZ_WORKER_STALE_SECONDS", "90")),
+            worker_lease_seconds=int(os.getenv("WBCZ_WORKER_LEASE_SECONDS", "120")),
+            scheduler_interval_seconds=int(os.getenv("WBCZ_SCHEDULER_INTERVAL_SECONDS", "30")),
+            scheduler_max_age_seconds=int(os.getenv("WBCZ_SCHEDULER_MAX_AGE_SECONDS", "86400")),
+            secret_provider_root=os.getenv("WBCZ_SECRET_PROVIDER_ROOT", "").strip() or None,
+            secret_provider_master_key_path=os.getenv("WBCZ_SECRET_PROVIDER_MASTER_KEY_PATH", "").strip() or None,
+            artifact_keyring_root=os.getenv("WBCZ_ARTIFACT_KEYRING_ROOT", "").strip() or None,
+            audit_key_path=os.getenv("WBCZ_AUDIT_KEY_PATH", "").strip() or None,
+            backup_status_path=os.getenv("WBCZ_BACKUP_STATUS_PATH", "").strip() or None,
+            normal_json_body_limit_bytes=int(os.getenv("WBCZ_NORMAL_JSON_BODY_LIMIT_BYTES", str(1024 * 1024))),
+            max_active_sessions_per_user=int(os.getenv("WBCZ_MAX_ACTIVE_SESSIONS_PER_USER", "10")),
+            agent_enrollment_ttl_seconds=int(os.getenv("WBCZ_AGENT_ENROLLMENT_TTL_SECONDS", "600")),
+            agent_protocol_current=os.getenv("WBCZ_AGENT_PROTOCOL_CURRENT", "m15-v1").strip() or "m15-v1",
+            agent_protocol_minimum=os.getenv("WBCZ_AGENT_PROTOCOL_MINIMUM", "m14-v1").strip() or "m14-v1",
+            agent_minimum_version=os.getenv("WBCZ_AGENT_MINIMUM_VERSION", "0.5.1").strip() or "0.5.1",
             cookie_secure=secure,
             session_cookie_name=os.getenv("WBCZ_SESSION_COOKIE_NAME", "wbcz_session").strip(),
             csrf_cookie_name=os.getenv("WBCZ_CSRF_COOKIE_NAME", "wbcz_csrf").strip(),
