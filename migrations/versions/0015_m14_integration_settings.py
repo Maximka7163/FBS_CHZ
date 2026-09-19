@@ -235,6 +235,8 @@ def upgrade() -> None:
 
     _connection_columns("wb_connections", secret=True)
     _connection_columns("ozon_connections", secret=True)
+    op.alter_column("wb_connections", "secret_ref", existing_type=sa.Text(), nullable=True)
+    op.alter_column("ozon_connections", "api_key_secret_ref", existing_type=sa.Text(), nullable=True)
     _connection_columns("suz_connections", secret=False)
 
     op.add_column("ozon_connections", sa.Column("environment", sa.String(24), nullable=False, server_default="PRODUCTION"))
@@ -261,6 +263,9 @@ def downgrade() -> None:
     op.drop_column("ozon_connections", "wire_readiness")
     op.drop_column("ozon_connections", "local_validation_state")
     op.drop_column("ozon_connections", "environment")
+
+    op.alter_column("ozon_connections", "api_key_secret_ref", existing_type=sa.Text(), nullable=False)
+    op.alter_column("wb_connections", "secret_ref", existing_type=sa.Text(), nullable=False)
 
     for table, secret in (("suz_connections", False), ("ozon_connections", True), ("wb_connections", True)):
         for name in ("health_metadata_json","last_error_code","last_check_at"):
