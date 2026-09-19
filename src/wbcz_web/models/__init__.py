@@ -10,6 +10,10 @@ from .integration_settings import (
     AgentBindingRecord, AgentCertificateObservationRecord, TrueApiConnectionRecord,
     IntegrationHealthCheckRecord,
 )
+from .production import (
+    ManualReviewCaseRecord, WorkerHeartbeatRecord, RemoteRateLimitStateRecord,
+    AgentEnrollmentTokenRecord,
+)
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -26,7 +30,8 @@ __all__ = [
     "ReportJobRecord", "ReportSnapshotRecord", "ReportArtifactRecord", "ReportJobEventRecord",
     "ReportArtifactUploadRecord", "AuditChainHeadRecord", "AuditEventRecord", "AuditCheckpointRecord",
     "AgentBindingRecord", "AgentCertificateObservationRecord", "TrueApiConnectionRecord",
-    "IntegrationHealthCheckRecord",
+    "IntegrationHealthCheckRecord", "ManualReviewCaseRecord", "WorkerHeartbeatRecord",
+    "RemoteRateLimitStateRecord", "AgentEnrollmentTokenRecord",
     "OrganisationRecord", "ParticipantRecord", "MembershipRecord", "PermissionRecord",
     "RolePermissionRecord", "InvitationRecord", "ParticipantClaimRecord", "PasswordHistoryRecord", "LoginAttemptRecord", "LoginThrottleStateRecord", "BootstrapRecord",
 ]
