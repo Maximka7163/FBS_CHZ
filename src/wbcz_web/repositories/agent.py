@@ -27,7 +27,7 @@ from wbcz.write_pipeline import (
     WriteState,
     classify_poll_status,
 )
-from wbcz_web.models import AgentJobRecord, BootstrapRecord, WriteAuditRecord, WriteOperationRecord
+from wbcz_web.models import AgentBindingRecord, AgentJobRecord, BootstrapRecord, WriteAuditRecord, WriteOperationRecord
 from wbcz_web.services.tenant import active_tenant, optional_tenant
 from wbcz_web.services.audit_history import (
     ActorContext,ActorKind,AuditOutcome,AuditService,AuditTenantScope,
@@ -370,7 +370,7 @@ class SqlAlchemyWriteOperationStore:
             row,
             "TURNOVER_REMOTE_RESULT",
             actor_kind=ActorKind.WINDOWS_AGENT,
-            machine_principal="windows-agent",
+            machine_principal=self._machine_principal(),
             outcome=remote_outcome,
             metadata={
                 "operation_kind":row.operation_reason,
@@ -487,6 +487,7 @@ class SqlAlchemyWriteOperationStore:
 @dataclass(frozen=True, slots=True)
 class AgentJobMetadata:
     job: AgentJob
+    agent_binding_id: str | None
     purpose: str
     event_id: str | None
     control_run_id: str | None
@@ -498,11 +499,42 @@ class AgentJobMetadata:
 class SqlAlchemyAgentJobStore:
     """PostgreSQL durable outbox with lease expiry and result replay protection."""
 
-    def __init__(self, db: Session, *, lease_seconds: int = 90) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        lease_seconds: int = 90,
+        agent_binding_id: str | None = None,
+        organisation_id: str | None = None,
+        participant_id: str | None = None,
+        legacy_unbound: bool = False,
+    ) -> None:
         if lease_seconds < 15:
             raise ValueError("agent job lease must be at least 15 seconds")
+        if agent_binding_id and (not organisation_id or not participant_id):
+            raise ValueError("bound agent store requires exact tenant scope")
+        if agent_binding_id and legacy_unbound:
+            raise ValueError("bound and legacy agent modes are mutually exclusive")
         self.db = db
         self.lease_seconds = lease_seconds
+        self.agent_binding_id = agent_binding_id
+        self.organisation_id = organisation_id
+        self.participant_id = participant_id
+        self.legacy_unbound = bool(legacy_unbound)
+
+    def _machine_principal(self) -> str:
+        return f"agent-binding:{self.agent_binding_id}" if self.agent_binding_id else "legacy-windows-agent"
+
+    def _lease_scope(self, stmt):
+        if self.agent_binding_id:
+            return stmt.where(
+                AgentJobRecord.agent_binding_id == self.agent_binding_id,
+                AgentJobRecord.organisation_id == self.organisation_id,
+                AgentJobRecord.participant_id == self.participant_id,
+            )
+        if self.legacy_unbound:
+            return stmt.where(AgentJobRecord.agent_binding_id.is_(None))
+        raise PermissionError("agent leasing requires an authenticated binding or explicit legacy mode")
 
     @staticmethod
     def _payload(job: AgentJob) -> dict[str, Any]:
@@ -532,6 +564,7 @@ class SqlAlchemyAgentJobStore:
             raise KeyError(job_id)
         return AgentJobMetadata(
             job=self._job(row),
+            agent_binding_id=row.agent_binding_id,
             purpose=row.purpose,
             event_id=row.event_id,
             control_run_id=row.control_run_id,
@@ -560,6 +593,24 @@ class SqlAlchemyAgentJobStore:
         scope = optional_tenant(self.db)
         if scope is None and self.db.get(BootstrapRecord, 1) is not None:
             raise PermissionError("post-bootstrap agent jobs require tenant scope")
+        binding_id: str | None = None
+        if scope is not None:
+            primary = self.db.scalar(select(AgentBindingRecord).where(
+                AgentBindingRecord.organisation_id == scope.organisation_id,
+                AgentBindingRecord.participant_id == scope.participant_id,
+                AgentBindingRecord.state == "ACTIVE",
+                AgentBindingRecord.is_primary.is_(True),
+            ))
+            if primary is not None:
+                binding_id = primary.id
+            else:
+                has_binding = self.db.scalar(select(AgentBindingRecord.id).where(
+                    AgentBindingRecord.organisation_id == scope.organisation_id,
+                    AgentBindingRecord.participant_id == scope.participant_id,
+                ).limit(1))
+                if has_binding is not None:
+                    raise PermissionError("participant has no active primary agent binding")
+
         existing_stmt = select(AgentJobRecord).where(AgentJobRecord.job_id == job.job_id)
         if scope is not None:
             existing_stmt = existing_stmt.where(
@@ -595,6 +646,7 @@ class SqlAlchemyAgentJobStore:
             participant_id=scope.participant_id if scope else None,
             correlation_id=correlation_id,
             causation_id=causation_id,
+            agent_binding_id=binding_id,
             job_type=job.job_type.value,
             operation_id=job.operation_id,
             purpose=purpose,
@@ -641,7 +693,7 @@ class SqlAlchemyAgentJobStore:
 
     def fetch_one(self) -> AgentJob | None:
         now = _now()
-        row = self.db.scalar(
+        stmt = self._lease_scope(
             select(AgentJobRecord)
             .where(
                 AgentJobRecord.state != AgentJobState.COMPLETED.value,
@@ -659,6 +711,7 @@ class SqlAlchemyAgentJobStore:
             .with_for_update(skip_locked=True)
             .limit(1)
         )
+        row = self.db.scalar(stmt)
         if row is None:
             return None
         row.state = AgentJobState.LEASED.value
@@ -677,7 +730,7 @@ class SqlAlchemyAgentJobStore:
             )
             audit.append(
                 event_type="AGENT_JOB_CLAIMED",
-                actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal="windows-agent"),
+                actor=ActorContext(ActorKind.WINDOWS_AGENT,machine_principal=self._machine_principal()),
                 tenant=AuditTenantScope(row.organisation_id,row.participant_id),
                 subject=SubjectRef(SubjectType.AGENT_JOB,row.job_id),
                 outcome=AuditOutcome.PENDING,
@@ -695,11 +748,9 @@ class SqlAlchemyAgentJobStore:
         return self._job(row)
 
     def complete(self, result: AgentResult) -> None:
-        row = self.db.scalar(
-            select(AgentJobRecord)
-            .where(AgentJobRecord.job_id == result.job_id)
-            .with_for_update()
-        )
+        stmt = select(AgentJobRecord).where(AgentJobRecord.job_id == result.job_id)
+        stmt = self._lease_scope(stmt).with_for_update()
+        row = self.db.scalar(stmt)
         if row is None:
             raise KeyError("unknown agent job")
         if row.operation_id != result.operation_id:
@@ -728,7 +779,7 @@ class SqlAlchemyAgentJobStore:
                     event_type="AGENT_REPLAY_CONVERGED",
                     actor=ActorContext(
                         ActorKind.WINDOWS_AGENT,
-                        machine_principal="windows-agent",
+                        machine_principal=self._machine_principal(),
                     ),
                     tenant=tenant,
                     subject=SubjectRef(SubjectType.AGENT_JOB, row.job_id),
@@ -774,7 +825,7 @@ class SqlAlchemyAgentJobStore:
                 event_type=event_type,
                 actor=ActorContext(
                     ActorKind.WINDOWS_AGENT,
-                    machine_principal="windows-agent",
+                    machine_principal=self._machine_principal(),
                 ),
                 tenant=tenant,
                 subject=SubjectRef(SubjectType.AGENT_JOB, row.job_id),
@@ -814,7 +865,7 @@ class SqlAlchemyAgentJobStore:
                     event_type="AGENT_DOCUMENT_SUBMITTED",
                     actor=ActorContext(
                         ActorKind.WINDOWS_AGENT,
-                        machine_principal="windows-agent",
+                        machine_principal=self._machine_principal(),
                     ),
                     tenant=tenant,
                     subject=SubjectRef(SubjectType.AGENT_JOB, row.job_id),
