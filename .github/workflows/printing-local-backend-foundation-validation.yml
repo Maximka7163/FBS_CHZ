@@ -47,7 +47,7 @@ jobs:
         run: |
           python -m pip install -r requirements.production.lock
           python -m pip install --no-deps -e .
-          python -m pip install "pytest==9.1.1" "httpx==0.28.1" "pylibdmtx==0.1.10" "Pillow==11.3.0" "numpy==2.3.3"
+          python -m pip install "setuptools==84.0.0" "pytest==9.1.1" "httpx==0.28.1" "pylibdmtx==0.1.10" "Pillow==11.3.0" "numpy==2.3.3"
       - name: Dependency lock contract
         run: python scripts/m15_verify_dependency_lock.py
       - name: Compile printing and web modules
@@ -113,7 +113,7 @@ jobs:
         run: |
           python -m pip install -r requirements.production.lock
           python -m pip install --no-deps -e .
-          python -m pip install "pytest==9.1.1" "httpx==0.28.1" "pylibdmtx==0.1.10" "Pillow==11.3.0" "numpy==2.3.3"
+          python -m pip install "setuptools==84.0.0" "pytest==9.1.1" "httpx==0.28.1" "pylibdmtx==0.1.10" "Pillow==11.3.0" "numpy==2.3.3"
       - name: Exact migration head
         run: test "$(alembic heads | awk '{print $1}')" = "$PRINTING_MIGRATION"
       - name: Fresh database to 0017
