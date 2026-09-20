@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from PIL import Image
-from pylibdmtx.pylibdmtx import decode
+import numpy as np
+import zxingcpp
 
 from wbcz.printing import (
     PRINT_LAYOUT_SCHEMA_VERSION,
@@ -71,12 +71,22 @@ def test_gs1_datamatrix_round_trip_with_independent_libdmtx_decoder_preserves_ex
         quiet_zone_modules=1,
         dpi=300,
     )
-    # zxing-cpp is the encoder. libdmtx/pylibdmtx is an independent decoder.
-    decoded = decode(Image.fromarray(rendered.image), max_count=1)
-    assert len(decoded) == 1
-    assert decoded[0].data == SYNTHETIC_FULL_KM
-    assert b"\x1d91TEST\x1d92" in decoded[0].data
-    assert b"<GS>" not in decoded[0].data
+    # libdmtx is the encoder. zxing-cpp is an independent decoder.
+    image = np.frombuffer(rendered.image.pixels, dtype=np.uint8).reshape(
+        rendered.image.height, rendered.image.width, 3
+    )
+    decoded = zxingcpp.read_barcode(
+        image,
+        formats=zxingcpp.BarcodeFormat.DataMatrix,
+        is_pure=True,
+        text_mode=zxingcpp.TextMode.Plain,
+    )
+    assert decoded is not None
+    assert decoded.content_type == zxingcpp.ContentType.GS1
+    assert decoded.symbology_identifier == "]d2"
+    assert decoded.bytes == SYNTHETIC_FULL_KM
+    assert b"\x1d91TEST\x1d92" in decoded.bytes
+    assert b"<GS>" not in decoded.bytes
     assert rendered.payload_sha256
     assert rendered.quiet_zone_modules == 1
 
@@ -115,8 +125,12 @@ def test_renderer_rejects_visible_gs_marker_and_never_recomputes_91_92():
             module_size_mm=0.34,
         )
     rendered = render_gs1_datamatrix(SYNTHETIC_FULL_KM, module_size_mm=0.34)
-    decoded = decode(Image.fromarray(rendered.image), max_count=1)
-    assert decoded[0].data.endswith(b"91TEST\x1d92SYNTHETIC-SIGNATURE")
+    image = np.frombuffer(rendered.image.pixels, dtype=np.uint8).reshape(
+        rendered.image.height, rendered.image.width, 3
+    )
+    decoded = zxingcpp.read_barcode(image, formats=zxingcpp.BarcodeFormat.DataMatrix, is_pure=True)
+    assert decoded is not None
+    assert decoded.bytes.endswith(b"91TEST\x1d92SYNTHETIC-SIGNATURE")
 
 
 def test_print_agent_contract_contains_ids_hashes_only_and_fake_executor_never_prints():
