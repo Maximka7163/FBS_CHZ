@@ -93,6 +93,11 @@ def create_app(
         "/api/printing/printer-discoveries",
         "/api/agent/v2/printing/printer-discovery/jobs/next",
         "/api/agent/v2/printing/printer-discovery/jobs/{job_id}/result",
+        "/api/agent/v2/printing/physical-executions/next",
+        "/api/agent/v2/printing/physical-executions/{execution_id}/render-contract",
+        "/api/agent/v2/printing/physical-executions/{execution_id}/spool-submitting",
+        "/api/agent/v2/printing/physical-executions/{execution_id}/result",
+        "/api/printing/executions/{execution_id}",
     }
     missing = required - paths
     if missing:
