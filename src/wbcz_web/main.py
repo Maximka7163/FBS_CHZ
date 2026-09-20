@@ -26,6 +26,7 @@ def create_app(
     from .api.health_routes import health_router
     from .api.enrollment_routes import enrollment_router
     from .api.manual_review_routes import manual_review_router
+    from .api.printing_routes import printing_router
     from .services.integration_secrets import ReadOnlySecretProvider
     from .services.production_secrets import build_production_secret_provider
     from .middleware import RequestContextMiddleware
@@ -41,6 +42,7 @@ def create_app(
         *health_router.routes,
         *enrollment_router.routes,
         *manual_review_router.routes,
+        *printing_router.routes,
         *agent_router.routes,
     ]
     app = FastAPI(
@@ -80,6 +82,9 @@ def create_app(
         "/api/agent/status",
         "/api/certificate/status",
         "/api/agent/v1/jobs/next",
+        "/api/printing/templates",
+        "/api/printing/printability/resolve",
+        "/api/printing/jobs",
     }
     missing = required - paths
     if missing:
