@@ -447,6 +447,36 @@ class BoundedPrinterDiscovery:
         return sorted(result, key=lambda item: (item.display_name_sanitized.casefold(), item.agent_printer_id))
 
 
+class PrinterDiscoveryAgent:
+    """Executes only typed, read-only discovery operations."""
+
+    def __init__(self, discovery: BoundedPrinterDiscovery) -> None:
+        self.discovery = discovery
+
+    @staticmethod
+    def capabilities() -> dict[str, Any]:
+        return {
+            "print_protocol_version": PRINT_PROTOCOL_VERSION,
+            "capabilities": [DISCOVERY_CAPABILITY],
+            "physical_printing": PHYSICAL_EXECUTION_BLOCKED,
+        }
+
+    def execute(self, raw_job: Mapping[str, Any]) -> dict[str, Any]:
+        job = PrinterDiscoveryJob.from_mapping(raw_job)
+        observations = self.discovery.discover()
+        if job.operation == "CAPABILITIES":
+            observations = [
+                item for item in observations
+                if item.agent_printer_id == job.agent_printer_id
+            ]
+        return {
+            "contract_version": PRINT_PROTOCOL_VERSION,
+            "discovery_request_id": job.discovery_request_id,
+            "status": "COMPLETED",
+            "observations": [item.safe_dict() for item in observations],
+        }
+
+
 class WindowsPrinterBackend:
     """Read-only Win32 printer discovery. No StartDoc/WritePrinter/spool submission."""
 
