@@ -460,8 +460,11 @@ class _FakeWinspool:
         scale_supported=True,
         canonical_copies=None,
         canonical_scale=None,
+        nup_supported=False,
+        canonical_nup=None,
         canonical_copies_supported=True,
         canonical_scale_supported=True,
+        canonical_nup_supported=True,
     ):
         self.source_copies = source_copies
         self.source_scale = source_scale
@@ -469,8 +472,11 @@ class _FakeWinspool:
         self.scale_supported = scale_supported
         self.canonical_copies = canonical_copies
         self.canonical_scale = canonical_scale
+        self.nup_supported = nup_supported
+        self.canonical_nup = canonical_nup
         self.canonical_copies_supported = canonical_copies_supported
         self.canonical_scale_supported = canonical_scale_supported
+        self.canonical_nup_supported = canonical_nup_supported
         self.size = ctypes.sizeof(_DEVMODE_PRINTER_PREFIX) + 32
         self.closed = 0
 
@@ -501,6 +507,9 @@ class _FakeWinspool:
                 dm.dmFields |= WindowsGdiRasterSpooler.DM_COPIES
             if self.scale_supported:
                 dm.dmFields |= WindowsGdiRasterSpooler.DM_SCALE
+            if self.nup_supported:
+                dm.dmFields |= WindowsGdiRasterSpooler.DM_NUP
+                dm.dmNup = 1
             dm.dmCopies = self.source_copies
             dm.dmScale = self.source_scale
             self._write(output, dm)
@@ -518,6 +527,8 @@ class _FakeWinspool:
                 dm.dmFields &= ~WindowsGdiRasterSpooler.DM_COPIES
             if not self.canonical_scale_supported:
                 dm.dmFields &= ~WindowsGdiRasterSpooler.DM_SCALE
+            if not self.canonical_nup_supported:
+                dm.dmFields &= ~WindowsGdiRasterSpooler.DM_NUP
             if self.canonical_copies is not None:
                 dm.dmCopies = self.canonical_copies
             else:
@@ -526,6 +537,10 @@ class _FakeWinspool:
                 dm.dmScale = self.canonical_scale
             else:
                 dm.dmScale = incoming.dmScale
+            if self.canonical_nup is not None:
+                dm.dmNup = self.canonical_nup
+            else:
+                dm.dmNup = incoming.dmNup
             self._write(output, dm)
             return WindowsGdiRasterSpooler.IDOK
         return -1
@@ -646,6 +661,10 @@ def test_gdi_devmode_normalizes_driver_copies_and_scaling_before_create_dc():
         ),
         (
             _FakeWinspool(canonical_scale_supported=False),
+            "PRINTER_DEVMODE_SCALING_UNSAFE",
+        ),
+        (
+            _FakeWinspool(nup_supported=True, canonical_nup=1),
             "PRINTER_DEVMODE_SCALING_UNSAFE",
         ),
     ],
