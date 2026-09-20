@@ -202,6 +202,8 @@ _COMMON_METADATA = frozenset({
     "credential_version", "is_primary", "certificate_thumbprint", "certificate_state",
     "selection_state", "expiry_state", "match_state", "provider_capabilities",
     "rotation_state", "old_version", "new_version", "enabled", "blocker_code",
+    "key_fingerprint", "key_version", "old_key_version", "print_execution_id",
+    "delivery_reservation_id", "print_job_item_id", "context_sha256", "issue_count",
 })
 
 
@@ -321,6 +323,12 @@ _EVENT_DEFINITIONS = [
     _ev("REPRINT_REQUESTED", AuditCategory.PRINTING, "REPRINT_REQUESTED", [U], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["template_version_id","count","printer_profile_fingerprint","original_print_event_id","print_mode","payload_sha256"]),
     _ev("REPRINT_COMPLETED", AuditCategory.PRINTING, "REPRINT_COMPLETED", [A,W], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["template_version_id","count","printer_profile_fingerprint","original_print_event_id","print_mode","payload_sha256"]),
     _ev("REPRINT_FAILED", AuditCategory.PRINTING, "REPRINT_FAILED", [A,W,S], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["template_version_id","count","printer_profile_fingerprint","original_print_event_id","print_mode","payload_sha256","error_code"]),
+    _ev("PRINT_AGENT_KEY_REGISTERED", AuditCategory.PRINTING, "AGENT_KEY_REGISTERED", [A], [SubjectType.INTEGRATION_CONNECTION], TenantRequirement.PARTICIPANT, metadata=["binding_id","key_fingerprint","key_version","rotation_state"]),
+    _ev("PRINT_AGENT_KEY_ROTATED", AuditCategory.PRINTING, "AGENT_KEY_ROTATED", [A], [SubjectType.INTEGRATION_CONNECTION], TenantRequirement.PARTICIPANT, metadata=["binding_id","key_fingerprint","key_version","old_key_version","rotation_state"]),
+    _ev("PRINT_AGENT_KEY_REVOKED", AuditCategory.PRINTING, "AGENT_KEY_REVOKED", [A,U,S], [SubjectType.INTEGRATION_CONNECTION], TenantRequirement.PARTICIPANT, metadata=["binding_id","key_fingerprint","key_version","error_code"]),
+    _ev("PRINT_PAYLOAD_AUTHORIZED", AuditCategory.PRINTING, "PAYLOAD_AUTHORIZED", [U], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["print_execution_id","delivery_reservation_id","print_job_item_id","stored_km_item_id","binding_id","key_fingerprint","key_version","payload_sha256","layout_sha256","attempt_count"]),
+    _ev("PRINT_PAYLOAD_ISSUED", AuditCategory.PRINTING, "PAYLOAD_ISSUED", [A], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["print_execution_id","delivery_reservation_id","print_job_item_id","binding_id","key_fingerprint","key_version","payload_sha256","context_sha256","issue_count"]),
+    _ev("PRINT_PAYLOAD_DELIVERED", AuditCategory.PRINTING, "PAYLOAD_DELIVERED", [A], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["print_execution_id","delivery_reservation_id","print_job_item_id","binding_id","payload_sha256","context_sha256","issue_count"]),
 ]
 
 AUDIT_EVENT_REGISTRY: dict[str, RegisteredAuditEvent] = {item.event_type: item for item in _EVENT_DEFINITIONS}
