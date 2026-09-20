@@ -19,6 +19,7 @@ from wbcz_web.services.printing_sensitive_delivery import (
     SensitiveDeliveryRejected,
     SensitivePrintingDeliveryService,
 )
+from wbcz_web.services.printer_profiles import PrinterProfileRejected, PrinterProfileService
 
 from .dependencies import get_db
 
@@ -40,6 +41,34 @@ class PrintPayloadAckRequest(_ClosedModel):
     delivery_reservation_id: str = Field(min_length=1, max_length=64)
     payload_sha256: str = Field(pattern="^[0-9a-f]{64}$")
     context_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+
+
+class PrinterObservationPayload(_ClosedModel):
+    agent_printer_id: str = Field(min_length=1, max_length=160)
+    local_printer_fingerprint: str = Field(pattern="^[0-9a-f]{64}$")
+    display_name_sanitized: str = Field(min_length=1, max_length=160)
+    driver_name_sanitized: str | None = Field(default=None, max_length=160)
+    dpi_x: int = Field(ge=0, le=100000)
+    dpi_y: int = Field(ge=0, le=100000)
+    media_width_mm: float = Field(ge=0, le=5000)
+    media_height_mm: float = Field(ge=0, le=5000)
+    orientation: str = Field(pattern="^(PORTRAIT|LANDSCAPE)$")
+    physical_width_px: int = Field(ge=0, le=1000000)
+    physical_height_px: int = Field(ge=0, le=1000000)
+    printable_width_px: int = Field(ge=0, le=1000000)
+    printable_height_px: int = Field(ge=0, le=1000000)
+    offset_x_px: int = Field(ge=0, le=1000000)
+    offset_y_px: int = Field(ge=0, le=1000000)
+    capability_hash: str = Field(pattern="^[0-9a-f]{64}$")
+    observed_at: str = Field(min_length=20, max_length=64)
+    availability_state: str = Field(pattern="^(AVAILABLE|UNAVAILABLE|ERROR)$")
+    safe_error_code: str | None = Field(default=None, max_length=80)
+
+
+class PrinterDiscoveryResult(_ClosedModel):
+    status: str = Field(pattern="^(COMPLETED|FAILED)$")
+    observations: list[PrinterObservationPayload] = Field(default_factory=list, max_length=64)
+    safe_error_code: str | None = Field(default=None, max_length=80)
 
 
 def _machine_principal(request: Request, db: Session):
@@ -296,3 +325,57 @@ def acknowledge_print_payload(
     except SensitiveDeliveryRejected as exc:
         db.commit()
         return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.get("/printer-discovery/jobs/next")
+def next_printer_discovery_job(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PrinterProfileService(db, request.app.state.config).fetch_agent_job(
+            machine_binding_id=principal.binding_id or "",
+        )
+        if value is None:
+            return Response(status_code=204, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PrinterProfileRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.post("/printer-discovery/jobs/{job_id}/result")
+def complete_printer_discovery_job(
+    job_id: str,
+    payload: PrinterDiscoveryResult,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        service = PrinterProfileService(db, request.app.state.config)
+        if payload.status == "FAILED":
+            value = service.fail_agent_job(
+                job_id=job_id,
+                machine_binding_id=principal.binding_id or "",
+                safe_error_code=payload.safe_error_code or "PRINTER_DISCOVERY_FAILED",
+            )
+        else:
+            if payload.safe_error_code is not None:
+                return _v2_json({"code": "DISCOVERY_COMPLETED_WITH_ERROR_CODE"}, status_code=400)
+            value = service.complete_agent_job(
+                job_id=job_id,
+                machine_binding_id=principal.binding_id or "",
+                observations=[item.model_dump() for item in payload.observations],
+            )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PrinterProfileRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+    except ValueError:
+        return _v2_json({"code": "PRINTER_DISCOVERY_RESULT_REJECTED"}, status_code=400)
