@@ -43,7 +43,7 @@ _ID = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 SAFE_WINDOWS_STATUS = frozenset({
     "QUEUED", "PRINTING", "PAUSED", "ERROR", "OFFLINE", "PAPER_OUT",
-    "USER_INTERVENTION", "DELETING", "DELETED", "UNKNOWN",
+    "USER_INTERVENTION", "DELETING", "DELETED", "SPOOLER_REPORTED_COMPLETE", "UNKNOWN",
 })
 
 
@@ -896,3 +896,186 @@ class PrintStatusRequest:
             raise PhysicalPrintError("invalid print status identifier")
         if type(self.windows_spool_job_id) is not int or self.windows_spool_job_id <= 0:
             raise PhysicalPrintError("invalid Windows spool job id")
+
+
+
+class _SYSTEMTIME(ctypes.Structure):
+    _fields_ = [
+        ("wYear", wintypes.WORD), ("wMonth", wintypes.WORD), ("wDayOfWeek", wintypes.WORD),
+        ("wDay", wintypes.WORD), ("wHour", wintypes.WORD), ("wMinute", wintypes.WORD),
+        ("wSecond", wintypes.WORD), ("wMilliseconds", wintypes.WORD),
+    ]
+
+
+class _JOB_INFO_1W(ctypes.Structure):
+    _fields_ = [
+        ("JobId", wintypes.DWORD),
+        ("pPrinterName", wintypes.LPWSTR),
+        ("pMachineName", wintypes.LPWSTR),
+        ("pUserName", wintypes.LPWSTR),
+        ("pDocument", wintypes.LPWSTR),
+        ("pDatatype", wintypes.LPWSTR),
+        ("pStatus", wintypes.LPWSTR),
+        ("Status", wintypes.DWORD),
+        ("Priority", wintypes.DWORD),
+        ("Position", wintypes.DWORD),
+        ("TotalPages", wintypes.DWORD),
+        ("PagesPrinted", wintypes.DWORD),
+        ("Submitted", _SYSTEMTIME),
+    ]
+
+
+class WindowsSpoolStatusAdapter:
+    """Read-only safe status normalizer for one already-known local queue/job id."""
+
+    JOB_STATUS_PAUSED = 0x00000001
+    JOB_STATUS_ERROR = 0x00000002
+    JOB_STATUS_DELETING = 0x00000004
+    JOB_STATUS_SPOOLING = 0x00000008
+    JOB_STATUS_PRINTING = 0x00000010
+    JOB_STATUS_OFFLINE = 0x00000020
+    JOB_STATUS_PAPEROUT = 0x00000040
+    JOB_STATUS_PRINTED = 0x00000080
+    JOB_STATUS_DELETED = 0x00000100
+    JOB_STATUS_USER_INTERVENTION = 0x00000400
+    JOB_STATUS_COMPLETE = 0x00001000
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise OSError("Windows spool status is unavailable on this platform")
+        self.winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+        self.winspool.OpenPrinterW.argtypes = [
+            wintypes.LPWSTR, ctypes.POINTER(wintypes.HANDLE), ctypes.c_void_p,
+        ]
+        self.winspool.OpenPrinterW.restype = wintypes.BOOL
+        self.winspool.GetJobW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        ]
+        self.winspool.GetJobW.restype = wintypes.BOOL
+        self.winspool.ClosePrinter.argtypes = [wintypes.HANDLE]
+        self.winspool.ClosePrinter.restype = wintypes.BOOL
+
+    @classmethod
+    def normalize(cls, flags: int) -> str:
+        if flags & cls.JOB_STATUS_OFFLINE:
+            return "OFFLINE"
+        if flags & cls.JOB_STATUS_PAPEROUT:
+            return "PAPER_OUT"
+        if flags & cls.JOB_STATUS_USER_INTERVENTION:
+            return "USER_INTERVENTION"
+        if flags & cls.JOB_STATUS_ERROR:
+            return "ERROR"
+        if flags & cls.JOB_STATUS_PAUSED:
+            return "PAUSED"
+        if flags & cls.JOB_STATUS_DELETING:
+            return "DELETING"
+        if flags & cls.JOB_STATUS_DELETED:
+            return "DELETED"
+        if flags & cls.JOB_STATUS_PRINTING:
+            return "PRINTING"
+        if flags & (cls.JOB_STATUS_PRINTED | cls.JOB_STATUS_COMPLETE):
+            # Windows reporting this state is not proof that a physical,
+            # readable label emerged from the device.
+            return "SPOOLER_REPORTED_COMPLETE"
+        return "QUEUED"
+
+    def query(self, *, queue_name: str, windows_spool_job_id: int) -> dict[str, Any]:
+        if not queue_name or windows_spool_job_id <= 0:
+            raise ValueError("invalid local spool status target")
+        handle = wintypes.HANDLE()
+        if not self.winspool.OpenPrinterW(queue_name, ctypes.byref(handle), None):
+            return {
+                "normalized_state": "UNKNOWN",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "safe_error_code": "WINDOWS_OPEN_PRINTER_STATUS_FAILED",
+            }
+        try:
+            needed = wintypes.DWORD()
+            self.winspool.GetJobW(handle, windows_spool_job_id, 1, None, 0, ctypes.byref(needed))
+            if needed.value == 0:
+                return {
+                    "normalized_state": "UNKNOWN",
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "safe_error_code": "WINDOWS_SPOOL_JOB_NOT_OBSERVED",
+                }
+            buffer = (ctypes.c_ubyte * needed.value)()
+            ok = self.winspool.GetJobW(
+                handle, windows_spool_job_id, 1, ctypes.byref(buffer), needed.value, ctypes.byref(needed)
+            )
+            if not ok:
+                return {
+                    "normalized_state": "UNKNOWN",
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "safe_error_code": "WINDOWS_GET_JOB_FAILED",
+                }
+            info = ctypes.cast(ctypes.byref(buffer), ctypes.POINTER(_JOB_INFO_1W)).contents
+            return {
+                "normalized_state": self.normalize(int(info.Status)),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "safe_error_code": None,
+            }
+        finally:
+            self.winspool.ClosePrinter(handle)
+
+
+class SyntheticPhysicalTestRuntime:
+    """Physical test uses only the built-in synthetic fixture, never M8/FULL KM input."""
+
+    def __init__(
+        self,
+        *,
+        resolver: LocalPrinterResolver,
+        spooler: RasterSpoolAdapter,
+    ) -> None:
+        self.resolver = resolver
+        self.spooler = spooler
+
+    def execute(
+        self,
+        *,
+        synthetic_fixture_version: str,
+        agent_printer_id: str,
+        printer_profile_fingerprint: str,
+        layout: Mapping[str, Any],
+        label_width_mm: float,
+        label_height_mm: float,
+        dpi: int,
+    ) -> dict[str, Any]:
+        if synthetic_fixture_version != SYNTHETIC_FIXTURE_VERSION:
+            raise PhysicalPrintSecurityError("arbitrary synthetic payload is forbidden")
+        from wbcz.printing import SYNTHETIC_PREVIEW_FULL_KM
+        resolved = self.resolver.resolve(
+            agent_printer_id=agent_printer_id,
+            expected_fingerprint=printer_profile_fingerprint,
+        )
+        raster, _ = render_decode_verify_physical_label(
+            SYNTHETIC_PREVIEW_FULL_KM,
+            layout=layout,
+            label_width_mm=label_width_mm,
+            label_height_mm=label_height_mm,
+            dpi=dpi,
+            field_values=derive_gs1_display_values(SYNTHETIC_PREVIEW_FULL_KM),
+        )
+        created: list[int] = []
+        try:
+            outcome = self.spooler.submit(
+                queue_name=resolved.descriptor.queue_name,
+                raster=raster,
+                on_job_created=lambda job_id: created.append(job_id),
+            )
+        except DefinitePreSpoolFailure as exc:
+            return {"state": "FAILED_PRE_SPOOL", "safe_error_code": exc.code}
+        except AmbiguousAfterSpool as exc:
+            return {
+                "state": "UNKNOWN_AFTER_SPOOL",
+                "windows_spool_job_id": exc.windows_spool_job_id,
+                "safe_error_code": exc.code,
+            }
+        return {
+            "state": "SPOOLER_ACCEPTED",
+            "windows_spool_job_id": outcome.windows_spool_job_id,
+            "display_status": "Отправлено на принтер",
+            "physical_output_proven": False,
+            "synthetic_fixture_version": SYNTHETIC_FIXTURE_VERSION,
+        }
