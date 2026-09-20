@@ -43,7 +43,7 @@ class TemplatePreviewRequest(ClosedModel):
 
 
 class PrintJobCreateRequest(ClosedModel):
-    stored_item_ids: list[str] = Field(min_length=1, max_length=1000)
+    cis_values: list[str] = Field(min_length=1, max_length=1000)
     template_version_id: str
     mode: str = "INITIAL_PRINT"
     printer_profile_id: str | None = Field(default=None, max_length=128)
@@ -213,8 +213,8 @@ def create_print_job(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     try:
-        row = _service(request, db).create_print_job(
-            stored_item_ids=payload.stored_item_ids,
+        row = _service(request, db).create_print_job_for_cis(
+            cis_values=payload.cis_values,
             template_version_id=payload.template_version_id,
             user_id=identity.user_id,
             mode=payload.mode,
