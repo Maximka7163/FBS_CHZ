@@ -409,7 +409,9 @@ class PhysicalPrintingService:
             return self.execution_status(execution.id)
 
         if state == "FAILED_PRE_SPOOL":
-            if execution.state != "SPOOL_SUBMITTING" or windows_spool_job_id is not None:
+            if execution.state not in {"PAYLOAD_DELIVERED", "RENDERED_VERIFIED", "SPOOL_SUBMITTING"}:
+                raise PhysicalExecutionRejected("FAILED_PRE_SPOOL_NOT_PROVEN")
+            if windows_spool_job_id is not None or execution.windows_spool_job_id is not None:
                 raise PhysicalExecutionRejected("FAILED_PRE_SPOOL_NOT_PROVEN")
             execution.state = "FAILED_PRE_SPOOL"
             execution.safe_error_code = (safe_error_code or "PHYSICAL_EXECUTION_FAILED_PRE_SPOOL")[:96]
@@ -417,6 +419,18 @@ class PhysicalPrintingService:
             item.state = "FAILED"
             item.error_code = execution.safe_error_code
             job.state = "FAILED"
+            event_type, audit_outcome = "PRINT_EXECUTION_FAILED", AuditOutcome.FAILED
+        elif state == "BLOCKED":
+            if execution.state not in {"PAYLOAD_DELIVERED", "RENDERED_VERIFIED"}:
+                raise PhysicalExecutionRejected("PHYSICAL_BLOCKED_TRANSITION_NOT_ALLOWED")
+            if execution.spool_submitting_at is not None or execution.windows_spool_job_id is not None:
+                raise PhysicalExecutionRejected("PHYSICAL_BLOCKED_AFTER_SPOOL_BOUNDARY")
+            execution.state = "BLOCKED"
+            execution.safe_error_code = (safe_error_code or "PHYSICAL_EXECUTION_BLOCKED")[:96]
+            execution.terminal_at = now
+            item.state = "BLOCKED"
+            item.error_code = execution.safe_error_code
+            job.state = "BLOCKED"
             event_type, audit_outcome = "PRINT_EXECUTION_FAILED", AuditOutcome.FAILED
         elif state == "UNKNOWN_AFTER_SPOOL":
             if execution.state not in {"SPOOL_SUBMITTING", "SPOOL_JOB_CREATED"}:
