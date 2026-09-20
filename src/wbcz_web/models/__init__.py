@@ -14,6 +14,10 @@ from .production import (
     ManualReviewCaseRecord, WorkerHeartbeatRecord, RemoteRateLimitStateRecord,
     AgentEnrollmentTokenRecord,
 )
+from .printing import (
+    StoredFullKmItemRecord, PrintTemplateRecord, PrintTemplateVersionRecord,
+    PrintJobRecord, PrintJobItemRecord, PrintEventRecord,
+)
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -32,6 +36,8 @@ __all__ = [
     "AgentBindingRecord", "AgentCertificateObservationRecord", "TrueApiConnectionRecord",
     "IntegrationHealthCheckRecord", "ManualReviewCaseRecord", "WorkerHeartbeatRecord",
     "RemoteRateLimitStateRecord", "AgentEnrollmentTokenRecord",
+    "StoredFullKmItemRecord", "PrintTemplateRecord", "PrintTemplateVersionRecord",
+    "PrintJobRecord", "PrintJobItemRecord", "PrintEventRecord",
     "OrganisationRecord", "ParticipantRecord", "MembershipRecord", "PermissionRecord",
     "RolePermissionRecord", "InvitationRecord", "ParticipantClaimRecord", "PasswordHistoryRecord", "LoginAttemptRecord", "LoginThrottleStateRecord", "BootstrapRecord",
 ]
