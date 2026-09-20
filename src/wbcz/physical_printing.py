@@ -887,16 +887,72 @@ class PrintStatusRequest:
     contract_version: str
     operation: str
     execution_id: str
+    printer_profile_id: str
+    printer_profile_fingerprint: str
     agent_printer_id: str
     windows_spool_job_id: int
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "PrintStatusRequest":
+        allowed = {
+            "contract_version", "operation", "execution_id", "printer_profile_id",
+            "printer_profile_fingerprint", "agent_printer_id", "windows_spool_job_id",
+        }
+        if set(raw) != allowed:
+            raise PhysicalPrintSecurityError("print status contract fields mismatch")
+        value = cls(
+            contract_version=str(raw["contract_version"]),
+            operation=str(raw["operation"]),
+            execution_id=str(raw["execution_id"]),
+            printer_profile_id=str(raw["printer_profile_id"]),
+            printer_profile_fingerprint=str(raw["printer_profile_fingerprint"]),
+            agent_printer_id=str(raw["agent_printer_id"]),
+            windows_spool_job_id=int(raw["windows_spool_job_id"]),
+        )
+        value.validate()
+        return value
 
     def validate(self) -> None:
         if self.contract_version != PRINT_PROTOCOL_VERSION or self.operation != STATUS_OPERATION:
             raise PhysicalPrintError("unsupported print status operation")
-        if not _ID.fullmatch(self.execution_id) or not _ID.fullmatch(self.agent_printer_id):
-            raise PhysicalPrintError("invalid print status identifier")
+        for value in (self.execution_id, self.printer_profile_id, self.agent_printer_id):
+            if not _ID.fullmatch(value):
+                raise PhysicalPrintError("invalid print status identifier")
+        if not _SHA.fullmatch(self.printer_profile_fingerprint):
+            raise PhysicalPrintError("invalid print status printer fingerprint")
         if type(self.windows_spool_job_id) is not int or self.windows_spool_job_id <= 0:
             raise PhysicalPrintError("invalid Windows spool job id")
+
+
+class PhysicalPrintStatusRuntime:
+    def __init__(
+        self,
+        *,
+        resolver: LocalPrinterResolver,
+        status_adapter: "WindowsSpoolStatusAdapter",
+    ) -> None:
+        self.resolver = resolver
+        self.status_adapter = status_adapter
+
+    def query(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+        request = PrintStatusRequest.from_mapping(raw)
+        resolved = self.resolver.resolve(
+            agent_printer_id=request.agent_printer_id,
+            expected_fingerprint=request.printer_profile_fingerprint,
+        )
+        result = self.status_adapter.query(
+            queue_name=resolved.descriptor.queue_name,
+            windows_spool_job_id=request.windows_spool_job_id,
+        )
+        return {
+            "execution_id": request.execution_id,
+            "printer_profile_id": request.printer_profile_id,
+            "windows_spool_job_id": request.windows_spool_job_id,
+            "normalized_state": result["normalized_state"],
+            "observed_at": result["observed_at"],
+            "safe_error_code": result.get("safe_error_code"),
+            "physical_output_proven": False,
+        }
 
 
 
