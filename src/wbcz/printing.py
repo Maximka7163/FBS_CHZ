@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ctypes
+from ctypes import POINTER, byref, c_int, c_ubyte, c_void_p
+from ctypes.util import find_library
 import hashlib
 import json
 import math
-from typing import Any, Mapping, Sequence
-
-import zxingcpp
+from typing import Any, Mapping
 
 
 PRINT_LAYOUT_SCHEMA_VERSION = "printing-layout-v1"
@@ -51,8 +52,16 @@ class PrintingSecurityError(PrintingContractError):
 
 
 @dataclass(frozen=True, slots=True)
+class RasterImage:
+    width: int
+    height: int
+    bpp: int
+    pixels: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class RenderedDataMatrix:
-    image: Any
+    image: RasterImage
     svg: str
     payload_sha256: str
     module_size_mm_requested: float
@@ -222,6 +231,139 @@ def _scale_for_module(module_size_mm: float, dpi: int) -> tuple[int, float]:
     return pixels, effective
 
 
+class _DmtxImage(ctypes.Structure):
+    _fields_ = [
+        ("width", c_int),
+        ("height", c_int),
+        ("pixelPacking", c_int),
+        ("bitsPerPixel", c_int),
+        ("bytesPerPixel", c_int),
+        ("rowPadBytes", c_int),
+        ("rowSizeBytes", c_int),
+        ("imageFlip", c_int),
+        ("channelCount", c_int),
+        ("channelStart", c_int * 4),
+        ("bitsPerChannel", c_int * 4),
+        ("pxl", POINTER(c_ubyte)),
+    ]
+
+
+class _DmtxEncode(ctypes.Structure):
+    # libdmtx >=0.7.5 prefix only; fields after image are not accessed.
+    _fields_ = [
+        ("method", c_int),
+        ("scheme", c_int),
+        ("sizeIdxRequest", c_int),
+        ("marginSize", c_int),
+        ("moduleSize", c_int),
+        ("pixelPacking", c_int),
+        ("imageFlip", c_int),
+        ("rowPadBytes", c_int),
+        ("fnc1", c_int),
+        ("message", c_void_p),
+        ("image", POINTER(_DmtxImage)),
+    ]
+
+
+def _load_libdmtx() -> Any:
+    candidates = [find_library("dmtx"), "libdmtx.so.0", "libdmtx.so", "libdmtx.dll", "libdmtx.dylib"]
+    library = None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            library = ctypes.CDLL(candidate)
+            break
+        except OSError:
+            continue
+    if library is None:
+        raise PrintingContractError("libdmtx runtime is unavailable")
+
+    library.dmtxVersion.restype = ctypes.c_char_p
+    version = (library.dmtxVersion() or b"").decode("ascii", errors="strict")
+    parts = tuple(int(piece) for piece in version.split(".")[:3] if piece.isdigit())
+    if not parts or parts < (0, 7, 5):
+        raise PrintingContractError("libdmtx >=0.7.5 is required")
+
+    library.dmtxEncodeCreate.argtypes = []
+    library.dmtxEncodeCreate.restype = POINTER(_DmtxEncode)
+    library.dmtxEncodeDestroy.argtypes = [POINTER(POINTER(_DmtxEncode))]
+    library.dmtxEncodeDestroy.restype = ctypes.c_uint
+    library.dmtxEncodeSetProp.argtypes = [POINTER(_DmtxEncode), c_int, c_int]
+    library.dmtxEncodeSetProp.restype = ctypes.c_uint
+    library.dmtxEncodeDataMatrix.argtypes = [POINTER(_DmtxEncode), c_int, POINTER(c_ubyte)]
+    library.dmtxEncodeDataMatrix.restype = ctypes.c_uint
+    return library
+
+
+def _svg_from_rgb(raster: RasterImage) -> str:
+    if raster.bpp != 24:
+        raise PrintingContractError("unexpected libdmtx raster format")
+    if len(raster.pixels) != raster.width * raster.height * 3:
+        raise PrintingContractError("invalid libdmtx raster size")
+    rects: list[str] = []
+    pixels = raster.pixels
+    for y in range(raster.height):
+        row = y * raster.width * 3
+        x = 0
+        while x < raster.width:
+            idx = row + x * 3
+            is_dark = pixels[idx] < 128 and pixels[idx + 1] < 128 and pixels[idx + 2] < 128
+            if not is_dark:
+                x += 1
+                continue
+            start = x
+            while x < raster.width:
+                idx = row + x * 3
+                if not (pixels[idx] < 128 and pixels[idx + 1] < 128 and pixels[idx + 2] < 128):
+                    break
+                x += 1
+            rects.append(f'<rect x="{start}" y="{y}" width="{x-start}" height="1"/>')
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {raster.width} {raster.height}" '
+        f'width="{raster.width}" height="{raster.height}" shape-rendering="crispEdges">'
+        '<rect width="100%" height="100%" fill="white"/>'
+        '<g fill="black">' + "".join(rects) + "</g></svg>"
+    )
+
+
+def _encode_gs1_raw_libdmtx(full_km: bytes, *, module_pixels: int, quiet_zone_modules: int) -> RasterImage:
+    library = _load_libdmtx()
+    encoder = library.dmtxEncodeCreate()
+    if not encoder:
+        raise PrintingContractError("libdmtx encoder creation failed")
+    try:
+        # libdmtx DmtxPropFnc1 makes the configured input byte encode as FNC1.
+        # A leading ASCII 29 represents the GS1 symbology FNC1 and is not part
+        # of the recovered logical payload. ASCII 29 already present inside the
+        # exact FULL KM becomes separator FNC1 and decodes back to ASCII 29.
+        encoded_input = b"\x1d" + full_km
+        source = (c_ubyte * len(encoded_input)).from_buffer_copy(encoded_input)
+        properties = (
+            (100, 0),  # DmtxPropScheme = ASCII
+            (101, -2),  # DmtxPropSizeRequest = square auto
+            (102, module_pixels * quiet_zone_modules),  # margin
+            (103, module_pixels),  # module size
+            (104, 29),  # DmtxPropFnc1 = ASCII GS
+        )
+        for prop, value in properties:
+            if library.dmtxEncodeSetProp(encoder, prop, value) == 0:
+                raise PrintingContractError("libdmtx rejected renderer property")
+        if library.dmtxEncodeDataMatrix(encoder, len(encoded_input), source) == 0:
+            raise PrintingContractError("libdmtx failed to encode GS1 DataMatrix")
+        image = encoder.contents.image
+        if not image:
+            raise PrintingContractError("libdmtx returned no raster")
+        raw = image.contents
+        if raw.bitsPerPixel != 24 or raw.width <= 0 or raw.height <= 0:
+            raise PrintingContractError("libdmtx returned unsupported raster format")
+        byte_count = raw.width * raw.height * raw.bitsPerPixel // 8
+        pixels = ctypes.string_at(raw.pxl, byte_count)
+        return RasterImage(raw.width, raw.height, raw.bitsPerPixel, pixels)
+    finally:
+        library.dmtxEncodeDestroy(byref(encoder))
+
+
 def render_gs1_datamatrix(
     full_km: bytes,
     *,
@@ -235,29 +377,25 @@ def render_gs1_datamatrix(
         raise PrintingSecurityError("visible <GS> marker is not an accepted substitute for ASCII 29")
     if b"\x00" in full_km:
         raise PrintingSecurityError("NUL is not accepted in printable FULL KM")
+    if any(byte > 0x7F for byte in full_km):
+        raise PrintingSecurityError("FULL KM renderer accepts exact ASCII/control bytes only")
     if type(quiet_zone_modules) is not int or not MIN_QUIET_ZONE_MODULES <= quiet_zone_modules <= MAX_QUIET_ZONE_MODULES:
         raise PrintingContractError("quiet zone is outside standards-compatible bound")
     scale, effective = _scale_for_module(float(module_size_mm), dpi)
-    # zxing-cpp 3.x accepts bytes and GS1 creator mode. bytes avoids any
-    # Unicode normalization/transcoding of the logical FULL KM.
-    barcode = zxingcpp.create_barcode(
+    raster = _encode_gs1_raw_libdmtx(
         full_km,
-        zxingcpp.BarcodeFormat.DataMatrix,
-        gs1=True,
-        force_square=True,
+        module_pixels=scale,
+        quiet_zone_modules=quiet_zone_modules,
     )
-    image = barcode.to_image(scale=scale, add_quiet_zones=True)
-    svg = barcode.to_svg(scale=scale, add_quiet_zones=True)
     return RenderedDataMatrix(
-        image=image,
-        svg=svg,
+        image=raster,
+        svg=_svg_from_rgb(raster),
         payload_sha256=hashlib.sha256(full_km).hexdigest(),
         module_size_mm_requested=float(module_size_mm),
         module_size_mm_effective=effective,
         scale_pixels=scale,
         quiet_zone_modules=quiet_zone_modules,
     )
-
 
 def render_synthetic_preview(layout: Mapping[str, Any], *, label_width_mm: float, label_height_mm: float, dpi: int = 300) -> dict[str, Any]:
     normalized = validate_layout(layout, label_width_mm=label_width_mm, label_height_mm=label_height_mm)
