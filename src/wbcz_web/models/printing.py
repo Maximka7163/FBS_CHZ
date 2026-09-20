@@ -48,6 +48,7 @@ class StoredFullKmItemRecord(Base):
             "vault_entry_id", "vault_item_ordinal",
             name="uq_stored_full_km_vault_ordinal",
         ),
+        UniqueConstraint("id", "organisation_id", "participant_id", name="uq_stored_full_km_id_tenant"),
         CheckConstraint("vault_item_ordinal >= 0", name="ck_stored_full_km_ordinal"),
         CheckConstraint("vault_item_offset >= 0", name="ck_stored_full_km_offset"),
         CheckConstraint("vault_item_length > 0", name="ck_stored_full_km_length"),
@@ -159,6 +160,7 @@ class PrintJobRecord(Base):
             "state IN ('PENDING','READY_FOR_AGENT','COMPLETED','FAILED','BLOCKED')",
             name="ck_print_job_state",
         ),
+        UniqueConstraint("id", "organisation_id", "participant_id", name="uq_print_job_id_tenant"),
         CheckConstraint("item_count > 0 AND item_count <= 1000", name="ck_print_job_item_count"),
         CheckConstraint("output_kind IN ('WINDOWS_AGENT','SYNTHETIC_PREVIEW')", name="ck_print_job_output_kind"),
     )
@@ -187,6 +189,7 @@ class PrintJobItemRecord(Base):
         ),
         UniqueConstraint("print_job_id", "ordinal", name="uq_print_job_item_ordinal"),
         UniqueConstraint("print_job_id", "stored_full_km_item_id", name="uq_print_job_stored_km"),
+        UniqueConstraint("id", "organisation_id", "participant_id", name="uq_print_job_item_id_tenant"),
         CheckConstraint("ordinal >= 0", name="ck_print_job_item_ordinal"),
         CheckConstraint("state IN ('PENDING','RENDERED','COMPLETED','FAILED','BLOCKED')", name="ck_print_job_item_state"),
     )
