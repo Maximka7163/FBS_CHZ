@@ -183,3 +183,28 @@ def test_printing_feature_gates_are_fail_closed_and_production_physical_executio
     )
     with pytest.raises(ValueError, match="Physical print execution remains blocked"):
         production_execution.validate_for_startup()
+
+
+def test_printing_api_surface_has_no_export_copy_or_generic_printer_proxy():
+    from wbcz_web.main import create_app
+
+    app = create_app(WebConfig.from_env().validate_for_startup())
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    required = {
+        "/api/printing/printability/resolve",
+        "/api/printing/templates",
+        "/api/printing/templates/{template_id}",
+        "/api/printing/templates/{template_id}/versions",
+        "/api/printing/templates/{template_id}/archive",
+        "/api/printing/template-versions/{version_id}/preview",
+        "/api/printing/jobs",
+        "/api/printing/jobs/{job_id}",
+        "/api/printing/jobs/reprint",
+        "/api/printing/jobs/{job_id}/agent-contract",
+    }
+    assert required.issubset(paths)
+    forbidden_fragments = ("/export", "/copy", "/clipboard", "/printer-proxy", "/zpl", "/raw-command")
+    assert not any(
+        path.startswith("/api/printing") and any(fragment in path for fragment in forbidden_fragments)
+        for path in paths
+    )
