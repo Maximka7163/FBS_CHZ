@@ -466,20 +466,99 @@ class _BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
 
 
+class _DEVMODE_PRINTER_PREFIX(ctypes.Structure):
+    """Stable DEVMODEW prefix through dmPrintQuality.
+
+    DocumentProperties owns the complete driver buffer, including dmDriverExtra.
+    We only mutate standard printer fields in this fixed Win32 prefix.
+    """
+    _fields_ = [
+        ("dmDeviceName", wintypes.WCHAR * 32),
+        ("dmSpecVersion", wintypes.WORD),
+        ("dmDriverVersion", wintypes.WORD),
+        ("dmSize", wintypes.WORD),
+        ("dmDriverExtra", wintypes.WORD),
+        ("dmFields", wintypes.DWORD),
+        ("dmOrientation", ctypes.c_short),
+        ("dmPaperSize", ctypes.c_short),
+        ("dmPaperLength", ctypes.c_short),
+        ("dmPaperWidth", ctypes.c_short),
+        ("dmScale", ctypes.c_short),
+        ("dmCopies", ctypes.c_short),
+        ("dmDefaultSource", ctypes.c_short),
+        ("dmPrintQuality", ctypes.c_short),
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedPrinterDevMode:
+    buffer: Any
+    size_bytes: int
+    copies: int
+    scale_percent: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class PrinterDcGeometry:
+    dpi_x: int
+    dpi_y: int
+    physical_width_px: int
+    physical_height_px: int
+    printable_width_px: int
+    printable_height_px: int
+    offset_x_px: int
+    offset_y_px: int
+
+
 class WindowsGdiRasterSpooler:
     """Closed raster-only GDI adapter. Never accepts PDL/raw command data."""
 
     DIB_RGB_COLORS = 0
     BI_RGB = 0
 
-    def __init__(self) -> None:
-        if os.name != "nt":
+    DM_OUT_BUFFER = 0x00000002
+    DM_IN_BUFFER = 0x00000008
+    DM_SCALE = 0x00000010
+    DM_COPIES = 0x00000100
+    IDOK = 1
+
+    LOGPIXELSX = 88
+    LOGPIXELSY = 90
+    HORZRES = 8
+    VERTRES = 10
+    PHYSICALWIDTH = 110
+    PHYSICALHEIGHT = 111
+    PHYSICALOFFSETX = 112
+    PHYSICALOFFSETY = 113
+
+    def __init__(self, *, _winspool=None, _gdi32=None) -> None:
+        injected = _winspool is not None or _gdi32 is not None
+        if injected and (_winspool is None or _gdi32 is None):
+            raise ValueError("both Win32 test boundaries must be supplied together")
+        if not injected and os.name != "nt":
             raise OSError("Windows GDI printing is unavailable on this platform")
-        self.gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        self.winspool = _winspool or ctypes.WinDLL("winspool.drv", use_last_error=True)
+        self.gdi32 = _gdi32 or ctypes.WinDLL("gdi32", use_last_error=True)
+        if injected:
+            return
+
+        self.winspool.OpenPrinterW.argtypes = [
+            wintypes.LPWSTR, ctypes.POINTER(wintypes.HANDLE), ctypes.c_void_p,
+        ]
+        self.winspool.OpenPrinterW.restype = wintypes.BOOL
+        self.winspool.DocumentPropertiesW.argtypes = [
+            ctypes.c_void_p, wintypes.HANDLE, wintypes.LPWSTR,
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+        ]
+        self.winspool.DocumentPropertiesW.restype = ctypes.c_long
+        self.winspool.ClosePrinter.argtypes = [wintypes.HANDLE]
+        self.winspool.ClosePrinter.restype = wintypes.BOOL
         self.gdi32.CreateDCW.argtypes = [
             wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p,
         ]
         self.gdi32.CreateDCW.restype = ctypes.c_void_p
+        self.gdi32.GetDeviceCaps.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.gdi32.GetDeviceCaps.restype = ctypes.c_int
         self.gdi32.StartDocW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DOCINFOW)]
         self.gdi32.StartDocW.restype = ctypes.c_int
         self.gdi32.StartPage.argtypes = [ctypes.c_void_p]
@@ -497,6 +576,137 @@ class WindowsGdiRasterSpooler:
         self.gdi32.EndDoc.restype = ctypes.c_int
         self.gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
         self.gdi32.DeleteDC.restype = wintypes.BOOL
+
+    @staticmethod
+    def _devmode_prefix(buffer: Any) -> _DEVMODE_PRINTER_PREFIX:
+        return ctypes.cast(buffer, ctypes.POINTER(_DEVMODE_PRINTER_PREFIX)).contents
+
+    def _load_validated_devmode(self, queue_name: str) -> ValidatedPrinterDevMode:
+        handle = wintypes.HANDLE()
+        if not self.winspool.OpenPrinterW(queue_name, ctypes.byref(handle), None):
+            raise DefinitePreSpoolFailure("PRINTER_DEVMODE_OPEN_FAILED")
+        try:
+            size = int(self.winspool.DocumentPropertiesW(
+                None, handle, queue_name, None, None, 0
+            ))
+            if size < ctypes.sizeof(_DEVMODE_PRINTER_PREFIX):
+                raise DefinitePreSpoolFailure("PRINTER_DEVMODE_UNAVAILABLE")
+
+            source = (ctypes.c_ubyte * size)()
+            result = int(self.winspool.DocumentPropertiesW(
+                None, handle, queue_name, ctypes.cast(source, ctypes.c_void_p),
+                None, self.DM_OUT_BUFFER,
+            ))
+            if result != self.IDOK:
+                raise DefinitePreSpoolFailure("PRINTER_DEVMODE_UNAVAILABLE")
+            source_dm = self._devmode_prefix(source)
+            if (
+                int(source_dm.dmSize) < ctypes.sizeof(_DEVMODE_PRINTER_PREFIX)
+                or int(source_dm.dmSize) + int(source_dm.dmDriverExtra) > size
+            ):
+                raise DefinitePreSpoolFailure("PRINTER_DEVMODE_INVALID")
+
+            source_fields = int(source_dm.dmFields)
+            source_dm.dmFields = source_fields | self.DM_COPIES
+            source_dm.dmCopies = 1
+            scale_supported = bool(source_fields & self.DM_SCALE)
+            if scale_supported:
+                source_dm.dmFields = int(source_dm.dmFields) | self.DM_SCALE
+                source_dm.dmScale = 100
+
+            canonical = (ctypes.c_ubyte * size)()
+            result = int(self.winspool.DocumentPropertiesW(
+                None, handle, queue_name, ctypes.cast(canonical, ctypes.c_void_p),
+                ctypes.cast(source, ctypes.c_void_p),
+                self.DM_IN_BUFFER | self.DM_OUT_BUFFER,
+            ))
+            if result != self.IDOK:
+                raise DefinitePreSpoolFailure("PRINTER_DEVMODE_CANONICALIZATION_FAILED")
+            effective = self._devmode_prefix(canonical)
+            if (
+                int(effective.dmSize) < ctypes.sizeof(_DEVMODE_PRINTER_PREFIX)
+                or int(effective.dmSize) + int(effective.dmDriverExtra) > size
+            ):
+                raise DefinitePreSpoolFailure("PRINTER_DEVMODE_INVALID")
+
+            effective_fields = int(effective.dmFields)
+            if not (effective_fields & self.DM_COPIES) or int(effective.dmCopies) != 1:
+                raise DefinitePreSpoolFailure("PRINTER_DEVMODE_COPIES_UNSAFE")
+            scale_value: int | None = None
+            if scale_supported or (effective_fields & self.DM_SCALE):
+                if not (effective_fields & self.DM_SCALE) or int(effective.dmScale) != 100:
+                    raise DefinitePreSpoolFailure("PRINTER_DEVMODE_SCALING_UNSAFE")
+                scale_value = int(effective.dmScale)
+
+            return ValidatedPrinterDevMode(
+                buffer=canonical,
+                size_bytes=size,
+                copies=int(effective.dmCopies),
+                scale_percent=scale_value,
+            )
+        finally:
+            self.winspool.ClosePrinter(handle)
+
+    def _read_dc_geometry(self, hdc: Any) -> PrinterDcGeometry:
+        cap = lambda index: int(self.gdi32.GetDeviceCaps(hdc, index))
+        return PrinterDcGeometry(
+            dpi_x=cap(self.LOGPIXELSX),
+            dpi_y=cap(self.LOGPIXELSY),
+            physical_width_px=cap(self.PHYSICALWIDTH),
+            physical_height_px=cap(self.PHYSICALHEIGHT),
+            printable_width_px=cap(self.HORZRES),
+            printable_height_px=cap(self.VERTRES),
+            offset_x_px=cap(self.PHYSICALOFFSETX),
+            offset_y_px=cap(self.PHYSICALOFFSETY),
+        )
+
+    @staticmethod
+    def _validate_final_dc_geometry(
+        actual: PrinterDcGeometry,
+        raster: PhysicalLabelRaster,
+    ) -> None:
+        if actual.dpi_x != raster.dpi or actual.dpi_y != raster.dpi:
+            raise DefinitePreSpoolFailure("PRINTER_PROFILE_DPI_CHANGED")
+        if (
+            actual.physical_width_px != raster.image.width
+            or actual.physical_height_px != raster.image.height
+        ):
+            raise DefinitePreSpoolFailure("PRINTER_PHYSICAL_GEOMETRY_CHANGED")
+        if (
+            actual.printable_width_px != raster.printable_width_px
+            or actual.printable_height_px != raster.printable_height_px
+        ):
+            raise DefinitePreSpoolFailure("PRINTER_PRINTABLE_AREA_CHANGED")
+        if (
+            actual.offset_x_px != raster.physical_offset_x_px
+            or actual.offset_y_px != raster.physical_offset_y_px
+        ):
+            raise DefinitePreSpoolFailure("PRINTER_PHYSICAL_OFFSET_CHANGED")
+
+    def safe_preflight(self, queue_name: str) -> dict[str, Any]:
+        """Local-only, no-StartDoc Windows smoke helper."""
+        devmode = self._load_validated_devmode(queue_name)
+        hdc = self.gdi32.CreateDCW(
+            "WINSPOOL", queue_name, None, ctypes.cast(devmode.buffer, ctypes.c_void_p)
+        )
+        if not hdc:
+            raise DefinitePreSpoolFailure("GDI_CREATE_DC_FAILED")
+        try:
+            geometry = self._read_dc_geometry(hdc)
+            return {
+                "copies": devmode.copies,
+                "scale_percent": devmode.scale_percent,
+                "dpi_x": geometry.dpi_x,
+                "dpi_y": geometry.dpi_y,
+                "physical_width_px": geometry.physical_width_px,
+                "physical_height_px": geometry.physical_height_px,
+                "printable_width_px": geometry.printable_width_px,
+                "printable_height_px": geometry.printable_height_px,
+                "offset_x_px": geometry.offset_x_px,
+                "offset_y_px": geometry.offset_y_px,
+            }
+        finally:
+            self.gdi32.DeleteDC(hdc)
 
     @staticmethod
     def _bgr_bottom_up(raster: PhysicalLabelRaster) -> tuple[bytes, int]:
@@ -526,11 +736,21 @@ class WindowsGdiRasterSpooler:
     ) -> GdiSpoolOutcome:
         if not isinstance(queue_name, str) or not queue_name:
             raise DefinitePreSpoolFailure("LOCAL_PRINTER_QUEUE_UNAVAILABLE")
-        hdc = self.gdi32.CreateDCW("WINSPOOL", queue_name, None, None)
+        devmode = self._load_validated_devmode(queue_name)
+        if devmode.copies != 1:
+            raise DefinitePreSpoolFailure("PRINTER_DEVMODE_COPIES_UNSAFE")
+        if devmode.scale_percent not in {None, 100}:
+            raise DefinitePreSpoolFailure("PRINTER_DEVMODE_SCALING_UNSAFE")
+        hdc = self.gdi32.CreateDCW(
+            "WINSPOOL", queue_name, None, ctypes.cast(devmode.buffer, ctypes.c_void_p)
+        )
         if not hdc:
             raise DefinitePreSpoolFailure("GDI_CREATE_DC_FAILED")
         job_id: int | None = None
         try:
+            # Same validated DEVMODE/DC is used for geometry proof and StartDoc.
+            # No printer configuration change is accepted after this point.
+            self._validate_final_dc_geometry(self._read_dc_geometry(hdc), raster)
             doc = _DOCINFOW(
                 ctypes.sizeof(_DOCINFOW),
                 "Sellari label",
