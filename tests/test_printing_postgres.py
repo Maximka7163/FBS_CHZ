@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from cryptography.hazmat.primitives.asymmetric import x25519
 
 from wbcz.printing_sensitive import open_full_km
+from wbcz.physical_printing import PHYSICAL_CAPABILITY, RENDERER_VERSION
 from wbcz.printer_profiles import capability_hash
 from wbcz.suz_foundation import KmVault, VaultBinding, envelope_to_persistence
 from wbcz_web.auth import hash_password
@@ -63,6 +64,11 @@ from wbcz_web.services.printing_sensitive_delivery import (
     SensitivePrintingDeliveryService,
 )
 from wbcz_web.services.printer_profiles import PrinterProfileRejected, PrinterProfileService
+from wbcz_web.services.physical_printing import (
+    PhysicalExecutionRejected,
+    PhysicalPrintingService,
+    UNKNOWN_REPRINT_WARNING,
+)
 from wbcz_web.services.tenant import bind_tenant_scope
 
 
