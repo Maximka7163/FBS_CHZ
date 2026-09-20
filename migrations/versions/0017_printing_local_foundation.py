@@ -39,7 +39,6 @@ def upgrade() -> None:
         sa.Column("vault_entry_id", sa.BigInteger(), sa.ForeignKey("suz_km_vault.id", ondelete="RESTRICT"), nullable=False),
         sa.Column("gtin", sa.Text(), nullable=False),
         sa.Column("cis_hmac", sa.String(64), nullable=False),
-        sa.Column("cis_tail", sa.String(12), nullable=True),
         sa.Column("vault_item_ordinal", sa.Integer(), nullable=False),
         sa.Column("vault_item_offset", sa.Integer(), nullable=False),
         sa.Column("vault_item_length", sa.Integer(), nullable=False),
@@ -254,11 +253,11 @@ def upgrade() -> None:
     )
 
     op.execute("""
-    CREATE FUNCTION wbcz_printing_immutable_guard() RETURNS trigger AS $
+    CREATE FUNCTION wbcz_printing_immutable_guard() RETURNS trigger AS $guard$
     BEGIN
       RAISE EXCEPTION 'printing immutable history cannot be updated or deleted';
     END;
-    $ LANGUAGE plpgsql
+    $guard$ LANGUAGE plpgsql
     """)
     op.execute("""
     CREATE TRIGGER trg_print_template_versions_immutable
