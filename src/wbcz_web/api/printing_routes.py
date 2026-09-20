@@ -15,6 +15,7 @@ from wbcz_web.services.printing_sensitive_delivery import (
     SensitiveDeliveryRejected,
     SensitivePrintingDeliveryService,
 )
+from wbcz_web.services.printer_profiles import PrinterProfileRejected, PrinterProfileService
 
 
 printing_router = APIRouter(prefix="/api/printing", tags=["printing"])
@@ -67,6 +68,14 @@ class SensitiveDeliveryAuthorizationRequest(ClosedModel):
     agent_binding_id: str | None = Field(default=None, max_length=64)
 
 
+class PrinterDiscoveryRequest(ClosedModel):
+    agent_binding_id: str = Field(min_length=1, max_length=64)
+
+
+class PrinterCompatibilityRequest(ClosedModel):
+    template_version_id: str = Field(min_length=1, max_length=64)
+
+
 def _service(request: Request, db: Session) -> LocalPrintingService:
     return LocalPrintingService(db, request.app.state.config)
 
@@ -74,7 +83,7 @@ def _service(request: Request, db: Session) -> LocalPrintingService:
 def _safe_error(exc: Exception, *, not_found: bool = False) -> HTTPException:
     if not_found:
         return HTTPException(status_code=404, detail="printing object not found")
-    if isinstance(exc, (PrintingUnavailable, PrintingIntegrityError, SensitiveDeliveryRejected)):
+    if isinstance(exc, (PrintingUnavailable, PrintingIntegrityError, SensitiveDeliveryRejected, PrinterProfileRejected)):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, (PrintingContractError, PrintingSecurityError, ValueError)):
         return HTTPException(status_code=400, detail=str(exc))
@@ -350,4 +359,144 @@ def authorize_sensitive_payload_delivery(
             "print_protocol_version": execution.print_protocol_version,
         }
     except (SensitiveDeliveryRejected, ValueError) as exc:
+        raise _safe_error(exc) from exc
+
+
+@printing_router.get("/printer-profiles")
+def list_printer_profiles(
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_READ)),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    del identity
+    return PrinterProfileService(db, request.app.state.config).list_profiles()
+
+
+@printing_router.get("/printer-profiles/{profile_id}")
+def printer_profile_detail(
+    profile_id: str,
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_READ)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    del identity
+    try:
+        return PrinterProfileService(db, request.app.state.config).profile_detail(profile_id)
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+
+
+@printing_router.post("/printer-discoveries")
+def request_printer_discovery(
+    payload: PrinterDiscoveryRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_TEMPLATES_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        row = PrinterProfileService(db, request.app.state.config).request_discovery(
+            agent_binding_id=payload.agent_binding_id,
+            user_id=identity.user_id,
+        )
+        return {
+            "id": row.id,
+            "agent_binding_id": row.agent_binding_id,
+            "state": row.state,
+            "requested_at": row.requested_at.isoformat(),
+        }
+    except (PrinterProfileRejected, ValueError) as exc:
+        raise _safe_error(exc) from exc
+
+
+@printing_router.get("/printer-discoveries/{run_id}")
+def printer_discovery_status(
+    run_id: str,
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_READ)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    del identity
+    try:
+        return PrinterProfileService(db, request.app.state.config).discovery_status(run_id)
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+
+
+@printing_router.post("/printer-discoveries/{run_id}/observations/{observation_id}/approve")
+def approve_printer_observation(
+    run_id: str,
+    observation_id: str,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_TEMPLATES_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        service = PrinterProfileService(db, request.app.state.config)
+        status = service.discovery_status(run_id)
+        if not any(item["id"] == observation_id for item in status["observations"]):
+            raise KeyError(observation_id)
+        row = service.approve_observation(observation_id, user_id=identity.user_id)
+        return service.profile_detail(row.id)
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+    except (PrinterProfileRejected, ValueError) as exc:
+        raise _safe_error(exc) from exc
+
+
+@printing_router.post("/printer-profiles/{profile_id}/disable")
+def disable_printer_profile(
+    profile_id: str,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_TEMPLATES_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        service = PrinterProfileService(db, request.app.state.config)
+        row = service.disable_profile(profile_id, user_id=identity.user_id)
+        return service.profile_detail(row.id)
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+    except (PrinterProfileRejected, ValueError) as exc:
+        raise _safe_error(exc) from exc
+
+
+@printing_router.post("/printer-profiles/{profile_id}/refresh")
+def refresh_printer_profile(
+    profile_id: str,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_TEMPLATES_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        row = PrinterProfileService(db, request.app.state.config).refresh_profile(
+            profile_id, user_id=identity.user_id
+        )
+        return {"id": row.id, "agent_binding_id": row.agent_binding_id, "state": row.state}
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+    except (PrinterProfileRejected, ValueError) as exc:
+        raise _safe_error(exc) from exc
+
+
+@printing_router.post("/printer-profiles/{profile_id}/compatibility")
+def printer_profile_compatibility(
+    profile_id: str,
+    payload: PrinterCompatibilityRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_READ)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    del identity
+    try:
+        return PrinterProfileService(db, request.app.state.config).compatibility(
+            profile_id, payload.template_version_id
+        )
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+    except (PrinterProfileRejected, PrintingContractError, PrintingSecurityError, ValueError) as exc:
         raise _safe_error(exc) from exc
