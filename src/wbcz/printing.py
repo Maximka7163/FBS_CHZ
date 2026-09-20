@@ -430,6 +430,8 @@ class PhysicalLabelRaster:
     datamatrix_bounds_px: tuple[int, int, int, int]
     module_pixels: int
     effective_module_mm: float
+    physical_offset_x_px: int = 0
+    physical_offset_y_px: int = 0
 
 
 def libdmtx_version() -> str:
