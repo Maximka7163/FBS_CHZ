@@ -318,7 +318,6 @@ class LocalPrintingService:
             vault_entry_id=vault_entry_id,
             gtin=gtin,
             cis_hmac=self._hmac(cis),
-            cis_tail=cis[-8:] if len(cis) >= 8 else None,
             vault_item_ordinal=vault_item_ordinal,
             vault_item_offset=vault_item_offset,
             vault_item_length=len(full_km),
