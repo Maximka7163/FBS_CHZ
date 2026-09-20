@@ -1357,3 +1357,61 @@ def test_printer_discovery_does_not_touch_m8_vault_and_audit_contains_only_safe_
         for forbidden in ("queue_name", "port_name", "devmode", "zpl", "epl", "cpcl", "full_km"):
             assert forbidden not in blob.casefold()
         assert profile.state == "ACTIVE"
+
+
+
+def test_printer_discovery_requires_v2_discovery_capability_and_exact_binding(factory):
+    with factory() as db:
+        user, org, participant = _tenant(db, "printer-capability", "7707083893")
+        _scope(db, user, org, participant)
+        binding = _v2_binding(db, org, participant)
+        binding.supported_capabilities_json = [
+            "PRINTING_SENSITIVE_DELIVERY_V1",
+            "HPKE_X25519_AES128GCM_V1",
+        ]
+        db.flush()
+        service = PrinterProfileService(db, _cfg(execute=True))
+        with pytest.raises(PrinterProfileRejected, match="PRINT_DISCOVER_PRINTERS_CAPABILITY_REQUIRED"):
+            service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+
+        binding.supported_capabilities_json = [
+            "PRINTING_SENSITIVE_DELIVERY_V1",
+            "HPKE_X25519_AES128GCM_V1",
+            "PRINT_DISCOVER_PRINTERS",
+        ]
+        db.flush()
+        run = service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+        assert run.agent_binding_id == binding.id
+
+        other = AgentBindingRecord(
+            organisation_id=org.id,
+            participant_id=participant.id,
+            installation_id=str(uuid4()),
+            display_name="Other synthetic agent",
+            protocol_version="m15-v1",
+            agent_version="0.5.1",
+            credential_hash=hashlib.sha256(uuid4().bytes).hexdigest(),
+            credential_version=1,
+            state="ACTIVE",
+            is_primary=False,
+            last_seen_at=datetime.now(timezone.utc),
+            protocol_compatibility_state="COMPATIBLE",
+            supported_job_types_json=[],
+            supported_capabilities_json=[
+                "PRINTING_SENSITIVE_DELIVERY_V1",
+                "HPKE_X25519_AES128GCM_V1",
+                "PRINT_DISCOVER_PRINTERS",
+            ],
+            capabilities_sanitized={},
+        )
+        db.add(other)
+        db.flush()
+        assert service.fetch_agent_job(machine_binding_id=other.id) is None
+        job = service.fetch_agent_job(machine_binding_id=binding.id)
+        assert job is not None
+        with pytest.raises(PrinterProfileRejected, match="PRINTER_DISCOVERY_JOB_NOT_FOUND"):
+            service.complete_agent_job(
+                job_id=job["job_id"],
+                machine_binding_id=other.id,
+                observations=[],
+            )
