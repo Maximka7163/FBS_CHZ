@@ -21,7 +21,7 @@ from wbcz_web.models import ManualReviewCaseRecord, RemoteRateLimitStateRecord
 from wbcz_web.services.tenant import active_tenant
 
 
-EXPECTED_MIGRATION_REVISION = "0016_m15_production_hardening"
+EXPECTED_MIGRATION_REVISION = "0017_printing_local_foundation"
 
 
 class RetryClassification(StrEnum):
