@@ -68,7 +68,11 @@ class PrintTemplateRecord(Base):
     participant_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
-    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    current_version_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("print_template_versions.id", ondelete="RESTRICT", use_alter=True, name="fk_print_template_current_version"),
+        nullable=True,
+    )
     created_by_user_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -133,7 +137,11 @@ class PrintJobRecord(Base):
     printer_profile_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     metadata_sanitized_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    original_print_event_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    original_print_event_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("print_events.id", ondelete="RESTRICT", use_alter=True, name="fk_print_job_original_event"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
