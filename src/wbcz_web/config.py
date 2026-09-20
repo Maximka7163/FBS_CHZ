@@ -128,6 +128,10 @@ class WebConfig:
     print_execution_enabled: bool = False
     suz_full_km_remote_acquisition_enabled: bool = False
     suz_km_keyring_root: str | None = None
+    print_delivery_reservation_ttl_seconds: int = 600
+    print_delivery_max_issuance: int = 3
+    print_key_intent_ttl_seconds: int = 600
+    max_print_delivery_vault_entry_bytes: int = 8 * 1024 * 1024
 
     def organisation_document_config(self) -> P0OrganisationConfig | None:
         if self.organisation_type is None:
@@ -206,6 +210,14 @@ class WebConfig:
             raise ValueError("Physical print execution requires the participant-bound Windows agent")
         if self.printing_enabled and self.environment == "production" and not self.suz_km_keyring_root:
             raise ValueError("WBCZ_SUZ_KM_KEYRING_ROOT is required for production local printability")
+        if not 30 <= self.print_delivery_reservation_ttl_seconds <= 600:
+            raise ValueError("WBCZ_PRINT_DELIVERY_RESERVATION_TTL_SECONDS is out of range")
+        if not 1 <= self.print_delivery_max_issuance <= 3:
+            raise ValueError("WBCZ_PRINT_DELIVERY_MAX_ISSUANCE is out of range")
+        if not 60 <= self.print_key_intent_ttl_seconds <= 900:
+            raise ValueError("WBCZ_PRINT_KEY_INTENT_TTL_SECONDS is out of range")
+        if not 1024 <= self.max_print_delivery_vault_entry_bytes <= 64 * 1024 * 1024:
+            raise ValueError("WBCZ_MAX_PRINT_DELIVERY_VAULT_ENTRY_BYTES is out of range")
         if self.true_api_reports_enabled and not self.agent_enabled:
             raise ValueError("True API reports require the Windows agent boundary")
         if self.report_artifact_root is not None and not self.report_artifact_root.strip():
@@ -404,6 +416,10 @@ class WebConfig:
             print_execution_enabled=_env_bool("WBCZ_PRINT_EXECUTION_ENABLED", False),
             suz_full_km_remote_acquisition_enabled=_env_bool("WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED", False),
             suz_km_keyring_root=os.getenv("WBCZ_SUZ_KM_KEYRING_ROOT", "").strip() or None,
+            print_delivery_reservation_ttl_seconds=int(os.getenv("WBCZ_PRINT_DELIVERY_RESERVATION_TTL_SECONDS", "600")),
+            print_delivery_max_issuance=int(os.getenv("WBCZ_PRINT_DELIVERY_MAX_ISSUANCE", "3")),
+            print_key_intent_ttl_seconds=int(os.getenv("WBCZ_PRINT_KEY_INTENT_TTL_SECONDS", "600")),
+            max_print_delivery_vault_entry_bytes=int(os.getenv("WBCZ_MAX_PRINT_DELIVERY_VAULT_ENTRY_BYTES", str(8 * 1024 * 1024))),
             cookie_secure=secure,
             session_cookie_name=os.getenv("WBCZ_SESSION_COOKIE_NAME", "wbcz_session").strip(),
             csrf_cookie_name=os.getenv("WBCZ_CSRF_COOKIE_NAME", "wbcz_csrf").strip(),
