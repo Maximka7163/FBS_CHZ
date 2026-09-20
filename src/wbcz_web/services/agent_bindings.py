@@ -208,6 +208,26 @@ class AgentBindingService:
                     execution.state = "BLOCKED"
                     execution.safe_error_code = "AGENT_BINDING_DISABLED"
                     execution.terminal_at = now
+        executions = list(self.db.scalars(
+            select(PrintExecutionRecord)
+            .where(
+                PrintExecutionRecord.agent_binding_id == row.id,
+                PrintExecutionRecord.state.in_((
+                    "REQUESTED","AUTHORIZED","PAYLOAD_AVAILABLE","PAYLOAD_ISSUED",
+                    "PAYLOAD_DELIVERED","RENDERED_VERIFIED","SPOOL_SUBMITTING","SPOOL_JOB_CREATED",
+                )),
+            )
+            .with_for_update()
+        ))
+        for execution in executions:
+            if execution.state in {"SPOOL_SUBMITTING", "SPOOL_JOB_CREATED"}:
+                execution.state = "UNKNOWN_AFTER_SPOOL"
+                execution.safe_error_code = "AGENT_BINDING_DISABLED_AFTER_SPOOL_BOUNDARY"
+            else:
+                execution.state = "BLOCKED"
+                execution.safe_error_code = "AGENT_BINDING_DISABLED"
+            execution.terminal_at = now
+
         for key in keys:
             key.state = "REVOKED"
             key.revoked_at = now
