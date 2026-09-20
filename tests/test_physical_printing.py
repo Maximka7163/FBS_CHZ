@@ -280,35 +280,39 @@ def test_crash_before_boundary_is_pre_spool_but_crash_after_local_boundary_block
 
 def test_payload_hash_layout_hash_and_local_profile_fingerprint_fail_before_spool(tmp_path):
     local, control, render_contract = contracts()
-    physical, replay, events, _, _ = runtime(tmp_path)
-    with pytest.raises(Exception):
-        physical.execute(
-            {**control, "payload_sha256": "0" * 64},
-            render_contract,
-            full_km=SYNTHETIC_PREVIEW_FULL_KM,
-        )
-    assert replay.get("exec-1") is None
 
-    with pytest.raises(Exception):
-        physical.execute(
-            {**control, "layout_sha256": "0" * 64},
-            render_contract,
-            full_km=SYNTHETIC_PREVIEW_FULL_KM,
-        )
-    assert replay.get("exec-1") is None
+    physical, replay, _, _, _ = runtime(tmp_path / "hash")
+    result = physical.execute(
+        {**control, "payload_sha256": "0" * 64},
+        render_contract,
+        full_km=SYNTHETIC_PREVIEW_FULL_KM,
+    )
+    assert result["state"] == "BLOCKED"
+    assert replay.get("exec-1")["state"] == "BLOCKED"
+
+    physical2, replay2, _, _, _ = runtime(tmp_path / "layout")
+    result = physical2.execute(
+        {**control, "layout_sha256": "0" * 64},
+        render_contract,
+        full_km=SYNTHETIC_PREVIEW_FULL_KM,
+    )
+    assert result["state"] == "BLOCKED"
+    assert replay2.get("exec-1")["state"] == "BLOCKED"
 
     changed = replace(local, driver_name="Changed Driver")
+    replay3 = AgentPhysicalReplayStore(tmp_path / "profile" / "physical.sqlite")
     bad = PhysicalPrintRuntime(
         resolver=LocalPrinterResolver(FakeDiscovery(changed)),
         spooler=FakeGdiRasterSpooler(),
-        replay=replay,
+        replay=replay3,
         mark_rendered=lambda payload: payload,
         begin_spool=lambda payload: payload,
         report_result=lambda payload: payload,
     )
-    with pytest.raises(Exception, match="PRINTER_PROFILE_FINGERPRINT_CHANGED"):
-        bad.execute(control, render_contract, full_km=SYNTHETIC_PREVIEW_FULL_KM)
-    assert replay.get("exec-1") is None
+    result = bad.execute(control, render_contract, full_km=SYNTHETIC_PREVIEW_FULL_KM)
+    assert result["state"] == "FAILED_PRE_SPOOL"
+    assert result["safe_error_code"] == "PRINTER_PROFILE_FINGERPRINT_CHANGED"
+    assert replay3.get("exec-1")["state"] == "FAILED_PRE_SPOOL"
 
 
 def test_windows_status_normalization_never_claims_physical_proof():
