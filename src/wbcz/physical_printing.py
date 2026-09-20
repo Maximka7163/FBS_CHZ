@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import ctypes
 from ctypes import wintypes
@@ -561,7 +561,7 @@ class WindowsGdiRasterSpooler:
             buffer = ctypes.create_string_buffer(raw)
             scanlines = self.gdi32.SetDIBitsToDevice(
                 hdc,
-                0, 0,
+                -raster.physical_offset_x_px, -raster.physical_offset_y_px,
                 raster.image.width, raster.image.height,
                 0, 0,
                 0, raster.image.height,
@@ -782,6 +782,16 @@ class PhysicalPrintRuntime:
         )
         if raster.layout_sha256 != control.layout_sha256:
             raise PhysicalPrintSecurityError("physical layout SHA-256 mismatch")
+        if (
+            raster.image.width != render_contract.physical_width_px
+            or raster.image.height != render_contract.physical_height_px
+        ):
+            raise PrintingContractError("final raster does not exactly match approved physical media pixels")
+        raster = replace(
+            raster,
+            physical_offset_x_px=render_contract.offset_x_px,
+            physical_offset_y_px=render_contract.offset_y_px,
+        )
 
         self.replay.record(
             execution_id=control.execution_id,
