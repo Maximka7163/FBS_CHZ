@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -15,18 +15,26 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from cryptography.hazmat.primitives.asymmetric import x25519
+
+from wbcz.printing_sensitive import open_full_km
 from wbcz.suz_foundation import KmVault, VaultBinding, envelope_to_persistence
 from wbcz_web.auth import hash_password
 from wbcz_web.config import WebConfig
 from wbcz_web.db import build_session_factory
 from wbcz_web.models import (
+    AgentBindingEncryptionKeyRecord,
+    AgentBindingRecord,
     AuditEventRecord,
     MembershipRecord,
     OrganisationRecord,
     ParticipantRecord,
+    PrintEncryptionKeyIntentRecord,
+    PrintExecutionRecord,
     PrintEventRecord,
     PrintJobItemRecord,
     PrintJobRecord,
+    PrintPayloadDeliveryReservationRecord,
     PrintTemplateVersionRecord,
     StoredFullKmItemRecord,
     SuzCodeBlockRecord,
@@ -42,6 +50,11 @@ from wbcz_web.services.printing import (
     NOT_PRINTABLE,
     PRINTABLE,
     PrintingIntegrityError,
+)
+from wbcz_web.services.agent_bindings import AgentBindingService
+from wbcz_web.services.printing_sensitive_delivery import (
+    SensitiveDeliveryRejected,
+    SensitivePrintingDeliveryService,
 )
 from wbcz_web.services.tenant import bind_tenant_scope
 
@@ -62,7 +75,7 @@ class StaticKeyProvider:
         return VAULT_KEY
 
 
-PRINTING_MIGRATION = "0017_printing_local_foundation"
+PRINTING_MIGRATION = "0018_printing_sensitive_delivery"
 PRINTING_TABLES = {
     "users",
     "organisations",
@@ -72,6 +85,10 @@ PRINTING_TABLES = {
     "print_jobs",
     "print_job_items",
     "print_events",
+    "agent_binding_encryption_keys",
+    "print_encryption_key_intents",
+    "print_executions",
+    "print_payload_delivery_reservations",
 }
 PRINTING_TRIGGERS = {
     "trg_print_template_versions_immutable",
@@ -652,3 +669,295 @@ def test_printing_tables_have_no_plaintext_full_km_column(factory):
             assert "full_km" not in names
             assert "payload" not in names
         assert "full_km_sha256" in {c["name"] for c in inspector.get_columns("stored_full_km_items")}
+
+
+
+def _v2_binding(db: Session, org: OrganisationRecord, participant: ParticipantRecord) -> AgentBindingRecord:
+    row = AgentBindingRecord(
+        organisation_id=org.id,
+        participant_id=participant.id,
+        installation_id="print-v2-" + uuid4().hex,
+        display_name="Printing v2 synthetic agent",
+        protocol_version="m15-v1",
+        agent_version="0.5.1",
+        credential_hash=hashlib.sha256(uuid4().bytes).hexdigest(),
+        credential_version=1,
+        state="ACTIVE",
+        is_primary=True,
+        last_seen_at=datetime.now(timezone.utc),
+        protocol_compatibility_state="COMPATIBLE",
+        supported_job_types_json=[],
+        supported_capabilities_json=[
+            "PRINTING_SENSITIVE_DELIVERY_V1",
+            "HPKE_X25519_AES128GCM_V1",
+        ],
+        capabilities_sanitized={},
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _sensitive_ready(db: Session, *, full_km: bytes = SYNTHETIC_FULL_KM):
+    user, org, participant = _tenant(db, "v2", "7707083893")
+    _, stored, _, _, vault = _seed_vault(
+        db, user=user, org=org, participant=participant, full_km=full_km
+    )
+    printing = _service(db, execute=True)
+    template = printing.create_template(
+        name="Sensitive delivery",
+        label_width_mm=50,
+        label_height_mm=35,
+        layout=_layout("Sensitive"),
+        user_id=user.id,
+    )
+    version = db.get(PrintTemplateVersionRecord, template.current_version_id)
+    assert version is not None
+    job = printing.create_print_job(
+        stored_item_ids=[stored.id],
+        template_version_id=version.id,
+        user_id=user.id,
+    )
+    item = db.scalar(select(PrintJobItemRecord).where(PrintJobItemRecord.print_job_id == job.id))
+    assert item is not None
+    binding = _v2_binding(db, org, participant)
+    sensitive = SensitivePrintingDeliveryService(
+        db, _cfg(execute=True), key_provider=StaticKeyProvider()
+    )
+    private = x25519.X25519PrivateKey.generate()
+    intent, raw = sensitive.create_key_intent(binding.id, purpose="FIRST_REGISTRATION", user_id=user.id)
+    key = sensitive.register_public_key(
+        agent_binding_id=binding.id,
+        intent_token=raw,
+        public_key_raw=private.public_key().public_bytes_raw(),
+    )
+    execution, reservation = sensitive.authorize_delivery(
+        print_job_id=job.id,
+        print_job_item_id=item.id,
+        agent_binding_id=binding.id,
+        user_id=user.id,
+    )
+    return user, org, participant, stored, vault, job, item, binding, key, private, sensitive, execution, reservation
+
+
+def test_0018_sensitive_delivery_schema_has_no_secret_payload_columns(factory):
+    with factory() as db:
+        inspector = inspect(db.get_bind())
+        expected = {
+            "agent_binding_encryption_keys",
+            "print_encryption_key_intents",
+            "print_executions",
+            "print_payload_delivery_reservations",
+        }
+        assert expected.issubset(set(inspector.get_table_names()))
+        for table in expected:
+            names = {column["name"].lower() for column in inspector.get_columns(table)}
+            assert "full_km" not in names
+            assert "private_key" not in names
+            assert "ciphertext" not in names
+            assert "cek" not in names
+        key_columns = {column["name"] for column in inspector.get_columns("agent_binding_encryption_keys")}
+        assert {"public_key", "public_key_fingerprint", "key_version", "state"}.issubset(key_columns)
+
+
+def test_sensitive_delivery_exact_hpke_roundtrip_reissue_ack_and_canary_redaction(factory):
+    canary = (
+        SYNTHETIC_CIS + "\x1d91PHASEA\x1d92SENSITIVE-CANARY-7f193a"
+    ).encode("utf-8")
+    with factory() as db:
+        (
+            _, _, _, _, _, _, item, binding, key, private, sensitive, execution, reservation
+        ) = _sensitive_ready(db, full_km=canary)
+
+        envelopes = [
+            sensitive.issue(reservation.id, machine_binding_id=binding.id)
+            for _ in range(3)
+        ]
+        for envelope in envelopes:
+            plaintext = open_full_km(
+                recipient_private_key_raw=private.private_bytes_raw(),
+                enc_b64=envelope["enc"],
+                ciphertext_b64=envelope["ciphertext"],
+                context=envelope["context"],
+            )
+            assert plaintext == canary
+            assert hashlib.sha256(plaintext).hexdigest() == item.payload_hash
+        with pytest.raises(SensitiveDeliveryRejected, match="DELIVERY_ISSUE_LIMIT_REACHED"):
+            sensitive.issue(reservation.id, machine_binding_id=binding.id)
+
+        # A max-issue rejection blocks that reservation, so create a second
+        # execution only after explicitly terminalizing the first synthetic attempt.
+        reservation.state = "REVOKED"
+        execution.state = "CANCELLED_PRE_SPOOL"
+        execution.terminal_at = datetime.now(timezone.utc)
+        db.flush()
+        second_execution, second_reservation = sensitive.authorize_delivery(
+            print_job_id=execution.print_job_id,
+            print_job_item_id=execution.print_job_item_id,
+            agent_binding_id=binding.id,
+            user_id=db.scalar(select(User.id).where(User.username.like("print-v2-%"))),
+        )
+        envelope = sensitive.issue(second_reservation.id, machine_binding_id=binding.id)
+        ack = sensitive.acknowledge(
+            second_reservation.id,
+            machine_binding_id=binding.id,
+            payload_sha256=envelope["payload_sha256"],
+            context_sha256=envelope["context_sha256"],
+        )
+        assert ack["state"] == "ACKNOWLEDGED"
+        assert second_execution.state == "PAYLOAD_DELIVERED"
+        assert second_reservation.state == "ACKNOWLEDGED"
+
+        needle = canary.decode("utf-8")
+        for model in (
+            PrintExecutionRecord,
+            PrintPayloadDeliveryReservationRecord,
+            AgentBindingEncryptionKeyRecord,
+            PrintEncryptionKeyIntentRecord,
+            AuditEventRecord,
+        ):
+            rows = list(db.scalars(select(model)))
+            assert needle not in json.dumps([str(row.__dict__) for row in rows], ensure_ascii=False)
+        agent_payloads = list(db.execute(text("SELECT payload_json::text FROM agent_jobs")).scalars())
+        assert all(needle not in (value or "") for value in agent_payloads)
+        assert key.public_key != canary
+
+
+def test_print_key_intent_is_one_use_and_rotation_retires_old_key(factory):
+    with factory() as db:
+        user, _, _, _, _, _, _, binding, first, _, sensitive, execution, reservation = _sensitive_ready(db)
+        with pytest.raises(SensitiveDeliveryRejected, match="PRINT_KEY_INTENT_ALREADY_USED"):
+            # The first intent token is deliberately unavailable here; verify bearer-only
+            # replacement fails by supplying a non-authorized token.
+            sensitive.register_public_key(
+                agent_binding_id=binding.id,
+                intent_token="x" * 64,
+                public_key_raw=x25519.X25519PrivateKey.generate().public_key().public_bytes_raw(),
+            )
+        intent, raw = sensitive.create_key_intent(binding.id, purpose="ROTATE", user_id=user.id)
+        second_private = x25519.X25519PrivateKey.generate()
+        second = sensitive.register_public_key(
+            agent_binding_id=binding.id,
+            intent_token=raw,
+            public_key_raw=second_private.public_key().public_bytes_raw(),
+        )
+        assert first.state == "RETIRING"
+        assert first.retiring_at is not None
+        assert second.state == "ACTIVE"
+        assert second.key_version == first.key_version + 1
+        assert reservation.agent_encryption_key_id == first.id
+        # Already-bound reservation remains usable with the retiring key.
+        envelope = sensitive.issue(reservation.id, machine_binding_id=binding.id)
+        assert envelope["recipient_key_version"] == first.key_version
+
+        expired, expired_raw = sensitive.create_key_intent(binding.id, purpose="ROTATE", user_id=user.id)
+        expired.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.flush()
+        with pytest.raises(SensitiveDeliveryRejected, match="PRINT_KEY_INTENT_EXPIRED"):
+            sensitive.register_public_key(
+                agent_binding_id=binding.id,
+                intent_token=expired_raw,
+                public_key_raw=x25519.X25519PrivateKey.generate().public_key().public_bytes_raw(),
+            )
+
+
+def test_binding_disable_revokes_recipient_keys_and_active_reservation(factory):
+    with factory() as db:
+        user, _, _, _, _, _, _, binding, key, _, _, execution, reservation = _sensitive_ready(db)
+        AgentBindingService(db).disable(binding.id, user_id=user.id)
+        assert key.state == "REVOKED"
+        assert reservation.state == "REVOKED"
+        assert reservation.safe_error_code == "AGENT_BINDING_DISABLED"
+        assert execution.state == "BLOCKED"
+        assert execution.safe_error_code == "AGENT_BINDING_DISABLED"
+
+
+def test_wrong_ack_fails_closed_before_spool(factory):
+    with factory() as db:
+        _, _, _, _, _, _, _, binding, _, _, sensitive, execution, reservation = _sensitive_ready(db)
+        envelope = sensitive.issue(reservation.id, machine_binding_id=binding.id)
+        with pytest.raises(SensitiveDeliveryRejected, match="DELIVERY_ACK_INTEGRITY_MISMATCH"):
+            sensitive.acknowledge(
+                reservation.id,
+                machine_binding_id=binding.id,
+                payload_sha256="0" * 64,
+                context_sha256=envelope["context_sha256"],
+            )
+        assert reservation.state == "BLOCKED"
+        assert execution.state == "FAILED_PRE_SPOOL"
+
+
+def test_oversized_encrypted_vault_entry_is_blocked_before_delivery(factory):
+    oversized = SYNTHETIC_CIS.encode("utf-8") + b"A" * 4096
+    with factory() as db:
+        user, org, participant = _tenant(db, "oversized", "7707083893")
+        _, stored, _, _, _ = _seed_vault(
+            db, user=user, org=org, participant=participant, full_km=oversized
+        )
+        printing = _service(db, execute=True)
+        template = printing.create_template(
+            name="Oversized",
+            label_width_mm=50,
+            label_height_mm=35,
+            layout=_layout("Oversized"),
+            user_id=user.id,
+        )
+        job = printing.create_print_job(
+            stored_item_ids=[stored.id],
+            template_version_id=template.current_version_id,
+            user_id=user.id,
+        )
+        item = db.scalar(select(PrintJobItemRecord).where(PrintJobItemRecord.print_job_id == job.id))
+        binding = _v2_binding(db, org, participant)
+        cfg = replace(_cfg(execute=True), max_print_delivery_vault_entry_bytes=1024).validate_for_startup()
+        sensitive = SensitivePrintingDeliveryService(db, cfg, key_provider=StaticKeyProvider())
+        private = x25519.X25519PrivateKey.generate()
+        _, raw = sensitive.create_key_intent(binding.id, purpose="FIRST_REGISTRATION", user_id=user.id)
+        sensitive.register_public_key(
+            agent_binding_id=binding.id,
+            intent_token=raw,
+            public_key_raw=private.public_key().public_bytes_raw(),
+        )
+        with pytest.raises(SensitiveDeliveryRejected, match="VAULT_ENTRY_TOO_LARGE_FOR_SAFE_PRINT_DELIVERY"):
+            sensitive.authorize_delivery(
+                print_job_id=job.id,
+                print_job_item_id=item.id,
+                agent_binding_id=binding.id,
+                user_id=user.id,
+            )
+
+
+def test_foreign_participant_binding_cannot_authorize_delivery(factory):
+    with factory() as db:
+        user, org, participant = _tenant(db, "tenant-a", "7707083893")
+        _, stored, _, _, _ = _seed_vault(db, user=user, org=org, participant=participant)
+        printing = _service(db, execute=True)
+        template = printing.create_template(
+            name="Tenant A",
+            label_width_mm=50,
+            label_height_mm=35,
+            layout=_layout("Tenant A"),
+            user_id=user.id,
+        )
+        job = printing.create_print_job(
+            stored_item_ids=[stored.id],
+            template_version_id=template.current_version_id,
+            user_id=user.id,
+        )
+        item = db.scalar(select(PrintJobItemRecord).where(PrintJobItemRecord.print_job_id == job.id))
+        participant_b = _second_participant(db, org, "500100732259")
+        bind_tenant_scope(
+            db, organisation_id=org.id, participant_id=participant_b.id, user_id=user.id, role="OWNER"
+        )
+        foreign_binding = _v2_binding(db, org, participant_b)
+        bind_tenant_scope(
+            db, organisation_id=org.id, participant_id=participant.id, user_id=user.id, role="OWNER"
+        )
+        sensitive = SensitivePrintingDeliveryService(db, _cfg(execute=True), key_provider=StaticKeyProvider())
+        with pytest.raises(SensitiveDeliveryRejected, match="AGENT_BINDING_NOT_FOUND"):
+            sensitive.authorize_delivery(
+                print_job_id=job.id,
+                print_job_item_id=item.id,
+                agent_binding_id=foreign_binding.id,
+                user_id=user.id,
+            )
