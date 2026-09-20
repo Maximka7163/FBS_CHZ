@@ -442,6 +442,56 @@ class PrinterProfileService:
         )
         return {"state": "COMPLETED", "printer_count": len(parsed)}
 
+    def fail_agent_job(
+        self,
+        *,
+        job_id: str,
+        machine_binding_id: str,
+        safe_error_code: str,
+    ) -> dict[str, Any]:
+        self._require_printing()
+        binding = self._binding(machine_binding_id, lock=True)
+        job = self.db.scalar(
+            select(AgentJobRecord)
+            .where(
+                AgentJobRecord.job_id == job_id,
+                AgentJobRecord.organisation_id == self.scope.organisation_id,
+                AgentJobRecord.participant_id == self.scope.participant_id,
+                AgentJobRecord.agent_binding_id == binding.id,
+                AgentJobRecord.job_type == "PRINTER_DISCOVERY",
+            )
+            .with_for_update()
+        )
+        if job is None:
+            raise PrinterProfileRejected("PRINTER_DISCOVERY_JOB_NOT_FOUND")
+        run = self._run(job.operation_id, lock=True)
+        code = (safe_error_code or "PRINTER_DISCOVERY_FAILED")[:80]
+        run.state = "FAILED"
+        run.completed_at = _now()
+        run.safe_error_code = code
+        job.state = "COMPLETED"
+        job.last_error_code = code
+        job.result_sha256 = _json_sha({"status": "FAILED", "safe_error_code": code})
+        job.result_json = {"status": "FAILED", "safe_error_code": code}
+        job.lease_expires_at = None
+        self.db.flush()
+        self._audit(
+            "PRINTER_DISCOVERY_COMPLETED",
+            subject_id=binding.id,
+            actor_kind=ActorKind.WINDOWS_AGENT,
+            outcome=AuditOutcome.FAILED,
+            metadata={
+                "binding_id": binding.id,
+                "state": run.state,
+                "discovery_request_id": run.id,
+                "printer_count": 0,
+                "safe_reason_code": code,
+            },
+            event_key=f"printer-discovery:{run.id}:failed:{code}",
+        )
+        return {"state": "FAILED", "safe_error_code": code}
+
+
     def _reconcile_profile(
         self,
         binding_id: str,
