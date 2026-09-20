@@ -250,6 +250,7 @@ class SensitivePrintingDeliveryService:
             else:
                 active.state = "RETIRING"
                 active.retiring_at = now
+            self.db.flush()
 
         highest = int(self.db.scalar(
             select(func.coalesce(func.max(AgentBindingEncryptionKeyRecord.key_version), 0)).where(
