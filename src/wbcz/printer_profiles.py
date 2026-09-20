@@ -357,9 +357,9 @@ class BoundedPrinterDiscovery:
     ) -> None:
         if not 1 <= max_printers <= MAX_PRINTERS_HARD:
             raise ValueError("max_printers out of range")
-        if not 0.1 <= enumerate_timeout_seconds <= 30:
+        if not 0.01 <= enumerate_timeout_seconds <= 30:
             raise ValueError("enumerate timeout out of range")
-        if not 0.1 <= per_printer_timeout_seconds <= 30:
+        if not 0.01 <= per_printer_timeout_seconds <= 30:
             raise ValueError("printer timeout out of range")
         self.backend = backend
         self.max_printers = max_printers
