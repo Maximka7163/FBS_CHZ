@@ -15,10 +15,13 @@ from typing import Callable, Protocol
 from cryptography.hazmat.primitives.asymmetric import x25519
 
 from wbcz.printing_sensitive import (
+    ENVELOPE_VERSION,
     PRINT_PROTOCOL_VERSION,
     REQUIRED_CAPABILITIES,
+    SUITE_ID,
     SensitiveEnvelopeError,
     b64e,
+    context_sha256,
     open_full_km,
     public_key_fingerprint,
 )
@@ -64,10 +67,9 @@ class DpapiProtector:
                 ctypes.byref(result),
             )
         else:
-            description = ctypes.c_wchar_p()
             ok = crypt32.CryptUnprotectData(
                 ctypes.byref(source),
-                ctypes.byref(description),
+                None,
                 None,
                 None,
                 None,
@@ -258,6 +260,13 @@ class SensitiveDeliveryAgent:
         context = envelope["context"]
         if not isinstance(context, dict):
             raise SensitiveEnvelopeError("printing-agent-v2 context missing")
+        if envelope["envelope_version"] != ENVELOPE_VERSION or envelope["hpke_suite_id"] != SUITE_ID:
+            raise SensitiveEnvelopeError("unsupported printing HPKE envelope")
+        if context_sha256(context) != envelope["context_sha256"]:
+            raise SensitiveEnvelopeError("delivery context SHA-256 mismatch")
+        local = self.key_store.public_metadata()
+        if local.get("server_key_version") != int(envelope["recipient_key_version"]):
+            raise SensitiveEnvelopeError("recipient key version mismatch")
         private_raw = self.key_store.open_private_key()
         plaintext = b""
         try:
