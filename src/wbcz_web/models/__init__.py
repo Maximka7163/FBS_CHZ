@@ -18,6 +18,10 @@ from .printing import (
     StoredFullKmItemRecord, PrintTemplateRecord, PrintTemplateVersionRecord,
     PrintJobRecord, PrintJobItemRecord, PrintEventRecord,
 )
+from .printing_sensitive import (
+    AgentBindingEncryptionKeyRecord, PrintEncryptionKeyIntentRecord,
+    PrintExecutionRecord, PrintPayloadDeliveryReservationRecord,
+)
 
 __all__ = [
     "AuditLog", "Base", "CheckRecord", "ControlRun", "EventRecord", "ImportRecord",
@@ -38,6 +42,8 @@ __all__ = [
     "RemoteRateLimitStateRecord", "AgentEnrollmentTokenRecord",
     "StoredFullKmItemRecord", "PrintTemplateRecord", "PrintTemplateVersionRecord",
     "PrintJobRecord", "PrintJobItemRecord", "PrintEventRecord",
+    "AgentBindingEncryptionKeyRecord", "PrintEncryptionKeyIntentRecord",
+    "PrintExecutionRecord", "PrintPayloadDeliveryReservationRecord",
     "OrganisationRecord", "ParticipantRecord", "MembershipRecord", "PermissionRecord",
     "RolePermissionRecord", "InvitationRecord", "ParticipantClaimRecord", "PasswordHistoryRecord", "LoginAttemptRecord", "LoginThrottleStateRecord", "BootstrapRecord",
 ]
