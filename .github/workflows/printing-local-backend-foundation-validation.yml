@@ -35,7 +35,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
           unexpected="$(git diff --name-only "$PRINTING_BASE_SHA" HEAD -- migrations/versions | grep -v '^migrations/versions/0017_printing_local_foundation.py$' || true)"
           test -z "$unexpected" || { echo "historical migrations changed: $unexpected"; exit 1; }
-      - name: Install independent DataMatrix decoder runtime
+      - name: Install libdmtx DataMatrix encoder runtime
         run: |
           sudo apt-get update
           if apt-cache show libdmtx0b >/dev/null 2>&1; then
@@ -47,7 +47,7 @@ jobs:
         run: |
           python -m pip install -r requirements.production.lock
           python -m pip install --no-deps -e .
-          python -m pip install "setuptools==84.0.0" "pytest==9.1.1" "httpx==0.28.1" "pylibdmtx==0.1.10" "Pillow==11.3.0" "numpy==2.3.3"
+          python -m pip install "pytest==9.1.1" "httpx==0.28.1" "zxing-cpp==3.1.1" "numpy==2.3.3"
       - name: Dependency lock contract
         run: python scripts/m15_verify_dependency_lock.py
       - name: Compile printing and web modules
@@ -101,7 +101,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install independent DataMatrix decoder runtime
+      - name: Install libdmtx DataMatrix encoder runtime
         run: |
           sudo apt-get update
           if apt-cache show libdmtx0b >/dev/null 2>&1; then
@@ -113,7 +113,7 @@ jobs:
         run: |
           python -m pip install -r requirements.production.lock
           python -m pip install --no-deps -e .
-          python -m pip install "setuptools==84.0.0" "pytest==9.1.1" "httpx==0.28.1" "pylibdmtx==0.1.10" "Pillow==11.3.0" "numpy==2.3.3"
+          python -m pip install "pytest==9.1.1" "httpx==0.28.1" "zxing-cpp==3.1.1" "numpy==2.3.3"
       - name: Exact migration head
         run: test "$(alembic heads | awk '{print $1}')" = "$PRINTING_MIGRATION"
       - name: Fresh database to 0017
