@@ -115,6 +115,14 @@ class PrintExecutionRecord(Base):
     agent_version: Mapped[str] = mapped_column(String(64), nullable=False)
     print_protocol_version: Mapped[str] = mapped_column(String(32), nullable=False)
     renderer_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    printer_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    printer_profile_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    windows_spool_job_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    last_windows_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rendered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    spool_submitting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    spool_job_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    spooler_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payload_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -154,18 +162,32 @@ class PrintExecutionRecord(Base):
             name="fk_print_execution_binding_tenant",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["printer_profile_id", "organisation_id", "participant_id"],
+            ["printer_profiles.id", "printer_profiles.organisation_id", "printer_profiles.participant_id"],
+            name="fk_print_execution_printer_profile_tenant",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint("print_job_item_id", "attempt_number", name="uq_print_execution_item_attempt"),
         UniqueConstraint("id", "organisation_id", "participant_id", name="uq_print_execution_id_tenant"),
         CheckConstraint("attempt_number >= 1", name="ck_print_execution_attempt_positive"),
         CheckConstraint(
-            "state IN ('REQUESTED','AUTHORIZED','PAYLOAD_AVAILABLE','PAYLOAD_ISSUED','PAYLOAD_DELIVERED','FAILED_PRE_SPOOL','BLOCKED','CANCELLED_PRE_SPOOL')",
+            "state IN ('REQUESTED','AUTHORIZED','PAYLOAD_AVAILABLE','PAYLOAD_ISSUED','PAYLOAD_DELIVERED','RENDERED_VERIFIED','SPOOL_SUBMITTING','SPOOL_JOB_CREATED','SPOOLER_ACCEPTED','FAILED_PRE_SPOOL','BLOCKED','UNKNOWN_AFTER_SPOOL','CANCELLED_PRE_SPOOL')",
             name="ck_print_execution_state",
         ),
         Index(
             "uq_print_execution_item_nonterminal",
             "print_job_item_id",
             unique=True,
-            postgresql_where=text("state IN ('REQUESTED','AUTHORIZED','PAYLOAD_AVAILABLE','PAYLOAD_ISSUED','PAYLOAD_DELIVERED')"),
+            postgresql_where=text("state IN ('REQUESTED','AUTHORIZED','PAYLOAD_AVAILABLE','PAYLOAD_ISSUED','PAYLOAD_DELIVERED','RENDERED_VERIFIED','SPOOL_SUBMITTING','SPOOL_JOB_CREATED')"),
+        ),
+        CheckConstraint(
+            "windows_spool_job_id IS NULL OR windows_spool_job_id > 0",
+            name="ck_print_execution_spool_job_positive",
+        ),
+        CheckConstraint(
+            "printer_profile_fingerprint IS NULL OR length(printer_profile_fingerprint)=64",
+            name="ck_print_execution_profile_fingerprint",
         ),
     )
 
