@@ -10,7 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from wbcz.windows_agent import AgentAuthError
-from wbcz_web.models import AgentBindingRecord, ParticipantRecord
+from wbcz_web.models import (
+    AgentBindingEncryptionKeyRecord, AgentBindingRecord, ParticipantRecord,
+    PrintExecutionRecord, PrintPayloadDeliveryReservationRecord,
+)
 from wbcz_web.services.audit_history import (
     ActorContext, ActorKind, AuditOutcome, AuditService, AuditTenantScope,
     AuthorizationDecision, SubjectRef, SubjectType, TraceContext,
@@ -78,7 +81,10 @@ class AgentBindingService:
                 correlation_id=trace.get("correlation_id"),
                 causation_id=trace.get("causation_id"),
                 operation_id=row.id,
-                event_key=f"m14-agent-binding:{row.id}:{event_type}:{row.credential_version}"[:256],
+                event_key=(
+                    f"m14-agent-binding:{row.id}:{event_type}:{row.credential_version}:"
+                    f"{metadata.get('key_version', '')}"
+                )[:256],
             ),
             metadata=metadata,
         )
@@ -172,9 +178,53 @@ class AgentBindingService:
         row = self._scope_row(binding_id, lock=True)
         if row.state == "ARCHIVED":
             raise ValueError("archived binding cannot be disabled")
+        now = _now()
+        keys = list(self.db.scalars(
+            select(AgentBindingEncryptionKeyRecord)
+            .where(
+                AgentBindingEncryptionKeyRecord.agent_binding_id == row.id,
+                AgentBindingEncryptionKeyRecord.state.in_(("ACTIVE", "RETIRING")),
+            )
+            .with_for_update()
+        ))
+        key_ids = [key.id for key in keys]
+        if key_ids:
+            reservations = list(self.db.scalars(
+                select(PrintPayloadDeliveryReservationRecord)
+                .where(
+                    PrintPayloadDeliveryReservationRecord.agent_encryption_key_id.in_(key_ids),
+                    PrintPayloadDeliveryReservationRecord.state.in_(("AVAILABLE", "ISSUED")),
+                )
+                .with_for_update()
+            ))
+            for reservation in reservations:
+                reservation.state = "REVOKED"
+                reservation.revoked_at = now
+                reservation.safe_error_code = "AGENT_BINDING_DISABLED"
+                execution = self.db.get(PrintExecutionRecord, reservation.print_execution_id)
+                if execution is not None and execution.state in {
+                    "REQUESTED", "AUTHORIZED", "PAYLOAD_AVAILABLE", "PAYLOAD_ISSUED", "PAYLOAD_DELIVERED"
+                }:
+                    execution.state = "BLOCKED"
+                    execution.safe_error_code = "AGENT_BINDING_DISABLED"
+                    execution.terminal_at = now
+        for key in keys:
+            key.state = "REVOKED"
+            key.revoked_at = now
+            self._audit(
+                "PRINT_AGENT_KEY_REVOKED",
+                row,
+                user_id=user_id,
+                metadata={
+                    "binding_id": row.id,
+                    "key_fingerprint": key.public_key_fingerprint,
+                    "key_version": key.key_version,
+                    "error_code": "AGENT_BINDING_DISABLED",
+                },
+            )
         row.state = "DISABLED"
         row.is_primary = False
-        row.updated_at = _now()
+        row.updated_at = now
         self.db.flush()
         self._audit(
             "AGENT_BINDING_DISABLED", row, user_id=user_id,
