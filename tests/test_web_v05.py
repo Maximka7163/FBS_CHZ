@@ -76,7 +76,7 @@ def test_frontend_cannot_override_decision(env):
 def test_control_cannot_submit(env):
  c,_=env;t=auth(c);imp=upload(c,t,make_xlsx([row(1)])).json();assert c.post("/api/operation-preview",json={"import_id":imp["id"],"mode":"CONTROL","event_ids":[]},headers={"X-CSRF-Token":t}).status_code==400;assert c.post("/api/submit",headers={"X-CSRF-Token":t}).status_code==404
 def test_capabilities_writes_disabled(env):
- c,_=env;auth(c);assert c.get("/api/capabilities").json()=={"true_api":"offline-dry-run","true_api_write":False,"document_signing":False,"submission":False,"windows_bridge":False,"registration":False}
+ c,_=env;auth(c);assert c.get("/api/capabilities").json()=={"true_api":"offline-dry-run","true_api_write":False,"document_signing":False,"submission":False,"windows_bridge":False,"registration":False,"printing":False,"print_execution":False,"suz_full_km_remote_acquisition":False}
 def test_no_production_true_api_network_route(env):
  c,_=env;t=auth(c);assert c.post("/api/true-api/cises/info",json={},headers={"X-CSRF-Token":t}).status_code==404;assert c.post("/api/lk/documents/create",json={},headers={"X-CSRF-Token":t}).status_code==404
 def test_event_history_preserved(env):
