@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -8,6 +9,8 @@ import os
 from uuid import uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
@@ -63,6 +66,15 @@ class StaticKeyProvider:
 def factory():
     cfg = WebConfig.from_env()
     fac = build_session_factory(cfg)
+    engine = fac.kw["bind"]
+    inspector = inspect(engine)
+    revision = None
+    if inspector.has_table("alembic_version"):
+        with engine.connect() as connection:
+            revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+    if revision != "0017_printing_local_foundation" or not inspector.has_table("users"):
+        alembic = AlembicConfig(str(Path(__file__).parents[1] / "alembic.ini"))
+        command.upgrade(alembic, "0017_printing_local_foundation")
     with fac() as db:
         db.execute(text("TRUNCATE TABLE users, organisations RESTART IDENTITY CASCADE"))
         db.commit()
