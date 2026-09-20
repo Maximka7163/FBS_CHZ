@@ -487,6 +487,17 @@ class _DEVMODE_PRINTER_PREFIX(ctypes.Structure):
         ("dmCopies", ctypes.c_short),
         ("dmDefaultSource", ctypes.c_short),
         ("dmPrintQuality", ctypes.c_short),
+        ("dmColor", ctypes.c_short),
+        ("dmDuplex", ctypes.c_short),
+        ("dmYResolution", ctypes.c_short),
+        ("dmTTOption", ctypes.c_short),
+        ("dmCollate", ctypes.c_short),
+        ("dmFormName", wintypes.WCHAR * 32),
+        ("dmLogPixels", wintypes.WORD),
+        ("dmBitsPerPel", wintypes.DWORD),
+        ("dmPelsWidth", wintypes.DWORD),
+        ("dmPelsHeight", wintypes.DWORD),
+        ("dmNup", wintypes.DWORD),
     ]
 
 
@@ -519,7 +530,9 @@ class WindowsGdiRasterSpooler:
     DM_OUT_BUFFER = 0x00000002
     DM_IN_BUFFER = 0x00000008
     DM_SCALE = 0x00000010
+    DM_NUP = 0x00000040
     DM_COPIES = 0x00000100
+    DMNUP_ONEUP = 2
     IDOK = 1
 
     LOGPIXELSX = 88
@@ -613,6 +626,10 @@ class WindowsGdiRasterSpooler:
             if scale_supported:
                 source_dm.dmFields = int(source_dm.dmFields) | self.DM_SCALE
                 source_dm.dmScale = 100
+            nup_supported = bool(source_fields & self.DM_NUP)
+            if nup_supported:
+                source_dm.dmFields = int(source_dm.dmFields) | self.DM_NUP
+                source_dm.dmNup = self.DMNUP_ONEUP
 
             canonical = (ctypes.c_ubyte * size)()
             result = int(self.winspool.DocumentPropertiesW(
@@ -637,6 +654,9 @@ class WindowsGdiRasterSpooler:
                 if not (effective_fields & self.DM_SCALE) or int(effective.dmScale) != 100:
                     raise DefinitePreSpoolFailure("PRINTER_DEVMODE_SCALING_UNSAFE")
                 scale_value = int(effective.dmScale)
+            if nup_supported or (effective_fields & self.DM_NUP):
+                if not (effective_fields & self.DM_NUP) or int(effective.dmNup) != self.DMNUP_ONEUP:
+                    raise DefinitePreSpoolFailure("PRINTER_DEVMODE_SCALING_UNSAFE")
 
             return ValidatedPrinterDevMode(
                 buffer=canonical,
