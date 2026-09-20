@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from wbcz.printing import canonical_layout_sha256
+from wbcz.physical_printing import PHYSICAL_CAPABILITY
 from wbcz.printing_sensitive import (
     ENVELOPE_VERSION,
     PRINT_PROTOCOL_VERSION,
@@ -31,6 +32,7 @@ from wbcz_web.models import (
     PrintJobRecord,
     PrintPayloadDeliveryReservationRecord,
     PrintTemplateVersionRecord,
+    PrinterProfileRecord,
     StoredFullKmItemRecord,
     SuzKmVaultRecord,
 )
@@ -46,11 +48,13 @@ from wbcz_web.services.audit_history import (
     TraceContext,
 )
 from wbcz_web.services.printing import LocalPrintingService, PrintingIntegrityError
+from wbcz_web.services.printer_profiles import COMPATIBLE, PrinterProfileService
 from wbcz_web.services.tenant import active_tenant
 
 
 _NONTERMINAL_EXECUTION = {
     "REQUESTED", "AUTHORIZED", "PAYLOAD_AVAILABLE", "PAYLOAD_ISSUED", "PAYLOAD_DELIVERED",
+    "RENDERED_VERIFIED", "SPOOL_SUBMITTING", "SPOOL_JOB_CREATED",
 }
 _PRE_SPOOL_ISSUABLE = {"PAYLOAD_AVAILABLE", "PAYLOAD_ISSUED"}
 
@@ -477,6 +481,25 @@ class SensitivePrintingDeliveryService:
             raise SensitiveDeliveryRejected("TEMPLATE_PARTICIPANT_MISMATCH")
         if stored.provenance_state != "PROVEN" or item.payload_hash != stored.full_km_sha256:
             raise SensitiveDeliveryRejected("PRINT_PAYLOAD_NOT_PROVEN")
+
+        physical_profile = None
+        if job.printer_profile_id:
+            physical_profile = self.db.scalar(select(PrinterProfileRecord).where(
+                PrinterProfileRecord.id == job.printer_profile_id,
+                PrinterProfileRecord.organisation_id == self.scope.organisation_id,
+                PrinterProfileRecord.participant_id == self.scope.participant_id,
+            ))
+            if physical_profile is not None:
+                if PHYSICAL_CAPABILITY not in set(binding.supported_capabilities_json or ()):
+                    raise SensitiveDeliveryRejected("PRINTING_PHYSICAL_V1_REQUIRED")
+                if physical_profile.state != "ACTIVE" or physical_profile.agent_binding_id != binding.id:
+                    raise SensitiveDeliveryRejected("PRINTER_PROFILE_NOT_ACTIVE_FOR_BINDING")
+                compatibility = PrinterProfileService(self.db, self.config).compatibility(
+                    physical_profile.id, version.id
+                )
+                if compatibility["result"] != COMPATIBLE:
+                    raise SensitiveDeliveryRejected(str(compatibility["result"]))
+
         _, layout_hash = canonical_layout_sha256(
             version.layout_json,
             label_width_mm=float(version.label_width_mm),
@@ -491,6 +514,20 @@ class SensitivePrintingDeliveryService:
         ))
         if existing is not None:
             raise SensitiveDeliveryRejected("PRINT_EXECUTION_ALREADY_ACTIVE")
+        prior_irreversible = self.db.scalar(
+            select(PrintExecutionRecord)
+            .where(
+                PrintExecutionRecord.print_job_item_id == item.id,
+                (
+                    PrintExecutionRecord.spool_submitting_at.is_not(None)
+                    | PrintExecutionRecord.state.in_(("SPOOLER_ACCEPTED", "UNKNOWN_AFTER_SPOOL"))
+                ),
+            )
+            .order_by(PrintExecutionRecord.attempt_number.desc())
+            .limit(1)
+        )
+        if prior_irreversible is not None:
+            raise SensitiveDeliveryRejected("EXPLICIT_REPRINT_REQUIRED_AFTER_SPOOL_BOUNDARY")
 
         self._enforce_vault_size(stored)
         try:
@@ -525,6 +562,10 @@ class SensitivePrintingDeliveryService:
             layout_sha256=version.layout_sha256,
             agent_version=binding.agent_version or "unknown",
             print_protocol_version=PRINT_PROTOCOL_VERSION,
+            printer_profile_id=physical_profile.id if physical_profile is not None else None,
+            printer_profile_fingerprint=(
+                physical_profile.local_printer_fingerprint if physical_profile is not None else None
+            ),
             authorized_at=now,
             correlation_id=trace.get("correlation_id"),
         )
