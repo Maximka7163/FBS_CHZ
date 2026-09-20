@@ -55,7 +55,7 @@ ASCII 29 remains ASCII 29. Visible `<GS>` is rejected as a substitute. The DataM
 
 The accepted module-size range is enforced by the renderer, including the effective device X-dimension after integer pixel scaling. Quiet zone uses the standards-compatible one-module default/constraint from the accepted research; no proprietary CRPT override is invented.
 
-CI renders a synthetic FULL KM fixture with zxing-cpp and decodes the symbol with independent libdmtx/pylibdmtx. The recovered logical bytes, including ASCII 29 separators, must equal the original synthetic fixture exactly.
+Runtime rendering uses libdmtx through a narrow ctypes adapter with `DmtxPropFnc1=29`: a leading encoder-only ASCII 29 supplies the GS1 symbology FNC1, while ASCII 29 already present in the exact FULL KM is encoded as separator FNC1. CI independently decodes the generated symbol with zxing-cpp and requires GS1 `]d2` plus byte-for-byte equality with the original synthetic FULL KM, including ASCII 29 separators. No decoded prefix/suffix is stripped or normalized.
 
 Browser preview is synthetic-only. It never decrypts a retained FULL KM into a browser response.
 
