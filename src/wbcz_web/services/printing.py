@@ -117,6 +117,7 @@ class LocalPrintingService:
         metadata: Mapping[str, Any],
         evidence_hashes: Iterable[str] = (),
         event_key: str,
+        actor_kind: ActorKind | None = None,
     ) -> None:
         trace_data = self.db.info.get("audit_trace")
         trace = trace_data if isinstance(trace_data, dict) else {}
@@ -126,7 +127,11 @@ class LocalPrintingService:
             pseudonym_key_id=self.db.info.get("audit_pseudonym_key_id"),
         ).append(
             event_type=event_type,
-            actor=ActorContext(ActorKind.USER, user_id=user_id) if user_id is not None else ActorContext(ActorKind.SYSTEM),
+            actor=(
+                ActorContext(ActorKind.USER, user_id=user_id)
+                if user_id is not None
+                else ActorContext(actor_kind or ActorKind.SYSTEM, machine_principal="printing-agent" if actor_kind is ActorKind.WINDOWS_AGENT else None)
+            ),
             tenant=AuditTenantScope(self.scope.organisation_id, self.scope.participant_id),
             subject=SubjectRef(subject_type, subject_id),
             outcome=outcome,
@@ -838,6 +843,7 @@ class LocalPrintingService:
             },
             evidence_hashes=(aggregate_hash,) if aggregate_hash else (),
             event_key=f"print-job:{job.id}:{'completed' if success else 'failed'}",
+            actor_kind=ActorKind.WINDOWS_AGENT,
         )
         return job
 
