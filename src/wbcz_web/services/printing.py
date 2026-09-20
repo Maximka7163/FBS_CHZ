@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -254,6 +255,29 @@ class LocalPrintingService:
 
     def resolve_printability_public(self, cis: str) -> dict[str, Any]:
         return {"cis": cis, "printability": self.resolve_printability(cis).public()}
+
+    def enrich_m1_result(self, result: Any) -> Any:
+        """Add safe local printability only to normalized M1 objects.
+
+        The remote/raw section is preserved and no FULL KM is added anywhere.
+        """
+        value = copy.deepcopy(result)
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                normalized = node.get("normalized")
+                if isinstance(normalized, dict):
+                    cis = normalized.get("cis") or normalized.get("requested_cis") or normalized.get("sgtin")
+                    if isinstance(cis, str) and cis:
+                        normalized["printability"] = self.resolve_printability(cis).public()
+                for nested in node.values():
+                    walk(nested)
+            elif isinstance(node, list):
+                for nested in node:
+                    walk(nested)
+
+        walk(value)
+        return value
 
     def index_trusted_full_km(
         self,
