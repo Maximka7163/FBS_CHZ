@@ -14,6 +14,7 @@ from typing import Callable, Protocol
 
 from cryptography.hazmat.primitives.asymmetric import x25519
 
+from wbcz.printer_profiles import DISCOVERY_CAPABILITY
 from wbcz.printing_sensitive import (
     ENVELOPE_VERSION,
     PRINT_PROTOCOL_VERSION,
@@ -241,7 +242,7 @@ class SensitiveDeliveryAgent:
     def capabilities() -> dict:
         return {
             "print_protocol_version": PRINT_PROTOCOL_VERSION,
-            "capabilities": sorted(REQUIRED_CAPABILITIES),
+            "capabilities": sorted(set(REQUIRED_CAPABILITIES) | {DISCOVERY_CAPABILITY}),
         }
 
     def open_verify_and_ack(
