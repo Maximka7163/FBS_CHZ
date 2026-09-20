@@ -253,8 +253,29 @@ def upgrade() -> None:
         "secondary_subject_type IS NULL OR secondary_subject_type IN ('USER','SESSION','MEMBERSHIP','INVITATION','ORGANISATION','PARTICIPANT','IMPORT','EVENT','CONTROL_RUN','AGENT_JOB','WRITE_OPERATION','DOCUMENT_OPERATION','TURNOVER_OPERATION','AGGREGATION_OPERATION','EDO_OBJECT','SUZ_CONNECTION','SUZ_ORDER','WB_CONNECTION','WB_OBJECT','OZON_CONNECTION','OZON_OBJECT','REPORT_JOB','REPORT_ARTIFACT','INTEGRATION_CONNECTION','MARKING_IDENTIFIER','PRINT_TEMPLATE','PRINT_JOB','PRINT_EVENT','AUDIT_CHAIN','AUDIT_CHECKPOINT')",
     )
 
+    op.execute("""
+    CREATE FUNCTION wbcz_printing_immutable_guard() RETURNS trigger AS $
+    BEGIN
+      RAISE EXCEPTION 'printing immutable history cannot be updated or deleted';
+    END;
+    $ LANGUAGE plpgsql
+    """)
+    op.execute("""
+    CREATE TRIGGER trg_print_template_versions_immutable
+    BEFORE UPDATE OR DELETE ON print_template_versions
+    FOR EACH ROW EXECUTE FUNCTION wbcz_printing_immutable_guard()
+    """)
+    op.execute("""
+    CREATE TRIGGER trg_print_events_append_only
+    BEFORE UPDATE OR DELETE ON print_events
+    FOR EACH ROW EXECUTE FUNCTION wbcz_printing_immutable_guard()
+    """)
+
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS trg_print_events_append_only ON print_events")
+    op.execute("DROP TRIGGER IF EXISTS trg_print_template_versions_immutable ON print_template_versions")
+    op.execute("DROP FUNCTION IF EXISTS wbcz_printing_immutable_guard()")
     op.drop_constraint("ck_audit_event_category", "audit_events", type_="check")
     op.drop_constraint("ck_audit_event_subject_type", "audit_events", type_="check")
     op.drop_constraint("ck_audit_event_secondary_subject_type", "audit_events", type_="check")
