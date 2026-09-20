@@ -13,6 +13,7 @@ from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentJobRecord
 from wbcz_web.repositories import SqlAlchemyAgentJobStore
 from wbcz_web.services.tenant import participant_inn_for_runtime, scoped_agent_job
+from wbcz_web.services.printing import LocalPrintingService
 
 
 CIS_INVENTORY_PURPOSE = "CIS_INVENTORY"
@@ -78,13 +79,16 @@ class CisInventoryService:
             public_state = "completed"
         else:
             public_state = "failed"
+        read_result = result.get("read_result") if result else None
+        if public_state == "completed" and read_result is not None:
+            read_result = LocalPrintingService(self.db, self.config).enrich_m1_result(read_result)
         return {
             "request_id": row.job_id,
             "job_type": row.job_type,
             "status": public_state,
             "source": "windows-agent-true-api",
             "request": dict(row.payload_json.get("read_payload") or {}),
-            "result": result.get("read_result") if result else None,
+            "result": read_result,
             "transport": (
                 {
                     "http_status": result.get("http_status"),
