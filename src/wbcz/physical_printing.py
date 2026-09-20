@@ -1011,6 +1011,8 @@ class PhysicalPrintRuntime:
             raster,
             physical_offset_x_px=render_contract.offset_x_px,
             physical_offset_y_px=render_contract.offset_y_px,
+            printable_width_px=render_contract.printable_width_px,
+            printable_height_px=render_contract.printable_height_px,
         )
 
         self.replay.record(
