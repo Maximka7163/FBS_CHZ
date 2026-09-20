@@ -97,6 +97,8 @@ def create_app(
         "/api/agent/v2/printing/physical-executions/{execution_id}/render-contract",
         "/api/agent/v2/printing/physical-executions/{execution_id}/spool-submitting",
         "/api/agent/v2/printing/physical-executions/{execution_id}/result",
+        "/api/agent/v2/printing/physical-executions/{execution_id}/status-control",
+        "/api/agent/v2/printing/physical-executions/{execution_id}/status",
         "/api/printing/executions/{execution_id}",
     }
     missing = required - paths
