@@ -247,7 +247,8 @@ class AgentPhysicalReplayStore:
     """Durable local evidence. Never stores FULL KM, raster, queue path or DEVMODE."""
 
     _IRREVERSIBLE = {
-        "SPOOL_SUBMITTING", "SPOOL_JOB_CREATED", "SPOOLER_ACCEPTED", "UNKNOWN_AFTER_SPOOL",
+        "SPOOL_SUBMITTING", "SPOOL_JOB_CREATED", "SPOOLER_ACCEPTED",
+        "UNKNOWN_AFTER_SPOOL", "FAILED_PRE_SPOOL",
     }
 
     def __init__(self, path: str | Path) -> None:
