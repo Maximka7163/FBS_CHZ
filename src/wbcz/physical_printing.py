@@ -433,34 +433,36 @@ class RasterSpoolAdapter(Protocol):
     def submit(self, *, queue_name: str, raster: PhysicalLabelRaster) -> GdiSpoolOutcome: ...
 
 
+class _DOCINFOW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_int),
+        ("lpszDocName", wintypes.LPCWSTR),
+        ("lpszOutput", wintypes.LPCWSTR),
+        ("lpszDatatype", wintypes.LPCWSTR),
+        ("fwType", wintypes.DWORD),
+    ]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long),
+        ("biHeight", ctypes.c_long), ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+        ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+class _BITMAPINFO(ctypes.Structure):
+    _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+
 class WindowsGdiRasterSpooler:
     """Closed raster-only GDI adapter. Never accepts PDL/raw command data."""
 
     DIB_RGB_COLORS = 0
     BI_RGB = 0
-    SRCCOPY = 0x00CC0020
-
-    class DOCINFOW(ctypes.Structure):
-        _fields_ = [
-            ("cbSize", ctypes.c_int),
-            ("lpszDocName", wintypes.LPCWSTR),
-            ("lpszOutput", wintypes.LPCWSTR),
-            ("lpszDatatype", wintypes.LPCWSTR),
-            ("fwType", wintypes.DWORD),
-        ]
-
-    class BITMAPINFOHEADER(ctypes.Structure):
-        _fields_ = [
-            ("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long),
-            ("biHeight", ctypes.c_long), ("biPlanes", wintypes.WORD),
-            ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
-            ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", ctypes.c_long),
-            ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wintypes.DWORD),
-            ("biClrImportant", wintypes.DWORD),
-        ]
-
-    class BITMAPINFO(ctypes.Structure):
-        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
 
     def __init__(self) -> None:
         if os.name != "nt":
@@ -470,7 +472,7 @@ class WindowsGdiRasterSpooler:
             wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p,
         ]
         self.gdi32.CreateDCW.restype = ctypes.c_void_p
-        self.gdi32.StartDocW.argtypes = [ctypes.c_void_p, ctypes.POINTER(self.DOCINFOW)]
+        self.gdi32.StartDocW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DOCINFOW)]
         self.gdi32.StartDocW.restype = ctypes.c_int
         self.gdi32.StartPage.argtypes = [ctypes.c_void_p]
         self.gdi32.StartPage.restype = ctypes.c_int
@@ -478,7 +480,7 @@ class WindowsGdiRasterSpooler:
             ctypes.c_void_p,
             ctypes.c_int, ctypes.c_int, wintypes.DWORD, wintypes.DWORD,
             ctypes.c_int, ctypes.c_int, wintypes.UINT, wintypes.UINT,
-            ctypes.c_void_p, ctypes.POINTER(self.BITMAPINFO), wintypes.UINT,
+            ctypes.c_void_p, ctypes.POINTER(_BITMAPINFO), wintypes.UINT,
         ]
         self.gdi32.SetDIBitsToDevice.restype = ctypes.c_int
         self.gdi32.EndPage.argtypes = [ctypes.c_void_p]
@@ -515,8 +517,8 @@ class WindowsGdiRasterSpooler:
             raise DefinitePreSpoolFailure("GDI_CREATE_DC_FAILED")
         job_id: int | None = None
         try:
-            doc = self.DOCINFOW(
-                ctypes.sizeof(self.DOCINFOW),
+            doc = _DOCINFOW(
+                ctypes.sizeof(_DOCINFOW),
                 "Sellari label",
                 None,
                 None,
@@ -529,8 +531,8 @@ class WindowsGdiRasterSpooler:
                 raise AmbiguousAfterSpool("GDI_START_PAGE_FAILED", windows_spool_job_id=job_id)
 
             raw, stride = self._bgr_bottom_up(raster)
-            header = self.BITMAPINFOHEADER(
-                ctypes.sizeof(self.BITMAPINFOHEADER),
+            header = _BITMAPINFOHEADER(
+                ctypes.sizeof(_BITMAPINFOHEADER),
                 raster.image.width,
                 raster.image.height,
                 1,
@@ -539,7 +541,7 @@ class WindowsGdiRasterSpooler:
                 stride * raster.image.height,
                 0, 0, 0, 0,
             )
-            info = self.BITMAPINFO()
+            info = _BITMAPINFO()
             info.bmiHeader = header
             buffer = ctypes.create_string_buffer(raw)
             scanlines = self.gdi32.SetDIBitsToDevice(
