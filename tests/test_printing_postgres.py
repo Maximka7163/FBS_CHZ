@@ -82,7 +82,7 @@ class StaticKeyProvider:
         return VAULT_KEY
 
 
-PRINTING_MIGRATION = "0019_printing_printer_profiles"
+PRINTING_MIGRATION = "0020_printing_physical_spool"
 PRINTING_TABLES = {
     "users",
     "organisations",
