@@ -200,6 +200,8 @@ class WebConfig:
             raise ValueError("Production FULL KM SUZ acquisition remains blocked pending accepted wire contract")
         if self.print_execution_enabled and not self.printing_enabled:
             raise ValueError("WBCZ_PRINT_EXECUTION_ENABLED requires WBCZ_PRINTING_ENABLED")
+        if self.environment == "production" and self.print_execution_enabled:
+            raise ValueError("Physical print execution remains blocked pending separate acceptance")
         if self.print_execution_enabled and not self.agent_enabled:
             raise ValueError("Physical print execution requires the participant-bound Windows agent")
         if self.printing_enabled and self.environment == "production" and not self.suz_km_keyring_root:
