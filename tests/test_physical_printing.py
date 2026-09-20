@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import ctypes
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import pytest
 from wbcz.physical_printing import (
     AgentPhysicalReplayStore,
     AmbiguousAfterSpool,
+    DefinitePreSpoolFailure,
     FakeGdiRasterSpooler,
     LocalPrinterResolver,
     PhysicalExecutionControl,
@@ -21,6 +23,7 @@ from wbcz.physical_printing import (
     SyntheticPhysicalTestRuntime,
     WindowsGdiRasterSpooler,
     WindowsSpoolStatusAdapter,
+    _DEVMODE_PRINTER_PREFIX,
 )
 from wbcz.printing import (
     PRINTING_CONTRACT_VERSION,
@@ -33,6 +36,7 @@ from wbcz.printing import (
 from wbcz.printer_profiles import (
     LocalPrinterCapabilities,
     LocalPrinterDescriptor,
+    WindowsPrinterBackend,
     observation_from_local,
 )
 
@@ -355,10 +359,22 @@ def test_synthetic_physical_test_uses_only_builtin_fixture(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows GDI load smoke only")
 def test_windows_gdi_and_status_adapters_load_without_printing():
-    # Construction validates ctypes surface only. No printer is selected and no
-    # StartDoc/spool side effect is invoked by this smoke test.
-    WindowsGdiRasterSpooler()
+    # No StartDoc is called. If hosted Windows exposes any printer queue, safely
+    # exercise local OpenPrinter/DocumentProperties/CreateDC/GetDeviceCaps only.
+    spooler = WindowsGdiRasterSpooler()
     WindowsSpoolStatusAdapter()
+    backend = WindowsPrinterBackend()
+    descriptors = list(backend.enumerate_printers())
+    if descriptors:
+        try:
+            result = spooler.safe_preflight(descriptors[0].queue_name)
+        except DefinitePreSpoolFailure as exc:
+            assert exc.code.startswith(("PRINTER_DEVMODE_", "GDI_CREATE_DC_"))
+        else:
+            assert result["copies"] == 1
+            assert result["scale_percent"] in {None, 100}
+            assert result["dpi_x"] > 0
+            assert result["dpi_y"] > 0
 
 
 
@@ -431,3 +447,286 @@ def test_typed_print_status_resolves_only_opaque_approved_printer():
             "windows_spool_job_id": 412,
             "queue_name": "caller-controlled",
         })
+
+
+
+class _FakeWinspool:
+    def __init__(
+        self,
+        *,
+        source_copies=4,
+        source_scale=75,
+        copies_supported=True,
+        scale_supported=True,
+        canonical_copies=None,
+        canonical_scale=None,
+        canonical_copies_supported=True,
+        canonical_scale_supported=True,
+    ):
+        self.source_copies = source_copies
+        self.source_scale = source_scale
+        self.copies_supported = copies_supported
+        self.scale_supported = scale_supported
+        self.canonical_copies = canonical_copies
+        self.canonical_scale = canonical_scale
+        self.canonical_copies_supported = canonical_copies_supported
+        self.canonical_scale_supported = canonical_scale_supported
+        self.size = ctypes.sizeof(_DEVMODE_PRINTER_PREFIX) + 32
+        self.closed = 0
+
+    @staticmethod
+    def _write(ptr, value):
+        ctypes.memmove(ptr, ctypes.byref(value), ctypes.sizeof(value))
+
+    def OpenPrinterW(self, queue_name, handle_ptr, defaults):
+        del queue_name, defaults
+        ctypes.cast(handle_ptr, ctypes.POINTER(ctypes.c_void_p)).contents.value = 1
+        return 1
+
+    def ClosePrinter(self, handle):
+        del handle
+        self.closed += 1
+        return 1
+
+    def DocumentPropertiesW(self, hwnd, handle, device_name, output, input_, mode):
+        del hwnd, handle, device_name
+        if mode == 0:
+            return self.size
+        if mode == WindowsGdiRasterSpooler.DM_OUT_BUFFER and not input_:
+            dm = _DEVMODE_PRINTER_PREFIX()
+            dm.dmSize = ctypes.sizeof(_DEVMODE_PRINTER_PREFIX)
+            dm.dmDriverExtra = 0
+            dm.dmFields = 0
+            if self.copies_supported:
+                dm.dmFields |= WindowsGdiRasterSpooler.DM_COPIES
+            if self.scale_supported:
+                dm.dmFields |= WindowsGdiRasterSpooler.DM_SCALE
+            dm.dmCopies = self.source_copies
+            dm.dmScale = self.source_scale
+            self._write(output, dm)
+            return WindowsGdiRasterSpooler.IDOK
+        if mode == (
+            WindowsGdiRasterSpooler.DM_IN_BUFFER
+            | WindowsGdiRasterSpooler.DM_OUT_BUFFER
+        ):
+            incoming = ctypes.cast(
+                input_, ctypes.POINTER(_DEVMODE_PRINTER_PREFIX)
+            ).contents
+            dm = _DEVMODE_PRINTER_PREFIX()
+            ctypes.memmove(ctypes.byref(dm), input_, ctypes.sizeof(dm))
+            if not self.canonical_copies_supported:
+                dm.dmFields &= ~WindowsGdiRasterSpooler.DM_COPIES
+            if not self.canonical_scale_supported:
+                dm.dmFields &= ~WindowsGdiRasterSpooler.DM_SCALE
+            if self.canonical_copies is not None:
+                dm.dmCopies = self.canonical_copies
+            else:
+                dm.dmCopies = incoming.dmCopies
+            if self.canonical_scale is not None:
+                dm.dmScale = self.canonical_scale
+            else:
+                dm.dmScale = incoming.dmScale
+            self._write(output, dm)
+            return WindowsGdiRasterSpooler.IDOK
+        return -1
+
+
+class _FakeGdi:
+    def __init__(self, geometry):
+        self.geometry = dict(geometry)
+        self.start_doc_calls = 0
+        self.create_dc_calls = 0
+        self.effective_copies = None
+        self.effective_scale = None
+
+    def CreateDCW(self, driver, queue_name, output, devmode):
+        del driver, queue_name, output
+        self.create_dc_calls += 1
+        dm = ctypes.cast(devmode, ctypes.POINTER(_DEVMODE_PRINTER_PREFIX)).contents
+        self.effective_copies = int(dm.dmCopies)
+        self.effective_scale = (
+            int(dm.dmScale)
+            if int(dm.dmFields) & WindowsGdiRasterSpooler.DM_SCALE
+            else None
+        )
+        return 101
+
+    def GetDeviceCaps(self, hdc, index):
+        del hdc
+        return self.geometry[index]
+
+    def StartDocW(self, hdc, doc):
+        del hdc, doc
+        self.start_doc_calls += 1
+        return 733
+
+    def StartPage(self, hdc):
+        del hdc
+        return 1
+
+    def SetDIBitsToDevice(self, *args):
+        return self.geometry[WindowsGdiRasterSpooler.PHYSICALHEIGHT]
+
+    def EndPage(self, hdc):
+        del hdc
+        return 1
+
+    def EndDoc(self, hdc):
+        del hdc
+        return 1
+
+    def DeleteDC(self, hdc):
+        del hdc
+        return 1
+
+
+def _approved_gdi_raster():
+    local = caps()
+    raster, _ = render_decode_verify_physical_label(
+        SYNTHETIC_PREVIEW_FULL_KM,
+        layout=layout(),
+        label_width_mm=50,
+        label_height_mm=35,
+        dpi=local.dpi_x,
+    )
+    return replace(
+        raster,
+        physical_offset_x_px=local.offset_x_px,
+        physical_offset_y_px=local.offset_y_px,
+        printable_width_px=local.printable_width_px,
+        printable_height_px=local.printable_height_px,
+    )
+
+
+def _gdi_geometry(raster):
+    return {
+        WindowsGdiRasterSpooler.LOGPIXELSX: raster.dpi,
+        WindowsGdiRasterSpooler.LOGPIXELSY: raster.dpi,
+        WindowsGdiRasterSpooler.PHYSICALWIDTH: raster.image.width,
+        WindowsGdiRasterSpooler.PHYSICALHEIGHT: raster.image.height,
+        WindowsGdiRasterSpooler.HORZRES: raster.printable_width_px,
+        WindowsGdiRasterSpooler.VERTRES: raster.printable_height_px,
+        WindowsGdiRasterSpooler.PHYSICALOFFSETX: raster.physical_offset_x_px,
+        WindowsGdiRasterSpooler.PHYSICALOFFSETY: raster.physical_offset_y_px,
+    }
+
+
+def test_gdi_devmode_normalizes_driver_copies_and_scaling_before_create_dc():
+    raster = _approved_gdi_raster()
+    winspool = _FakeWinspool(source_copies=5, source_scale=75)
+    gdi = _FakeGdi(_gdi_geometry(raster))
+    spooler = WindowsGdiRasterSpooler(_winspool=winspool, _gdi32=gdi)
+    created = []
+    result = spooler.submit(
+        queue_name="local-only-queue",
+        raster=raster,
+        on_job_created=created.append,
+    )
+    assert result.windows_spool_job_id == 733
+    assert created == [733]
+    assert gdi.effective_copies == 1
+    assert gdi.effective_scale == 100
+    assert gdi.start_doc_calls == 1
+
+
+@pytest.mark.parametrize(
+    "winspool,code",
+    [
+        (
+            _FakeWinspool(canonical_copies=2),
+            "PRINTER_DEVMODE_COPIES_UNSAFE",
+        ),
+        (
+            _FakeWinspool(canonical_copies_supported=False),
+            "PRINTER_DEVMODE_COPIES_UNSAFE",
+        ),
+        (
+            _FakeWinspool(canonical_scale=90),
+            "PRINTER_DEVMODE_SCALING_UNSAFE",
+        ),
+        (
+            _FakeWinspool(canonical_scale_supported=False),
+            "PRINTER_DEVMODE_SCALING_UNSAFE",
+        ),
+    ],
+)
+def test_gdi_devmode_canonicalization_fails_closed_before_startdoc(winspool, code):
+    raster = _approved_gdi_raster()
+    gdi = _FakeGdi(_gdi_geometry(raster))
+    spooler = WindowsGdiRasterSpooler(_winspool=winspool, _gdi32=gdi)
+    with pytest.raises(DefinitePreSpoolFailure, match=code):
+        spooler.submit(
+            queue_name="local-only-queue",
+            raster=raster,
+            on_job_created=lambda _: None,
+        )
+    assert gdi.start_doc_calls == 0
+
+
+def test_gdi_devmode_without_standard_scale_support_remains_safe_if_copies_proven_one():
+    raster = _approved_gdi_raster()
+    winspool = _FakeWinspool(
+        source_copies=3,
+        scale_supported=False,
+        canonical_scale_supported=False,
+    )
+    gdi = _FakeGdi(_gdi_geometry(raster))
+    spooler = WindowsGdiRasterSpooler(_winspool=winspool, _gdi32=gdi)
+    spooler.submit(
+        queue_name="local-only-queue",
+        raster=raster,
+        on_job_created=lambda _: None,
+    )
+    assert gdi.effective_copies == 1
+    assert gdi.effective_scale is None
+
+
+@pytest.mark.parametrize(
+    "cap_index,delta,code",
+    [
+        (WindowsGdiRasterSpooler.LOGPIXELSX, 1, "PRINTER_PROFILE_DPI_CHANGED"),
+        (WindowsGdiRasterSpooler.LOGPIXELSY, 1, "PRINTER_PROFILE_DPI_CHANGED"),
+        (WindowsGdiRasterSpooler.PHYSICALWIDTH, 1, "PRINTER_PHYSICAL_GEOMETRY_CHANGED"),
+        (WindowsGdiRasterSpooler.PHYSICALHEIGHT, 1, "PRINTER_PHYSICAL_GEOMETRY_CHANGED"),
+        (WindowsGdiRasterSpooler.HORZRES, -1, "PRINTER_PRINTABLE_AREA_CHANGED"),
+        (WindowsGdiRasterSpooler.VERTRES, -1, "PRINTER_PRINTABLE_AREA_CHANGED"),
+        (WindowsGdiRasterSpooler.PHYSICALOFFSETX, 1, "PRINTER_PHYSICAL_OFFSET_CHANGED"),
+        (WindowsGdiRasterSpooler.PHYSICALOFFSETY, 1, "PRINTER_PHYSICAL_OFFSET_CHANGED"),
+    ],
+)
+def test_final_dc_geometry_mismatch_blocks_before_startdoc(cap_index, delta, code):
+    raster = _approved_gdi_raster()
+    geometry = _gdi_geometry(raster)
+    geometry[cap_index] += delta
+    gdi = _FakeGdi(geometry)
+    spooler = WindowsGdiRasterSpooler(
+        _winspool=_FakeWinspool(),
+        _gdi32=gdi,
+    )
+    with pytest.raises(DefinitePreSpoolFailure, match=code):
+        spooler.submit(
+            queue_name="local-only-queue",
+            raster=raster,
+            on_job_created=lambda _: None,
+        )
+    assert gdi.start_doc_calls == 0
+
+
+def test_final_dc_exact_geometry_allows_exactly_one_startdoc_and_one_spool_job():
+    raster = _approved_gdi_raster()
+    gdi = _FakeGdi(_gdi_geometry(raster))
+    spooler = WindowsGdiRasterSpooler(
+        _winspool=_FakeWinspool(source_copies=9, source_scale=10),
+        _gdi32=gdi,
+    )
+    created = []
+    outcome = spooler.submit(
+        queue_name="local-only-queue",
+        raster=raster,
+        on_job_created=created.append,
+    )
+    assert outcome.windows_spool_job_id == 733
+    assert created == [733]
+    assert gdi.start_doc_calls == 1
+    assert gdi.effective_copies == 1
+    assert gdi.effective_scale == 100
