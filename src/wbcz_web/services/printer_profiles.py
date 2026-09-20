@@ -345,6 +345,13 @@ class PrinterProfileService:
             if job.result_sha256 == result_hash:
                 return {"state": "COMPLETED", "printer_count": len(parsed)}
             raise PrinterProfileRejected("PRINTER_DISCOVERY_RESULT_REPLAY_CONFLICT")
+        now = _now()
+        if (
+            job.state != "LEASED"
+            or job.lease_expires_at is None
+            or _aware(job.lease_expires_at) <= now
+        ):
+            raise PrinterProfileRejected("PRINTER_DISCOVERY_JOB_NOT_LEASED")
 
         run = self._run(job.operation_id, lock=True)
         if run.agent_binding_id != binding.id:
@@ -464,6 +471,12 @@ class PrinterProfileService:
         )
         if job is None:
             raise PrinterProfileRejected("PRINTER_DISCOVERY_JOB_NOT_FOUND")
+        if (
+            job.state != "LEASED"
+            or job.lease_expires_at is None
+            or _aware(job.lease_expires_at) <= _now()
+        ):
+            raise PrinterProfileRejected("PRINTER_DISCOVERY_JOB_NOT_LEASED")
         run = self._run(job.operation_id, lock=True)
         code = (safe_error_code or "PRINTER_DISCOVERY_FAILED")[:80]
         run.state = "FAILED"
