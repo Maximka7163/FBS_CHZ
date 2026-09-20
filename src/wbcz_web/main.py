@@ -18,7 +18,7 @@ def create_app(
     # Import routers only after create_app is called, avoiding partially initialized
     # router modules during auth/repository dependency cycles.
     from .api.routes import router
-    from .api.agent_routes import agent_router
+    from .api.agent_routes import agent_router, agent_v2_printing_router
     from .api.security_routes import security_router
     from .api.report_routes import reports_router
     from .api.audit_routes import audit_router
@@ -44,6 +44,7 @@ def create_app(
         *manual_review_router.routes,
         *printing_router.routes,
         *agent_router.routes,
+        *agent_v2_printing_router.routes,
     ]
     app = FastAPI(
         title="Маркировка — WB FBS",
@@ -85,6 +86,9 @@ def create_app(
         "/api/printing/templates",
         "/api/printing/printability/resolve",
         "/api/printing/jobs",
+        "/api/agent/v2/printing/executions/next",
+        "/api/agent/v2/printing/payload-deliveries/{reservation_id}/issue",
+        "/api/agent/v2/printing/payload-deliveries/{reservation_id}/ack",
     }
     missing = required - paths
     if missing:
