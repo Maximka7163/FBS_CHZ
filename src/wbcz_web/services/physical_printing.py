@@ -512,6 +512,41 @@ class PhysicalPrintingService:
                     self.db.flush()
         return self.execution_status(execution.id)
 
+    def status_control(
+        self,
+        execution_id: str,
+        *,
+        machine_binding_id: str,
+    ) -> dict[str, Any]:
+        self._require_gate()
+        self._binding(machine_binding_id)
+        execution = self._execution(execution_id)
+        if execution.agent_binding_id != machine_binding_id:
+            raise PhysicalExecutionRejected("PRINT_EXECUTION_BINDING_MISMATCH")
+        if execution.state not in {"SPOOL_JOB_CREATED", "SPOOLER_ACCEPTED", "UNKNOWN_AFTER_SPOOL"}:
+            raise PhysicalExecutionRejected("PRINT_STATUS_NOT_AVAILABLE")
+        if execution.windows_spool_job_id is None or not execution.printer_profile_id:
+            raise PhysicalExecutionRejected("PRINT_STATUS_TARGET_INCOMPLETE")
+        profile = self.db.scalar(select(PrinterProfileRecord).where(
+            PrinterProfileRecord.id == execution.printer_profile_id,
+            PrinterProfileRecord.organisation_id == self.scope.organisation_id,
+            PrinterProfileRecord.participant_id == self.scope.participant_id,
+            PrinterProfileRecord.agent_binding_id == machine_binding_id,
+        ))
+        if profile is None:
+            raise PhysicalExecutionRejected("PRINTER_PROFILE_NOT_FOUND")
+        if execution.printer_profile_fingerprint != profile.local_printer_fingerprint:
+            raise PhysicalExecutionRejected("PRINTER_PROFILE_FINGERPRINT_CHANGED")
+        return {
+            "contract_version": PRINT_PROTOCOL_VERSION,
+            "operation": "PRINT_STATUS",
+            "execution_id": execution.id,
+            "printer_profile_id": profile.id,
+            "printer_profile_fingerprint": profile.local_printer_fingerprint,
+            "agent_printer_id": profile.agent_printer_id,
+            "windows_spool_job_id": execution.windows_spool_job_id,
+        }
+
     def observe_status(
         self,
         execution_id: str,
