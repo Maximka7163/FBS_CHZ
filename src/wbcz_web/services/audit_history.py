@@ -88,6 +88,7 @@ class AuditCategory(StrEnum):
     OZON = "OZON"
     REPORT = "REPORT"
     AGENT = "AGENT"
+    PRINTING = "PRINTING"
     SYSTEM = "SYSTEM"
 
 
@@ -127,6 +128,9 @@ class SubjectType(StrEnum):
     REPORT_ARTIFACT = "REPORT_ARTIFACT"
     INTEGRATION_CONNECTION = "INTEGRATION_CONNECTION"
     MARKING_IDENTIFIER = "MARKING_IDENTIFIER"
+    PRINT_TEMPLATE = "PRINT_TEMPLATE"
+    PRINT_JOB = "PRINT_JOB"
+    PRINT_EVENT = "PRINT_EVENT"
     AUDIT_CHAIN = "AUDIT_CHAIN"
     AUDIT_CHECKPOINT = "AUDIT_CHECKPOINT"
 
@@ -180,6 +184,8 @@ _COMMON_METADATA = frozenset({
     "ambiguity", "manual_review_reason", "reconciliation_state", "job_type", "purpose",
     "delivery_count", "payload_sha256", "result_sha256", "machine_principal_hmac",
     "checkpoint_id", "checkpoint_hash", "through_sequence", "checked_from", "checked_to",
+    "template_id", "template_version_id", "layout_sha256", "stored_km_item_id",
+    "printer_profile_fingerprint", "original_print_event_id", "print_mode", "error_code",
     "checked_count", "verification_status", "first_invalid_sequence", "failure_reason",
     "semantics", "manifest", "cutoff", "source", "error_code", "error_class",
     "redacted_message", "retry_classification", "evidence_sha256", "changed_fields",
@@ -306,6 +312,15 @@ _EVENT_DEFINITIONS = [
     _ev("AGENT_BINDING_CREATED", AuditCategory.INTEGRATION, "AGENT_BINDING_CREATED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.PARTICIPANT], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["binding_id","installation_id","protocol_version","credential_version","is_primary"]),
     _ev("AGENT_BINDING_CHANGED", AuditCategory.INTEGRATION, "AGENT_BINDING_CHANGED", [U,C,A], [SubjectType.INTEGRATION_CONNECTION,SubjectType.PARTICIPANT], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["binding_id","changed_fields","credential_version","is_primary","state"]),
     _ev("AGENT_BINDING_DISABLED", AuditCategory.INTEGRATION, "AGENT_BINDING_DISABLED", [U,C], [SubjectType.INTEGRATION_CONNECTION,SubjectType.PARTICIPANT], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["binding_id","state"]),
+    _ev("PRINT_TEMPLATE_CREATED", AuditCategory.PRINTING, "PRINT_TEMPLATE_CREATED", [U], [SubjectType.PRINT_TEMPLATE], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["template_id","template_version_id","layout_sha256"]),
+    _ev("PRINT_TEMPLATE_VERSION_CREATED", AuditCategory.PRINTING, "PRINT_TEMPLATE_VERSION_CREATED", [U], [SubjectType.PRINT_TEMPLATE], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["template_id","template_version_id","layout_sha256"]),
+    _ev("PRINT_TEMPLATE_ARCHIVED", AuditCategory.PRINTING, "PRINT_TEMPLATE_ARCHIVED", [U], [SubjectType.PRINT_TEMPLATE], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["template_id","template_version_id"]),
+    _ev("PRINT_JOB_REQUESTED", AuditCategory.PRINTING, "PRINT_JOB_REQUESTED", [U], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["template_version_id","count","printer_profile_fingerprint","print_mode","payload_sha256"]),
+    _ev("PRINT_JOB_COMPLETED", AuditCategory.PRINTING, "PRINT_JOB_COMPLETED", [A,W], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["template_version_id","count","printer_profile_fingerprint","print_mode","payload_sha256"]),
+    _ev("PRINT_JOB_FAILED", AuditCategory.PRINTING, "PRINT_JOB_FAILED", [A,W,S], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["template_version_id","count","printer_profile_fingerprint","print_mode","payload_sha256","error_code"]),
+    _ev("REPRINT_REQUESTED", AuditCategory.PRINTING, "REPRINT_REQUESTED", [U], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, snapshot=True, metadata=["template_version_id","count","printer_profile_fingerprint","original_print_event_id","print_mode","payload_sha256"]),
+    _ev("REPRINT_COMPLETED", AuditCategory.PRINTING, "REPRINT_COMPLETED", [A,W], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["template_version_id","count","printer_profile_fingerprint","original_print_event_id","print_mode","payload_sha256"]),
+    _ev("REPRINT_FAILED", AuditCategory.PRINTING, "REPRINT_FAILED", [A,W,S], [SubjectType.PRINT_JOB], TenantRequirement.PARTICIPANT, metadata=["template_version_id","count","printer_profile_fingerprint","original_print_event_id","print_mode","payload_sha256","error_code"]),
 ]
 
 AUDIT_EVENT_REGISTRY: dict[str, RegisteredAuditEvent] = {item.event_type: item for item in _EVENT_DEFINITIONS}
