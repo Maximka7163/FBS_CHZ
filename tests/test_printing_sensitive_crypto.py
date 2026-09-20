@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import x25519
@@ -24,6 +25,10 @@ from wbcz.printing_sensitive import (
     open_full_km,
     seal_full_km,
 )
+from starlette.requests import Request
+
+from wbcz.windows_agent import AgentAuthError
+from wbcz_web.api.agent_routes import _machine_principal
 from wbcz_web.config import WebConfig
 
 
@@ -197,3 +202,26 @@ def test_production_execution_gate_and_remote_suz_gate_remain_independent():
         replace(base, print_execution_enabled=True).validate_for_startup()
     with pytest.raises(ValueError, match="FULL KM SUZ acquisition remains blocked"):
         replace(base, suz_full_km_remote_acquisition_enabled=True).validate_for_startup()
+
+
+
+def test_browser_cookie_without_machine_bearer_cannot_authorize_v2_delivery():
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/api/agent/v2/printing/payload-deliveries/r1/issue",
+        "raw_path": b"/api/agent/v2/printing/payload-deliveries/r1/issue",
+        "query_string": b"",
+        "headers": [(b"cookie", b"wbcz_session=synthetic-browser-session")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 443),
+        "app": SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(agent_enabled=True)
+            )
+        ),
+    }
+    request = Request(scope)
+    with pytest.raises(AgentAuthError, match="machine bearer required"):
+        _machine_principal(request, object())
