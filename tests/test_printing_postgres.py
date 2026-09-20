@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -966,3 +967,118 @@ def test_foreign_participant_binding_cannot_authorize_delivery(factory):
                 agent_binding_id=foreign_binding.id,
                 user_id=user.id,
             )
+
+
+
+def test_concurrent_payload_issue_is_serialized_and_never_loses_issue_count(factory):
+    with factory() as db:
+        (
+            _, org, participant, _, _, _, _, binding, _, _, _, _, reservation
+        ) = _sensitive_ready(db)
+        org_id, participant_id, binding_id, reservation_id = (
+            org.id, participant.id, binding.id, reservation.id
+        )
+        db.commit()
+
+    def issue_once() -> str:
+        with factory() as db:
+            bind_tenant_scope(
+                db,
+                organisation_id=org_id,
+                participant_id=participant_id,
+                user_id=None,
+                role=None,
+            )
+            envelope = SensitivePrintingDeliveryService(
+                db, _cfg(execute=True), key_provider=StaticKeyProvider()
+            ).issue(reservation_id, machine_binding_id=binding_id)
+            db.commit()
+            return envelope["context_sha256"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(issue_once), pool.submit(issue_once)]
+        context_hashes = [future.result(timeout=20) for future in results]
+    assert len(context_hashes) == 2
+    assert context_hashes[0] == context_hashes[1]
+
+    with factory() as db:
+        row = db.get(PrintPayloadDeliveryReservationRecord, reservation_id)
+        execution = db.get(PrintExecutionRecord, row.print_execution_id)
+        assert row.issue_count == 2
+        assert row.state == "ISSUED"
+        assert execution.state == "PAYLOAD_ISSUED"
+
+
+def test_expired_reservation_is_not_disclosed(factory):
+    with factory() as db:
+        _, _, _, _, _, _, _, binding, _, _, sensitive, execution, reservation = _sensitive_ready(db)
+        reservation.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.flush()
+        with pytest.raises(SensitiveDeliveryRejected, match="DELIVERY_RESERVATION_EXPIRED"):
+            sensitive.issue(reservation.id, machine_binding_id=binding.id)
+        assert reservation.state == "EXPIRED"
+        assert reservation.issue_count == 0
+        assert execution.state == "PAYLOAD_AVAILABLE"
+
+
+def test_lost_private_key_reenrollment_revokes_old_key_reservation_and_execution(factory):
+    with factory() as db:
+        user, _, _, _, _, _, _, binding, old_key, _, sensitive, execution, reservation = _sensitive_ready(db)
+        intent, raw = sensitive.create_key_intent(
+            binding.id, purpose="REPLACE_LOST", user_id=user.id
+        )
+        assert intent.expected_active_key_id == old_key.id
+        new_private = x25519.X25519PrivateKey.generate()
+        new_key = sensitive.register_public_key(
+            agent_binding_id=binding.id,
+            intent_token=raw,
+            public_key_raw=new_private.public_key().public_bytes_raw(),
+        )
+        assert old_key.state == "REVOKED"
+        assert old_key.revoked_at is not None
+        assert new_key.state == "ACTIVE"
+        assert reservation.state == "REVOKED"
+        assert reservation.safe_error_code == "PRINT_RECIPIENT_KEY_LOST"
+        assert execution.state == "BLOCKED"
+        assert execution.safe_error_code == "PRINT_RECIPIENT_KEY_LOST"
+
+
+def test_issue_revalidates_provenance_and_vault_authentication_immediately_before_disclosure(factory):
+    with factory() as db:
+        _, _, _, stored, vault, _, _, binding, _, _, sensitive, execution, reservation = _sensitive_ready(db)
+        stored.provenance_state = "CONFLICT"
+        db.flush()
+        with pytest.raises(SensitiveDeliveryRejected, match="FULL_KM_PROVENANCE_NOT_PROVEN"):
+            sensitive.issue(reservation.id, machine_binding_id=binding.id)
+        assert reservation.issue_count == 0
+        stored.provenance_state = "PROVEN"
+        original_tag = bytes(vault.auth_tag)
+        vault.auth_tag = bytes([original_tag[0] ^ 1]) + original_tag[1:]
+        db.flush()
+        with pytest.raises(SensitiveDeliveryRejected, match="FULL_KM_VAULT_INTEGRITY_FAILED"):
+            sensitive.issue(reservation.id, machine_binding_id=binding.id)
+        assert reservation.issue_count == 0
+        assert execution.state == "PAYLOAD_AVAILABLE"
+
+
+def test_sensitive_delivery_feature_gates_block_before_payload_disclosure(factory):
+    with factory() as db:
+        _, _, _, _, _, _, _, binding, _, _, _, _, reservation = _sensitive_ready(db)
+        printing_off = replace(
+            _cfg(execute=True),
+            printing_enabled=False,
+            print_execution_enabled=False,
+        ).validate_for_startup()
+        with pytest.raises(SensitiveDeliveryRejected, match="PRINTING_DISABLED"):
+            SensitivePrintingDeliveryService(
+                db, printing_off, key_provider=StaticKeyProvider()
+            ).issue(reservation.id, machine_binding_id=binding.id)
+
+        execution_off = replace(
+            _cfg(execute=True),
+            print_execution_enabled=False,
+        ).validate_for_startup()
+        with pytest.raises(SensitiveDeliveryRejected, match="PRINT_EXECUTION_DISABLED"):
+            SensitivePrintingDeliveryService(
+                db, execution_off, key_provider=StaticKeyProvider()
+            ).issue(reservation.id, machine_binding_id=binding.id)
