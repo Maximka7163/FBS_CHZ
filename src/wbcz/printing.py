@@ -6,6 +6,7 @@ from ctypes import POINTER, byref, c_int, c_ubyte, c_void_p
 from ctypes.util import find_library
 import hashlib
 import json
+from importlib.metadata import PackageNotFoundError, version as package_version
 import math
 from typing import Any, Mapping
 
@@ -617,7 +618,11 @@ def independently_decode_gs1_datamatrix(raster: RasterImage) -> tuple[bytes, str
     symbology = str(result.symbology_identifier or "")
     if symbology != "]d2":
         raise PrintingSecurityError("decoded DataMatrix is not GS1 DataMatrix")
-    return bytes(result.bytes), getattr(zxingcpp, "__version__", "zxing-cpp-unknown")
+    try:
+        decoder_version = package_version("zxing-cpp")
+    except PackageNotFoundError:
+        decoder_version = "zxing-cpp-unknown"
+    return bytes(result.bytes), decoder_version
 
 
 def render_decode_verify_physical_label(
