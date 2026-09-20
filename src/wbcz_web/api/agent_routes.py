@@ -89,7 +89,7 @@ class PhysicalSpoolBoundaryRequest(_ClosedModel):
 
 
 class PhysicalResultRequest(_ClosedModel):
-    state: str = Field(pattern="^(SPOOL_JOB_CREATED|SPOOLER_ACCEPTED|FAILED_PRE_SPOOL|UNKNOWN_AFTER_SPOOL)$")
+    state: str = Field(pattern="^(SPOOL_JOB_CREATED|SPOOLER_ACCEPTED|FAILED_PRE_SPOOL|BLOCKED|UNKNOWN_AFTER_SPOOL)$")
     windows_spool_job_id: int | None = Field(default=None, ge=1, le=4294967295)
     last_windows_status: str | None = Field(default=None, max_length=64)
     safe_error_code: str | None = Field(default=None, max_length=96)
