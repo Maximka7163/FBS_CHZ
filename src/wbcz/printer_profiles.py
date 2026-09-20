@@ -520,6 +520,30 @@ class WindowsPrinterBackend:
             raise OSError("Windows printer discovery is unavailable on this platform")
         self.winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
         self.gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        self.winspool.EnumPrintersW.argtypes = [
+            wintypes.DWORD, wintypes.LPWSTR, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+        ]
+        self.winspool.EnumPrintersW.restype = wintypes.BOOL
+        self.winspool.OpenPrinterW.argtypes = [
+            wintypes.LPWSTR, ctypes.POINTER(wintypes.HANDLE), ctypes.c_void_p,
+        ]
+        self.winspool.OpenPrinterW.restype = wintypes.BOOL
+        self.winspool.GetPrinterW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        self.winspool.GetPrinterW.restype = wintypes.BOOL
+        self.winspool.ClosePrinter.argtypes = [wintypes.HANDLE]
+        self.winspool.ClosePrinter.restype = wintypes.BOOL
+        self.gdi32.CreateDCW.argtypes = [
+            wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p,
+        ]
+        self.gdi32.CreateDCW.restype = ctypes.c_void_p
+        self.gdi32.GetDeviceCaps.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.gdi32.GetDeviceCaps.restype = ctypes.c_int
+        self.gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+        self.gdi32.DeleteDC.restype = wintypes.BOOL
 
     def enumerate_printers(self) -> Sequence[LocalPrinterDescriptor]:
         needed = wintypes.DWORD()
