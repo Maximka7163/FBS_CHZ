@@ -814,6 +814,19 @@ class PhysicalPrintRuntime:
         })
 
         try:
+            # Re-resolve immediately before the first Windows side effect. This
+            # closes the render-to-StartDoc race if queue/driver/port/capability
+            # evidence changed after the earlier compatibility check.
+            resolved = self.resolver.resolve(
+                agent_printer_id=control.agent_printer_id,
+                expected_fingerprint=control.printer_profile_fingerprint,
+            )
+            if (
+                resolved.capabilities.dpi_x != render_contract.dpi_x
+                or resolved.capabilities.dpi_y != render_contract.dpi_y
+            ):
+                raise DefinitePreSpoolFailure("PRINTER_PROFILE_DPI_CHANGED")
+
             def on_job_created(job_id: int) -> None:
                 self.replay.record(
                     execution_id=control.execution_id,
