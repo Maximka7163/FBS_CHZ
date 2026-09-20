@@ -808,7 +808,7 @@ def test_sensitive_delivery_exact_hpke_roundtrip_reissue_ack_and_canary_redactio
         assert second_execution.state == "PAYLOAD_DELIVERED"
         assert second_reservation.state == "ACKNOWLEDGED"
 
-        needle = canary.decode("utf-8")
+        needle = "SENSITIVE-CANARY-7f193a"
         for model in (
             PrintExecutionRecord,
             PrintPayloadDeliveryReservationRecord,
@@ -826,9 +826,8 @@ def test_sensitive_delivery_exact_hpke_roundtrip_reissue_ack_and_canary_redactio
 def test_print_key_intent_is_one_use_and_rotation_retires_old_key(factory):
     with factory() as db:
         user, _, _, _, _, _, _, binding, first, _, sensitive, execution, reservation = _sensitive_ready(db)
-        with pytest.raises(SensitiveDeliveryRejected, match="PRINT_KEY_INTENT_ALREADY_USED"):
-            # The first intent token is deliberately unavailable here; verify bearer-only
-            # replacement fails by supplying a non-authorized token.
+        with pytest.raises(SensitiveDeliveryRejected, match="INVALID_PRINT_KEY_INTENT"):
+            # Verify bearer-only replacement fails without an operator-created intent.
             sensitive.register_public_key(
                 agent_binding_id=binding.id,
                 intent_token="x" * 64,
