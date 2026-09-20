@@ -6,6 +6,7 @@ import ctypes
 from ctypes import wintypes
 import hashlib
 import json
+from importlib.metadata import PackageNotFoundError, version as package_version
 import os
 from pathlib import Path
 import re
@@ -669,8 +670,9 @@ class PhysicalPrintRuntime:
     @staticmethod
     def capability_report() -> dict[str, Any]:
         try:
-            decoder_version = __import__("zxingcpp").__version__
-        except Exception:
+            __import__("zxingcpp")
+            decoder_version = package_version("zxing-cpp")
+        except (ImportError, PackageNotFoundError):
             decoder_version = "unavailable"
         return {
             "print_protocol_version": PRINT_PROTOCOL_VERSION,
