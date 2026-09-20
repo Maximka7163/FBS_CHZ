@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -225,3 +226,97 @@ def test_browser_cookie_without_machine_bearer_cannot_authorize_v2_delivery():
     request = Request(scope)
     with pytest.raises(AgentAuthError, match="machine bearer required"):
         _machine_principal(request, object())
+
+
+
+def test_agent_keeps_hpke_plaintext_in_memory_through_server_ack_then_consumes(tmp_path: Path):
+    protector = _FakeProtector()
+    key_path = tmp_path / "printing-key-phase-c.json"
+    replay_path = tmp_path / "printing-replay-phase-c.sqlite3"
+    store = AgentPrintKeyStore(key_path, protector=protector)
+    generated = store.generate()
+    store.bind_server_version(1)
+
+    payload = b"010460000000001221PHASEC-MEMORY\x1d91TEST\x1d92ACK-BRIDGE"
+    context = _context()
+    context["payload_sha256"] = __import__("hashlib").sha256(payload).hexdigest()
+    envelope = seal_full_km(
+        recipient_public_key_raw=b64d(generated.public_key_b64),
+        plaintext_full_km=payload,
+        context=context,
+    )
+    agent_envelope = {
+        **envelope,
+        "delivery_reservation_id": context["delivery_reservation_id"],
+        "print_execution_id": context["print_execution_id"],
+        "print_job_item_id": context["print_job_item_id"],
+        "context": context,
+    }
+    order: list[str] = []
+    consumed: list[bytes] = []
+
+    def acknowledge(ack):
+        order.append("ack")
+        assert ack["payload_sha256"] == context["payload_sha256"]
+        return {
+            "state": "ACKNOWLEDGED",
+            "delivery_reservation_id": ack["delivery_reservation_id"],
+        }
+
+    def consume_after_ack(value: bytes):
+        order.append("physical")
+        consumed.append(bytes(value))
+
+    agent = SensitiveDeliveryAgent(store, AgentSensitiveReplayStore(replay_path))
+    ack = agent.open_verify_ack_then_consume(
+        agent_envelope,
+        acknowledge=acknowledge,
+        consume_after_ack=consume_after_ack,
+    )
+    assert order == ["ack", "physical"]
+    assert consumed == [payload]
+    assert ack["delivery_reservation_id"] == context["delivery_reservation_id"]
+    assert payload not in replay_path.read_bytes()
+
+    replay = sqlite3.connect(replay_path)
+    try:
+        state = replay.execute(
+            "SELECT state FROM print_sensitive_replay WHERE execution_id=?",
+            (context["print_execution_id"],),
+        ).fetchone()[0]
+    finally:
+        replay.close()
+    assert state == "ACKNOWLEDGED"
+
+
+def test_agent_never_enters_physical_callback_when_server_ack_fails(tmp_path: Path):
+    protector = _FakeProtector()
+    store = AgentPrintKeyStore(tmp_path / "key.json", protector=protector)
+    generated = store.generate()
+    store.bind_server_version(1)
+    payload = b"010460000000001221PHASEC-NOACK\x1d91TEST\x1d92BLOCK"
+    context = _context()
+    context["payload_sha256"] = __import__("hashlib").sha256(payload).hexdigest()
+    envelope = seal_full_km(
+        recipient_public_key_raw=b64d(generated.public_key_b64),
+        plaintext_full_km=payload,
+        context=context,
+    )
+    agent_envelope = {
+        **envelope,
+        "delivery_reservation_id": context["delivery_reservation_id"],
+        "print_execution_id": context["print_execution_id"],
+        "print_job_item_id": context["print_job_item_id"],
+        "context": context,
+    }
+    called: list[bytes] = []
+    agent = SensitiveDeliveryAgent(
+        store, AgentSensitiveReplayStore(tmp_path / "replay.sqlite3")
+    )
+    with pytest.raises(SensitiveEnvelopeError, match="did not acknowledge"):
+        agent.open_verify_ack_then_consume(
+            agent_envelope,
+            acknowledge=lambda ack: {"state": "FAILED"},
+            consume_after_ack=called.append,
+        )
+    assert called == []
