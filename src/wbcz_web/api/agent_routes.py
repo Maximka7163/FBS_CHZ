@@ -519,6 +519,26 @@ def physical_execution_result(
         return _v2_json({"code": exc.code}, status_code=409)
 
 
+@agent_v2_printing_router.get("/physical-executions/{execution_id}/status-control")
+def physical_execution_status_control(
+    execution_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PhysicalPrintingService(db, request.app.state.config).status_control(
+            execution_id,
+            machine_binding_id=principal.binding_id or "",
+        )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PhysicalExecutionRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
 @agent_v2_printing_router.post("/physical-executions/{execution_id}/status")
 def physical_execution_status_update(
     execution_id: str,
