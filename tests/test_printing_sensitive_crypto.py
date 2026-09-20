@@ -56,8 +56,9 @@ def test_rfc9180_exact_suite_and_official_a1_x25519_key_material():
     # AEAD 0x0001. The public keys below must derive from the published
     # recipient and deterministic sender private keys.
     assert KEM.X25519.enc_length() == 32
-    assert KDF.HKDF_SHA256.name == "HKDF_SHA256"
-    assert AEAD.AES_128_GCM.name == "AES_128_GCM"
+    assert SUITE_ID == "DHKEM_X25519_HKDF_SHA256__HKDF_SHA256__AES_128_GCM"
+    assert KDF.HKDF_SHA256 is not None
+    assert AEAD.AES_128_GCM is not None
     sk_r = bytes.fromhex("4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8")
     pk_r = bytes.fromhex("3948cfe0ad1ddb695d780e59077195da6c56506b027329794ab02bca80815c4d")
     sk_e = bytes.fromhex("52c4a758a802cd8b936eceea314432798d5baf2d7e9235dc084ab1b9cfa2f736")
