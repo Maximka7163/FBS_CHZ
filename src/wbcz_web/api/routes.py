@@ -167,6 +167,9 @@ def capabilities(request: Request, _: AuthenticatedIdentity = Depends(require_us
         "submission": False,
         "windows_bridge": config.agent_enabled,
         "registration": False,
+        "printing": config.printing_enabled,
+        "print_execution": config.print_execution_enabled,
+        "suz_full_km_remote_acquisition": config.suz_full_km_remote_acquisition_enabled,
     }
 
 
