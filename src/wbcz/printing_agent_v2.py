@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 
 from cryptography.hazmat.primitives.asymmetric import x25519
 
@@ -267,78 +267,78 @@ class SensitiveDeliveryAgent:
         acknowledge: Callable[[dict[str, str]], Mapping[str, object]],
         consume_after_ack: Callable[[bytes], None],
     ) -> dict[str, str]:
-        \"\"\"Keep plaintext only in process memory across the machine ACK boundary.
+        """Keep plaintext only in process memory across the machine ACK boundary.
 
         No render/spool callback runs unless the server confirms ACKNOWLEDGED.
         This avoids a second payload disclosure while preserving Phase-A hash
         and replay checks. CPython memory zeroization is not claimed.
-        \"\"\"
+        """
         required = {
-            \"delivery_reservation_id\", \"print_execution_id\", \"print_job_item_id\",
-            \"envelope_version\", \"hpke_suite_id\", \"recipient_key_version\", \"enc\",
-            \"ciphertext\", \"payload_sha256\", \"context_sha256\", \"expires_at\", \"context\",
+            "delivery_reservation_id", "print_execution_id", "print_job_item_id",
+            "envelope_version", "hpke_suite_id", "recipient_key_version", "enc",
+            "ciphertext", "payload_sha256", "context_sha256", "expires_at", "context",
         }
         if set(envelope) != required:
-            raise SensitiveEnvelopeError(\"printing-agent-v2 envelope fields mismatch\")
-        context = envelope[\"context\"]
+            raise SensitiveEnvelopeError("printing-agent-v2 envelope fields mismatch")
+        context = envelope["context"]
         if not isinstance(context, dict):
-            raise SensitiveEnvelopeError(\"printing-agent-v2 context missing\")
-        if envelope[\"envelope_version\"] != ENVELOPE_VERSION or envelope[\"hpke_suite_id\"] != SUITE_ID:
-            raise SensitiveEnvelopeError(\"unsupported printing HPKE envelope\")
-        if context_sha256(context) != envelope[\"context_sha256\"]:
-            raise SensitiveEnvelopeError(\"delivery context SHA-256 mismatch\")
+            raise SensitiveEnvelopeError("printing-agent-v2 context missing")
+        if envelope["envelope_version"] != ENVELOPE_VERSION or envelope["hpke_suite_id"] != SUITE_ID:
+            raise SensitiveEnvelopeError("unsupported printing HPKE envelope")
+        if context_sha256(context) != envelope["context_sha256"]:
+            raise SensitiveEnvelopeError("delivery context SHA-256 mismatch")
         local = self.key_store.public_metadata()
-        if local.get(\"server_key_version\") != int(envelope[\"recipient_key_version\"]):
-            raise SensitiveEnvelopeError(\"recipient key version mismatch\")
+        if local.get("server_key_version") != int(envelope["recipient_key_version"]):
+            raise SensitiveEnvelopeError("recipient key version mismatch")
 
         private_raw = self.key_store.open_private_key()
-        plaintext = b\"\"
+        plaintext = b""
         try:
             plaintext = open_full_km(
                 recipient_private_key_raw=private_raw,
-                enc_b64=envelope[\"enc\"],
-                ciphertext_b64=envelope[\"ciphertext\"],
+                enc_b64=envelope["enc"],
+                ciphertext_b64=envelope["ciphertext"],
                 context=context,
             )
             digest = hashlib.sha256(plaintext).hexdigest()
-            if digest != envelope[\"payload_sha256\"]:
-                raise SensitiveEnvelopeError(\"payload SHA-256 mismatch\")
+            if digest != envelope["payload_sha256"]:
+                raise SensitiveEnvelopeError("payload SHA-256 mismatch")
 
             self.replay_store.record(
-                execution_id=envelope[\"print_execution_id\"],
-                print_job_item_id=envelope[\"print_job_item_id\"],
-                reservation_id=envelope[\"delivery_reservation_id\"],
-                payload_sha256=envelope[\"payload_sha256\"],
-                context_sha256=envelope[\"context_sha256\"],
-                state=\"OPENED_VERIFIED\",
-                key_version=int(envelope[\"recipient_key_version\"]),
+                execution_id=envelope["print_execution_id"],
+                print_job_item_id=envelope["print_job_item_id"],
+                reservation_id=envelope["delivery_reservation_id"],
+                payload_sha256=envelope["payload_sha256"],
+                context_sha256=envelope["context_sha256"],
+                state="OPENED_VERIFIED",
+                key_version=int(envelope["recipient_key_version"]),
             )
             ack = {
-                \"delivery_reservation_id\": envelope[\"delivery_reservation_id\"],
-                \"payload_sha256\": envelope[\"payload_sha256\"],
-                \"context_sha256\": envelope[\"context_sha256\"],
+                "delivery_reservation_id": envelope["delivery_reservation_id"],
+                "payload_sha256": envelope["payload_sha256"],
+                "context_sha256": envelope["context_sha256"],
             }
             response = acknowledge(ack)
             if (
                 not isinstance(response, Mapping)
-                or response.get(\"state\") != \"ACKNOWLEDGED\"
-                or response.get(\"delivery_reservation_id\") != envelope[\"delivery_reservation_id\"]
+                or response.get("state") != "ACKNOWLEDGED"
+                or response.get("delivery_reservation_id") != envelope["delivery_reservation_id"]
             ):
-                raise SensitiveEnvelopeError(\"server did not acknowledge exact sensitive delivery\")
+                raise SensitiveEnvelopeError("server did not acknowledge exact sensitive delivery")
             self.replay_store.record(
-                execution_id=envelope[\"print_execution_id\"],
-                print_job_item_id=envelope[\"print_job_item_id\"],
-                reservation_id=envelope[\"delivery_reservation_id\"],
-                payload_sha256=envelope[\"payload_sha256\"],
-                context_sha256=envelope[\"context_sha256\"],
-                state=\"ACKNOWLEDGED\",
-                key_version=int(envelope[\"recipient_key_version\"]),
+                execution_id=envelope["print_execution_id"],
+                print_job_item_id=envelope["print_job_item_id"],
+                reservation_id=envelope["delivery_reservation_id"],
+                payload_sha256=envelope["payload_sha256"],
+                context_sha256=envelope["context_sha256"],
+                state="ACKNOWLEDGED",
+                key_version=int(envelope["recipient_key_version"]),
             )
             consume_after_ack(plaintext)
             return ack
         finally:
-            private_raw = b\"\"
-            plaintext = b\"\"
+            private_raw = b""
+            plaintext = b""
     def open_verify_and_ack(
         self,
         envelope: dict,
