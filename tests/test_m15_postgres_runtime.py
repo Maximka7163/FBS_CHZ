@@ -421,7 +421,7 @@ def test_readiness_exact_revision_is_independent_of_agent_and_remote_availabilit
         secret_provider=ReadOnlySecretProvider(),
     ).evaluate()
     assert ready is True
-    assert payload["actual_migration_revision"] == "0018_printing_sensitive_delivery"
+    assert payload["actual_migration_revision"] == "0019_printing_printer_profiles"
 
     with factory() as db:
         current = datetime.now(timezone.utc)
