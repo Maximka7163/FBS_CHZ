@@ -16,6 +16,7 @@ from wbcz.physical_printing import (
     PhysicalExecutionControl,
     PhysicalPrintError,
     PhysicalPrintRuntime,
+    PhysicalPrintStatusRuntime,
     PhysicalReplayBlocked,
     SyntheticPhysicalTestRuntime,
     WindowsGdiRasterSpooler,
@@ -358,3 +359,75 @@ def test_windows_gdi_and_status_adapters_load_without_printing():
     # StartDoc/spool side effect is invoked by this smoke test.
     WindowsGdiRasterSpooler()
     WindowsSpoolStatusAdapter()
+
+
+
+def test_crash_after_spool_acceptance_before_backend_report_is_not_replayed(tmp_path):
+    local, control, render_contract = contracts()
+    replay = AgentPhysicalReplayStore(tmp_path / "accepted-crash.sqlite")
+    reports = []
+
+    def report(payload):
+        reports.append(dict(payload))
+        if payload["state"] == "SPOOLER_ACCEPTED":
+            raise RuntimeError("synthetic network crash after EndDoc")
+        return payload
+
+    physical = PhysicalPrintRuntime(
+        resolver=LocalPrinterResolver(FakeDiscovery(local)),
+        spooler=FakeGdiRasterSpooler(job_id=733),
+        replay=replay,
+        mark_rendered=lambda payload: payload,
+        begin_spool=lambda payload: payload,
+        report_result=report,
+    )
+    with pytest.raises(RuntimeError, match="synthetic network crash"):
+        physical.execute(control, render_contract, full_km=SYNTHETIC_PREVIEW_FULL_KM)
+    stored = replay.get("exec-1")
+    assert stored["state"] == "SPOOLER_ACCEPTED"
+    assert stored["windows_spool_job_id"] == 733
+    with pytest.raises(PhysicalReplayBlocked):
+        physical.execute(control, render_contract, full_km=SYNTHETIC_PREVIEW_FULL_KM)
+
+
+class FakeStatusAdapter:
+    def query(self, *, queue_name, windows_spool_job_id):
+        assert queue_name == "Synthetic Local Queue"
+        assert windows_spool_job_id == 412
+        return {
+            "normalized_state": "OFFLINE",
+            "observed_at": "2026-09-21T01:02:03+00:00",
+            "safe_error_code": "PRINTER_OFFLINE",
+        }
+
+
+def test_typed_print_status_resolves_only_opaque_approved_printer():
+    local, control, _ = contracts()
+    runtime = PhysicalPrintStatusRuntime(
+        resolver=LocalPrinterResolver(FakeDiscovery(local)),
+        status_adapter=FakeStatusAdapter(),
+    )
+    result = runtime.query({
+        "contract_version": "printing-agent-v2",
+        "operation": "PRINT_STATUS",
+        "execution_id": control["execution_id"],
+        "printer_profile_id": control["printer_profile_id"],
+        "printer_profile_fingerprint": control["printer_profile_fingerprint"],
+        "agent_printer_id": control["agent_printer_id"],
+        "windows_spool_job_id": 412,
+    })
+    assert result["normalized_state"] == "OFFLINE"
+    assert result["physical_output_proven"] is False
+    assert "queue_name" not in result
+
+    with pytest.raises(Exception):
+        runtime.query({
+            "contract_version": "printing-agent-v2",
+            "operation": "PRINT_STATUS",
+            "execution_id": control["execution_id"],
+            "printer_profile_id": control["printer_profile_id"],
+            "printer_profile_fingerprint": control["printer_profile_fingerprint"],
+            "agent_printer_id": control["agent_printer_id"],
+            "windows_spool_job_id": 412,
+            "queue_name": "caller-controlled",
+        })
