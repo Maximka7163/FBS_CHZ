@@ -432,6 +432,8 @@ class PhysicalLabelRaster:
     effective_module_mm: float
     physical_offset_x_px: int = 0
     physical_offset_y_px: int = 0
+    printable_width_px: int = 0
+    printable_height_px: int = 0
 
 
 def libdmtx_version() -> str:
