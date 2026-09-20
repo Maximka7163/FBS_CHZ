@@ -123,7 +123,7 @@ def test_production_routes_health_version_auth_and_capabilities():
         login = client.post("/api/auth/login", json={"username": "owner", "password": "very-secure-password"}, headers={"X-CSRF-Token": csrf})
         assert login.status_code == 200
         caps = client.get("/api/capabilities")
-        assert caps.json() == {"true_api": "offline-dry-run", "true_api_write": False, "document_signing": False, "submission": False, "windows_bridge": False, "registration": False}
+        assert caps.json() == {"true_api": "offline-dry-run", "true_api_write": False, "document_signing": False, "submission": False, "windows_bridge": False, "registration": False, "printing": False, "print_execution": False, "suz_full_km_remote_acquisition": False}
         assert client.post("/api/submit", headers={"X-CSRF-Token": csrf}).status_code == 404
         assert client.post("/api/lk/documents/create", headers={"X-CSRF-Token": csrf}).status_code == 404
     Base.metadata.drop_all(engine)
