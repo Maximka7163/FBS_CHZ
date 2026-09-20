@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from cryptography.hazmat.primitives.asymmetric import x25519
 
 from wbcz.printing_sensitive import open_full_km
+from wbcz.printer_profiles import capability_hash
 from wbcz.suz_foundation import KmVault, VaultBinding, envelope_to_persistence
 from wbcz_web.auth import hash_password
 from wbcz_web.config import WebConfig
@@ -26,6 +27,7 @@ from wbcz_web.db import build_session_factory
 from wbcz_web.models import (
     AgentBindingEncryptionKeyRecord,
     AgentBindingRecord,
+    AgentJobRecord,
     AuditEventRecord,
     MembershipRecord,
     OrganisationRecord,
@@ -36,6 +38,9 @@ from wbcz_web.models import (
     PrintJobItemRecord,
     PrintJobRecord,
     PrintPayloadDeliveryReservationRecord,
+    PrinterDiscoveryObservationRecord,
+    PrinterDiscoveryRunRecord,
+    PrinterProfileRecord,
     PrintTemplateVersionRecord,
     StoredFullKmItemRecord,
     SuzCodeBlockRecord,
@@ -57,6 +62,7 @@ from wbcz_web.services.printing_sensitive_delivery import (
     SensitiveDeliveryRejected,
     SensitivePrintingDeliveryService,
 )
+from wbcz_web.services.printer_profiles import PrinterProfileRejected, PrinterProfileService
 from wbcz_web.services.tenant import bind_tenant_scope
 
 
@@ -694,6 +700,7 @@ def _v2_binding(db: Session, org: OrganisationRecord, participant: ParticipantRe
         supported_capabilities_json=[
             "PRINTING_SENSITIVE_DELIVERY_V1",
             "HPKE_X25519_AES128GCM_V1",
+            "PRINT_DISCOVER_PRINTERS",
         ],
         capabilities_sanitized={},
     )
