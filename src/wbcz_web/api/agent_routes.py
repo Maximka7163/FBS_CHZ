@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 import os
 import shutil
 from pathlib import Path
@@ -8,14 +10,59 @@ import tempfile
 from sqlalchemy.orm import Session
 
 from wbcz.agent_http import VpsAgentHttpBoundary
+from wbcz.printing_sensitive import b64d
 from wbcz.windows_agent import AgentAuthError, AgentSecurityError
 from wbcz.write_pipeline import InvalidWriteOperation
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
+from wbcz_web.services.agent_bindings import AgentBindingService
+from wbcz_web.services.printing_sensitive_delivery import (
+    SensitiveDeliveryRejected,
+    SensitivePrintingDeliveryService,
+)
 
 from .dependencies import get_db
 
 
 agent_router = APIRouter(prefix="/api/agent/v1", tags=["agent"])
+agent_v2_printing_router = APIRouter(prefix="/api/agent/v2/printing", tags=["agent-printing-v2"])
+
+
+class _ClosedModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PrintKeyRegistrationRequest(_ClosedModel):
+    intent_token: str = Field(min_length=43, max_length=256)
+    public_key: str = Field(min_length=40, max_length=128)
+
+
+class PrintPayloadAckRequest(_ClosedModel):
+    delivery_reservation_id: str = Field(min_length=1, max_length=64)
+    payload_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    context_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+
+
+def _machine_principal(request: Request, db: Session):
+    if not request.app.state.config.agent_enabled:
+        raise AgentAuthError("agent disabled")
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise AgentAuthError("machine bearer required")
+    raw = auth[7:].strip()
+    if not raw:
+        raise AgentAuthError("machine bearer required")
+    principal = AgentBindingService(db).authenticate(raw, mark_poll=True)
+    if principal.legacy or not principal.binding_id:
+        raise AgentAuthError("participant-bound machine credential required")
+    return principal
+
+
+def _v2_json(value: dict, *, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        value,
+        status_code=status_code,
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 def _boundary(request: Request, db: Session) -> VpsAgentHttpBoundary | None:
@@ -154,3 +201,98 @@ async def agent_report_artifact_ingress(
         return Response(status_code=401, headers={"Cache-Control": "no-store"})
     except (AgentSecurityError, InvalidWriteOperation, ValueError, KeyError):
         return Response(status_code=400, headers={"Cache-Control": "no-store"})
+
+
+
+@agent_v2_printing_router.post("/encryption-keys/register")
+def register_print_encryption_key(
+    payload: PrintKeyRegistrationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        row = SensitivePrintingDeliveryService(db, request.app.state.config).register_public_key(
+            agent_binding_id=principal.binding_id or "",
+            intent_token=payload.intent_token,
+            public_key_raw=b64d(payload.public_key),
+        )
+        return _v2_json({
+            "agent_binding_id": row.agent_binding_id,
+            "key_version": row.key_version,
+            "public_key_fingerprint": row.public_key_fingerprint,
+            "algorithm": row.algorithm,
+            "state": row.state,
+        }, status_code=201)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except SensitiveDeliveryRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+    except ValueError:
+        return _v2_json({"code": "PRINT_KEY_REGISTRATION_REJECTED"}, status_code=400)
+
+
+@agent_v2_printing_router.get("/executions/next")
+def next_printing_v2_control(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = SensitivePrintingDeliveryService(db, request.app.state.config).next_control(
+            machine_binding_id=principal.binding_id or "",
+        )
+        if value is None:
+            return Response(status_code=204, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except SensitiveDeliveryRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.post("/payload-deliveries/{reservation_id}/issue")
+def issue_print_payload(
+    reservation_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        envelope = SensitivePrintingDeliveryService(db, request.app.state.config).issue(
+            reservation_id,
+            machine_binding_id=principal.binding_id or "",
+        )
+        return _v2_json(envelope)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except SensitiveDeliveryRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.post("/payload-deliveries/{reservation_id}/ack")
+def acknowledge_print_payload(
+    reservation_id: str,
+    payload: PrintPayloadAckRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    if payload.delivery_reservation_id != reservation_id:
+        return _v2_json({"code": "DELIVERY_ACK_RESERVATION_MISMATCH"}, status_code=400)
+    try:
+        principal = _machine_principal(request, db)
+        value = SensitivePrintingDeliveryService(db, request.app.state.config).acknowledge(
+            reservation_id,
+            machine_binding_id=principal.binding_id or "",
+            payload_sha256=payload.payload_sha256,
+            context_sha256=payload.context_sha256,
+        )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except SensitiveDeliveryRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
