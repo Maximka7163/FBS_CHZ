@@ -76,7 +76,7 @@ class StaticKeyProvider:
         return VAULT_KEY
 
 
-PRINTING_MIGRATION = "0018_printing_sensitive_delivery"
+PRINTING_MIGRATION = "0019_printing_printer_profiles"
 PRINTING_TABLES = {
     "users",
     "organisations",
@@ -90,6 +90,9 @@ PRINTING_TABLES = {
     "print_encryption_key_intents",
     "print_executions",
     "print_payload_delivery_reservations",
+    "printer_discovery_runs",
+    "printer_discovery_observations",
+    "printer_profiles",
 }
 PRINTING_TRIGGERS = {
     "trg_print_template_versions_immutable",
