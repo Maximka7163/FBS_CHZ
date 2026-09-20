@@ -259,6 +259,8 @@ class LocalPrintingService:
         return PrintabilityProjection(PRINTABLE, "PROVEN_LOCAL_FULL_KM", row.id, row.full_km_sha256)
 
     def resolve_printability_public(self, cis: str) -> dict[str, Any]:
+        if not self.config.printing_enabled:
+            raise PrintingUnavailable("local printing capability is disabled")
         return {"cis": cis, "printability": self.resolve_printability(cis).public()}
 
     def enrich_m1_result(self, result: Any) -> Any:
@@ -560,6 +562,31 @@ class LocalPrintingService:
             "mode": mode,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def create_print_job_for_cis(
+        self,
+        *,
+        cis_values: list[str],
+        template_version_id: str,
+        user_id: int,
+        mode: str = "INITIAL_PRINT",
+        printer_profile_id: str | None = None,
+    ) -> PrintJobRecord:
+        if not 1 <= len(cis_values) <= 1000 or len(set(cis_values)) != len(cis_values):
+            raise ValueError("cis_values must contain 1..1000 unique CIS values")
+        stored_ids: list[str] = []
+        for cis in cis_values:
+            projection = self.resolve_printability(cis)
+            if projection.state != PRINTABLE or projection.stored_full_km_item_id is None:
+                raise PrintingIntegrityError(f"CIS_NOT_PRINTABLE:{projection.reason}")
+            stored_ids.append(projection.stored_full_km_item_id)
+        return self.create_print_job(
+            stored_item_ids=stored_ids,
+            template_version_id=template_version_id,
+            user_id=user_id,
+            mode=mode,
+            printer_profile_id=printer_profile_id,
+        )
 
     def create_print_job(
         self,
