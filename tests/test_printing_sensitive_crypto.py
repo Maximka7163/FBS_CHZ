@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+from dataclasses import replace
+import os
+from pathlib import Path
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.hpke import AEAD, KDF, KEM
+
+from wbcz.printing_agent_v2 import (
+    AgentPrintKeyStore,
+    AgentSensitiveReplayStore,
+    DpapiProtector,
+    SensitiveDeliveryAgent,
+)
+from wbcz.printing_sensitive import (
+    ENVELOPE_VERSION,
+    SUITE_ID,
+    SensitiveEnvelopeError,
+    b64d,
+    b64e,
+    context_sha256,
+    open_full_km,
+    seal_full_km,
+)
+from wbcz_web.config import WebConfig
+
+
+def _context(*, key_version: int = 1) -> dict:
+    return {
+        "delivery_reservation_id": "reservation-001",
+        "print_execution_id": "execution-001",
+        "print_job_id": "job-001",
+        "print_job_item_id": "item-001",
+        "stored_full_km_item_id": "stored-001",
+        "organisation_id": "org-001",
+        "participant_id": "participant-001",
+        "agent_binding_id": "binding-001",
+        "payload_sha256": "a" * 64,
+        "template_version_id": "template-version-001",
+        "layout_sha256": "b" * 64,
+        "recipient_key_version": key_version,
+        "expires_at": "2026-09-21T00:10:00Z",
+    }
+
+
+def _flip(value: str) -> str:
+    raw = bytearray(b64d(value))
+    raw[-1] ^= 1
+    return b64e(bytes(raw))
+
+
+def test_rfc9180_exact_suite_and_official_a1_x25519_key_material():
+    # RFC 9180 Appendix A.1 official vector: KEM 0x0020, KDF 0x0001,
+    # AEAD 0x0001. The public keys below must derive from the published
+    # recipient and deterministic sender private keys.
+    assert KEM.X25519.enc_length() == 32
+    assert KDF.HKDF_SHA256.name == "HKDF_SHA256"
+    assert AEAD.AES_128_GCM.name == "AES_128_GCM"
+    sk_r = bytes.fromhex("4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8")
+    pk_r = bytes.fromhex("3948cfe0ad1ddb695d780e59077195da6c56506b027329794ab02bca80815c4d")
+    sk_e = bytes.fromhex("52c4a758a802cd8b936eceea314432798d5baf2d7e9235dc084ab1b9cfa2f736")
+    pk_e = bytes.fromhex("37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431")
+    assert x25519.X25519PrivateKey.from_private_bytes(sk_r).public_key().public_bytes_raw() == pk_r
+    assert x25519.X25519PrivateKey.from_private_bytes(sk_e).public_key().public_bytes_raw() == pk_e
+
+
+def test_hpke_roundtrip_wrong_key_modified_enc_ciphertext_and_context_fail_closed():
+    recipient = x25519.X25519PrivateKey.generate()
+    context = _context()
+    payload = b"010460000000001221PHASEA\x1d91TEST\x1d92CANARY"
+    context["payload_sha256"] = __import__("hashlib").sha256(payload).hexdigest()
+    envelope = seal_full_km(
+        recipient_public_key_raw=recipient.public_key().public_bytes_raw(),
+        plaintext_full_km=payload,
+        context=context,
+    )
+    assert envelope["envelope_version"] == ENVELOPE_VERSION
+    assert envelope["hpke_suite_id"] == SUITE_ID
+    assert envelope["context_sha256"] == context_sha256(context)
+    assert open_full_km(
+        recipient_private_key_raw=recipient.private_bytes_raw(),
+        enc_b64=envelope["enc"],
+        ciphertext_b64=envelope["ciphertext"],
+        context=context,
+    ) == payload
+
+    wrong = x25519.X25519PrivateKey.generate()
+    with pytest.raises(SensitiveEnvelopeError):
+        open_full_km(
+            recipient_private_key_raw=wrong.private_bytes_raw(),
+            enc_b64=envelope["enc"],
+            ciphertext_b64=envelope["ciphertext"],
+            context=context,
+        )
+    with pytest.raises(SensitiveEnvelopeError):
+        open_full_km(
+            recipient_private_key_raw=recipient.private_bytes_raw(),
+            enc_b64=_flip(envelope["enc"]),
+            ciphertext_b64=envelope["ciphertext"],
+            context=context,
+        )
+    with pytest.raises(SensitiveEnvelopeError):
+        open_full_km(
+            recipient_private_key_raw=recipient.private_bytes_raw(),
+            enc_b64=envelope["enc"],
+            ciphertext_b64=_flip(envelope["ciphertext"]),
+            context=context,
+        )
+    modified = dict(context)
+    modified["print_job_item_id"] = "item-modified"
+    with pytest.raises(SensitiveEnvelopeError):
+        open_full_km(
+            recipient_private_key_raw=recipient.private_bytes_raw(),
+            enc_b64=envelope["enc"],
+            ciphertext_b64=envelope["ciphertext"],
+            context=modified,
+        )
+
+
+class _FakeProtector:
+    def __init__(self) -> None:
+        self.last_plaintext: bytes | None = None
+
+    def protect(self, plaintext: bytes) -> bytes:
+        self.last_plaintext = bytes(plaintext)
+        return bytes(value ^ 0xA5 for value in plaintext)
+
+    def unprotect(self, protected: bytes) -> bytes:
+        return bytes(value ^ 0xA5 for value in protected)
+
+
+def test_agent_dpapi_boundary_and_replay_store_never_persist_plaintext(tmp_path: Path):
+    protector = _FakeProtector()
+    key_path = tmp_path / "printing-key.json"
+    replay_path = tmp_path / "printing-replay.sqlite3"
+    store = AgentPrintKeyStore(key_path, protector=protector)
+    generated = store.generate()
+    assert protector.last_plaintext is not None
+    assert protector.last_plaintext not in key_path.read_bytes()
+    store.bind_server_version(1)
+
+    payload = b"010460000000001221PHASEA\x1d91TEST\x1d92AGENT-CANARY-991"
+    context = _context()
+    context["payload_sha256"] = __import__("hashlib").sha256(payload).hexdigest()
+    envelope = seal_full_km(
+        recipient_public_key_raw=b64d(generated.public_key_b64),
+        plaintext_full_km=payload,
+        context=context,
+    )
+    agent_envelope = {
+        **envelope,
+        "delivery_reservation_id": context["delivery_reservation_id"],
+        "print_execution_id": context["print_execution_id"],
+        "print_job_item_id": context["print_job_item_id"],
+        "context": context,
+    }
+    captured: list[bytes] = []
+    agent = SensitiveDeliveryAgent(store, AgentSensitiveReplayStore(replay_path))
+    ack = agent.open_verify_and_ack(agent_envelope, consume_in_memory=captured.append)
+    assert captured == [payload]
+    assert ack == {
+        "delivery_reservation_id": context["delivery_reservation_id"],
+        "payload_sha256": context["payload_sha256"],
+        "context_sha256": envelope["context_sha256"],
+    }
+    assert payload not in replay_path.read_bytes()
+    assert envelope["ciphertext"].encode("ascii") not in replay_path.read_bytes()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real DPAPI only runs on Windows")
+def test_real_windows_dpapi_roundtrip_synthetic_only():
+    protector = DpapiProtector()
+    synthetic = b"synthetic-x25519-private-key-" + b"x" * 8
+    protected = protector.protect(synthetic)
+    assert protected != synthetic
+    assert protector.unprotect(protected) == synthetic
+
+
+def test_production_execution_gate_and_remote_suz_gate_remain_independent():
+    base = WebConfig(
+        "postgresql+psycopg://wbcz:strong-password@db.example.invalid:5432/wbcz",
+        "1234567890",
+        environment="production",
+        cookie_secure=True,
+        trusted_hosts=("mark.sellari.ru",),
+        build_sha="a" * 40,
+        audit_pseudonym_key="a" * 32,
+        agent_enabled=True,
+        agent_legacy_bootstrap_enabled=False,
+        printing_enabled=True,
+        suz_km_keyring_root="/safe/keyring",
+    )
+    with pytest.raises(ValueError, match="Physical print execution remains blocked"):
+        replace(base, print_execution_enabled=True).validate_for_startup()
+    with pytest.raises(ValueError, match="FULL KM SUZ acquisition remains blocked"):
+        replace(base, suz_full_km_remote_acquisition_enabled=True).validate_for_startup()
