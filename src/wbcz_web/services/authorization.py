@@ -56,6 +56,9 @@ class Permission(StrEnum):
     ROLES_MANAGE = "roles:manage"
     ORGANISATION_MANAGE = "organisation:manage"
     AUDIT_READ = "audit:read"
+    PRINT_READ = "print:read"
+    PRINT_EXECUTE = "print:execute"
+    PRINT_TEMPLATES_MANAGE = "print:templates_manage"
 
 
 PERMISSION_REGISTRY: dict[Permission, str] = {
@@ -87,6 +90,9 @@ PERMISSION_REGISTRY: dict[Permission, str] = {
     Permission.ROLES_MANAGE: "Change organisation roles subject to escalation/last-owner rules",
     Permission.ORGANISATION_MANAGE: "Manage organisation lifecycle and ownership-level settings",
     Permission.AUDIT_READ: "Read organisation-scoped audit data",
+    Permission.PRINT_READ: "Read local printability, templates, jobs and print history without plaintext FULL KM",
+    Permission.PRINT_EXECUTE: "Create local print and reprint jobs subject to printability and feature gates",
+    Permission.PRINT_TEMPLATES_MANAGE: "Create immutable template versions and archive print templates",
 }
 
 _READ = {
@@ -94,16 +100,16 @@ _READ = {
     Permission.DOCUMENTS_READ, Permission.TURNOVER_READ, Permission.AGGREGATION_READ,
     Permission.EDO_READ, Permission.SUZ_READ, Permission.WB_READ, Permission.OZON_READ,
     Permission.REPORTS_READ, Permission.REPORTS_DOWNLOAD, Permission.INTEGRATIONS_READ,
-    Permission.MEMBERS_READ,
+    Permission.MEMBERS_READ, Permission.PRINT_READ,
 }
 _OPERATOR = _READ | {
     Permission.IMPORTS_CREATE, Permission.CONTROL_RUN, Permission.TURNOVER_WRITE,
     Permission.DOCUMENTS_WRITE, Permission.AGGREGATION_WRITE, Permission.REPORTS_CREATE,
-    Permission.REPORTS_DOWNLOAD_SENSITIVE,
+    Permission.REPORTS_DOWNLOAD_SENSITIVE, Permission.PRINT_EXECUTE,
 }
 _ADMIN = _OPERATOR | {
     Permission.INTEGRATIONS_MANAGE, Permission.MEMBERS_MANAGE, Permission.ROLES_MANAGE,
-    Permission.AUDIT_READ,
+    Permission.AUDIT_READ, Permission.PRINT_TEMPLATES_MANAGE,
 }
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     Role.VIEWER: frozenset(_READ),
