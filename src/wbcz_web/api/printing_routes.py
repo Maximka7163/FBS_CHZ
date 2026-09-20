@@ -16,6 +16,7 @@ from wbcz_web.services.printing_sensitive_delivery import (
     SensitivePrintingDeliveryService,
 )
 from wbcz_web.services.printer_profiles import PrinterProfileRejected, PrinterProfileService
+from wbcz_web.services.physical_printing import PhysicalExecutionRejected, PhysicalPrintingService
 
 
 printing_router = APIRouter(prefix="/api/printing", tags=["printing"])
@@ -76,6 +77,10 @@ class PrinterCompatibilityRequest(ClosedModel):
     template_version_id: str = Field(min_length=1, max_length=64)
 
 
+class ExplicitAmbiguousReprintRequest(ClosedModel):
+    acknowledge_duplicate_risk: bool
+
+
 def _service(request: Request, db: Session) -> LocalPrintingService:
     return LocalPrintingService(db, request.app.state.config)
 
@@ -83,7 +88,7 @@ def _service(request: Request, db: Session) -> LocalPrintingService:
 def _safe_error(exc: Exception, *, not_found: bool = False) -> HTTPException:
     if not_found:
         return HTTPException(status_code=404, detail="printing object not found")
-    if isinstance(exc, (PrintingUnavailable, PrintingIntegrityError, SensitiveDeliveryRejected, PrinterProfileRejected)):
+    if isinstance(exc, (PrintingUnavailable, PrintingIntegrityError, SensitiveDeliveryRejected, PrinterProfileRejected, PhysicalExecutionRejected)):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, (PrintingContractError, PrintingSecurityError, ValueError)):
         return HTTPException(status_code=400, detail=str(exc))
@@ -499,4 +504,39 @@ def printer_profile_compatibility(
     except KeyError as exc:
         raise _safe_error(exc, not_found=True) from exc
     except (PrinterProfileRejected, PrintingContractError, PrintingSecurityError, ValueError) as exc:
+        raise _safe_error(exc) from exc
+
+
+@printing_router.get("/executions/{execution_id}")
+def physical_execution_detail(
+    execution_id: str,
+    request: Request,
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_READ)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    del identity
+    try:
+        return PhysicalPrintingService(db, request.app.state.config).execution_status(execution_id)
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+
+
+@printing_router.post("/executions/{execution_id}/explicit-reprint")
+def explicit_ambiguous_reprint(
+    execution_id: str,
+    payload: ExplicitAmbiguousReprintRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_EXECUTE)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return PhysicalPrintingService(db, request.app.state.config).explicit_reprint_unknown(
+            execution_id,
+            user_id=identity.user_id,
+            acknowledge_duplicate_risk=payload.acknowledge_duplicate_risk,
+        )
+    except KeyError as exc:
+        raise _safe_error(exc, not_found=True) from exc
+    except PhysicalExecutionRejected as exc:
         raise _safe_error(exc) from exc
