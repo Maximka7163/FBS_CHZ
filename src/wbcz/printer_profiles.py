@@ -77,7 +77,11 @@ def sanitize_display_name(value: str, *, fallback: str = "Printer") -> str:
     text = " ".join(text.split())
     if not text:
         text = fallback
-    if "\\" in text or "/" in text or re.search(r"[A-Za-z]:\\", text):
+    if (
+        text.startswith("/")
+        or re.match(r"^[A-Za-z]:[\\/]", text)
+        or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", text)
+    ):
         raise PrinterProfileSecurityError("printer path must not cross the Agent boundary")
     return text[:MAX_SAFE_NAME]
 
