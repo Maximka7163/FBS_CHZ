@@ -691,6 +691,64 @@ class PhysicalPrintRuntime:
         full_km: bytes,
     ) -> dict[str, Any]:
         control = PhysicalExecutionControl.from_mapping(control_raw)
+        try:
+            return self._execute_inner(
+                control_raw,
+                render_contract_raw,
+                full_km=full_km,
+            )
+        except PhysicalReplayBlocked:
+            raise
+        except (
+            DefinitePreSpoolFailure,
+            PhysicalPrintSecurityError,
+            PhysicalPrintError,
+            PrintingContractError,
+            PrintingSecurityError,
+            PrinterProfileContractError,
+        ) as exc:
+            existing = self.replay.get(control.execution_id)
+            if existing is not None and existing["state"] in AgentPhysicalReplayStore._IRREVERSIBLE:
+                raise
+            if isinstance(exc, DefinitePreSpoolFailure):
+                state = "FAILED_PRE_SPOOL"
+                code = exc.code
+            elif isinstance(exc, (PhysicalPrintSecurityError, PrintingSecurityError)):
+                state = "BLOCKED"
+                code = "PHYSICAL_SECURITY_VALIDATION_FAILED"
+            elif isinstance(exc, PrintingContractError):
+                state = "BLOCKED"
+                code = "PHYSICAL_RENDER_VALIDATION_FAILED"
+            else:
+                state = "BLOCKED"
+                code = "PHYSICAL_PRE_SPOOL_VALIDATION_FAILED"
+            self.replay.record(
+                execution_id=control.execution_id,
+                print_job_item_id=control.print_job_item_id,
+                delivery_reservation_id=control.delivery_reservation_id,
+                payload_sha256=control.payload_sha256,
+                layout_sha256=control.layout_sha256,
+                printer_profile_id=control.printer_profile_id,
+                printer_profile_fingerprint=control.printer_profile_fingerprint,
+                state=state,
+                safe_error_code=code,
+                durable=True,
+            )
+            self.report_result({
+                "execution_id": control.execution_id,
+                "state": state,
+                "safe_error_code": code,
+            })
+            return {"state": state, "safe_error_code": code}
+
+    def _execute_inner(
+        self,
+        control_raw: Mapping[str, Any],
+        render_contract_raw: Mapping[str, Any],
+        *,
+        full_km: bytes,
+    ) -> dict[str, Any]:
+        control = PhysicalExecutionControl.from_mapping(control_raw)
         render_contract = PhysicalRenderContract.from_mapping(render_contract_raw)
         if render_contract.execution_id != control.execution_id:
             raise PhysicalPrintSecurityError("render contract execution mismatch")
