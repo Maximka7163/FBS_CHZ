@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -75,6 +76,8 @@ class FakeBackend:
         value = self.values[descriptor.queue_name]
         if isinstance(value, Exception):
             raise value
+        if isinstance(value, LocalPrinterCapabilities):
+            return replace(value, server_name=descriptor.server_name)
         return value
 
 
@@ -144,7 +147,10 @@ def test_observation_rejects_raw_device_fields_and_sanitizes_control_characters(
         "observed_at": "2026-09-21T00:00:00Z",
         "safe_error_code": None,
     }
-    base["capability_hash"] = capability_hash(base)
+    hashed = dict(base)
+    hashed["display_name_sanitized"] = sanitize_display_name(base["display_name_sanitized"])
+    hashed["driver_name_sanitized"] = sanitize_display_name(base["driver_name_sanitized"])
+    base["capability_hash"] = capability_hash(hashed)
     value = PrinterObservation.from_mapping(base)
     assert "\n" not in value.display_name_sanitized
     assert "\x00" not in value.display_name_sanitized
