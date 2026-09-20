@@ -89,6 +89,10 @@ def create_app(
         "/api/agent/v2/printing/executions/next",
         "/api/agent/v2/printing/payload-deliveries/{reservation_id}/issue",
         "/api/agent/v2/printing/payload-deliveries/{reservation_id}/ack",
+        "/api/printing/printer-profiles",
+        "/api/printing/printer-discoveries",
+        "/api/agent/v2/printing/printer-discovery/jobs/next",
+        "/api/agent/v2/printing/printer-discovery/jobs/{job_id}/result",
     }
     missing = required - paths
     if missing:
