@@ -62,19 +62,74 @@ class StaticKeyProvider:
         return VAULT_KEY
 
 
-@pytest.fixture
-def factory():
-    cfg = WebConfig.from_env()
-    fac = build_session_factory(cfg)
-    engine = fac.kw["bind"]
+PRINTING_MIGRATION = "0017_printing_local_foundation"
+PRINTING_TABLES = {
+    "users",
+    "organisations",
+    "stored_full_km_items",
+    "print_templates",
+    "print_template_versions",
+    "print_jobs",
+    "print_job_items",
+    "print_events",
+}
+PRINTING_TRIGGERS = {
+    "trg_print_template_versions_immutable",
+    "trg_print_events_append_only",
+}
+
+
+def _ensure_printing_schema(engine) -> None:
     inspector = inspect(engine)
     revision = None
     if inspector.has_table("alembic_version"):
         with engine.connect() as connection:
             revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
-    if revision != "0017_printing_local_foundation" or not inspector.has_table("users"):
-        alembic = AlembicConfig(str(Path(__file__).parents[1] / "alembic.ini"))
-        command.upgrade(alembic, "0017_printing_local_foundation")
+
+    tables = set(inspector.get_table_names())
+    with engine.connect() as connection:
+        triggers = set(connection.execute(text(
+            "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
+            "AND tgname IN ('trg_print_template_versions_immutable', 'trg_print_events_append_only')"
+        )).scalars())
+
+    schema_valid = (
+        revision == PRINTING_MIGRATION
+        and PRINTING_TABLES.issubset(tables)
+        and triggers == PRINTING_TRIGGERS
+    )
+    if schema_valid:
+        return
+
+    # Full-suite legacy PostgreSQL fixtures may call Base.metadata.drop_all/create_all
+    # against the shared test database while leaving alembic_version untouched.
+    # A migration upgrade from an already-stamped head is then a no-op, so rebuild
+    # the test schema deterministically before exercising migration-specific invariants.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP SCHEMA public CASCADE")
+        connection.exec_driver_sql("CREATE SCHEMA public")
+
+    alembic = AlembicConfig(str(Path(__file__).parents[1] / "alembic.ini"))
+    command.upgrade(alembic, PRINTING_MIGRATION)
+
+    inspector = inspect(engine)
+    with engine.connect() as connection:
+        restored_revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        restored_triggers = set(connection.execute(text(
+            "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal "
+            "AND tgname IN ('trg_print_template_versions_immutable', 'trg_print_events_append_only')"
+        )).scalars())
+    assert restored_revision == PRINTING_MIGRATION
+    assert PRINTING_TABLES.issubset(set(inspector.get_table_names()))
+    assert restored_triggers == PRINTING_TRIGGERS
+
+
+@pytest.fixture
+def factory():
+    cfg = WebConfig.from_env()
+    fac = build_session_factory(cfg)
+    engine = fac.kw["bind"]
+    _ensure_printing_schema(engine)
     with fac() as db:
         db.execute(text("TRUNCATE TABLE users, organisations RESTART IDENTITY CASCADE"))
         db.commit()
