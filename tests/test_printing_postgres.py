@@ -1421,3 +1421,367 @@ def test_printer_discovery_requires_v2_discovery_capability_and_exact_binding(fa
                 machine_binding_id=other.id,
                 observations=[],
             )
+
+
+
+def _physical_ready(db: Session, *, full_km: bytes = SYNTHETIC_FULL_KM):
+    user, org, participant = _tenant(db, "phase-c", "7707083893")
+    _, stored, _, _, _ = _seed_vault(
+        db, user=user, org=org, participant=participant, full_km=full_km
+    )
+    binding = _v2_binding(db, org, participant)
+    binding.supported_capabilities_json = list(binding.supported_capabilities_json or []) + [
+        PHYSICAL_CAPABILITY
+    ]
+    db.flush()
+
+    profiles = PrinterProfileService(db, _cfg(execute=True))
+    discovery = profiles.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+    discovery_job = profiles.fetch_agent_job(machine_binding_id=binding.id)
+    assert discovery_job is not None
+    profiles.complete_agent_job(
+        job_id=discovery_job["job_id"],
+        machine_binding_id=binding.id,
+        observations=[_printer_observation()],
+    )
+    observation_id = profiles.discovery_status(discovery.id)["observations"][0]["id"]
+    profile = profiles.approve_observation(observation_id, user_id=user.id)
+    assert profile.state == "ACTIVE"
+
+    printing = _service(db, execute=True)
+    template = printing.create_template(
+        name="Physical spool",
+        label_width_mm=50,
+        label_height_mm=35,
+        layout=_layout("Physical"),
+        user_id=user.id,
+    )
+    job = printing.create_print_job(
+        stored_item_ids=[stored.id],
+        template_version_id=template.current_version_id,
+        user_id=user.id,
+        printer_profile_id=profile.id,
+    )
+    item = db.scalar(select(PrintJobItemRecord).where(PrintJobItemRecord.print_job_id == job.id))
+    assert item is not None
+
+    sensitive = SensitivePrintingDeliveryService(
+        db, _cfg(execute=True), key_provider=StaticKeyProvider()
+    )
+    private = x25519.X25519PrivateKey.generate()
+    _, intent_token = sensitive.create_key_intent(
+        binding.id, purpose="FIRST_REGISTRATION", user_id=user.id
+    )
+    sensitive.register_public_key(
+        agent_binding_id=binding.id,
+        intent_token=intent_token,
+        public_key_raw=private.public_key().public_bytes_raw(),
+    )
+    execution, reservation = sensitive.authorize_delivery(
+        print_job_id=job.id,
+        print_job_item_id=item.id,
+        agent_binding_id=binding.id,
+        user_id=user.id,
+    )
+    assert execution.printer_profile_id == profile.id
+    assert execution.printer_profile_fingerprint == profile.local_printer_fingerprint
+    envelope = sensitive.issue(reservation.id, machine_binding_id=binding.id)
+    sensitive.acknowledge(
+        reservation.id,
+        machine_binding_id=binding.id,
+        payload_sha256=envelope["payload_sha256"],
+        context_sha256=envelope["context_sha256"],
+    )
+    assert execution.state == "PAYLOAD_DELIVERED"
+    physical = PhysicalPrintingService(db, _cfg(execute=True))
+    return (
+        user, org, participant, stored, binding, profile, template,
+        job, item, sensitive, execution, reservation, physical,
+    )
+
+
+def test_0020_schema_extends_execution_without_sensitive_or_raw_printer_columns(factory):
+    with factory() as db:
+        inspector = inspect(db.get_bind())
+        columns = {column["name"].lower() for column in inspector.get_columns("print_executions")}
+        assert {
+            "printer_profile_id", "printer_profile_fingerprint", "windows_spool_job_id",
+            "last_windows_status", "rendered_at", "spool_submitting_at",
+            "spool_job_created_at", "spooler_accepted_at",
+        }.issubset(columns)
+        forbidden = {
+            "full_km", "raster", "queue", "unc", "port", "devmode",
+            "spool_file", "zpl", "epl", "cpcl", "command",
+        }
+        assert not any(token in name for name in columns for token in forbidden)
+        fk_names = {fk["name"] for fk in inspector.get_foreign_keys("print_executions")}
+        assert "fk_print_execution_printer_profile_tenant" in fk_names
+
+
+def test_physical_execution_exact_state_machine_and_honest_spooler_semantics(factory):
+    with factory() as db:
+        (
+            _, _, _, _, binding, profile, _, job, item, _, execution, _, physical
+        ) = _physical_ready(db)
+        control = physical.next_control(machine_binding_id=binding.id)
+        assert control is not None
+        assert control["operation"] == "PRINT_RENDER_AND_SPOOL"
+        assert control["copies"] == 1
+        assert control["printer_profile_id"] == profile.id
+        assert set(control).isdisjoint({"full_km", "queue_name", "port_name", "devmode", "zpl"})
+
+        render_contract = physical.render_contract(execution.id, machine_binding_id=binding.id)
+        assert render_contract["printer_profile_state"] == "ACTIVE"
+        assert "queue_name" not in render_contract
+        assert "port_name" not in render_contract
+
+        physical.mark_rendered(
+            execution.id,
+            machine_binding_id=binding.id,
+            payload_sha256=execution.payload_sha256,
+            layout_sha256=execution.layout_sha256,
+            printer_profile_id=profile.id,
+            printer_profile_fingerprint=profile.local_printer_fingerprint,
+            renderer_version=RENDERER_VERSION,
+            decoder_version="zxing-cpp-test",
+        )
+        assert execution.state == "RENDERED_VERIFIED"
+        assert item.state == "RENDERED"
+
+        physical.begin_spool(
+            execution.id,
+            machine_binding_id=binding.id,
+            payload_sha256=execution.payload_sha256,
+            layout_sha256=execution.layout_sha256,
+            printer_profile_id=profile.id,
+            printer_profile_fingerprint=profile.local_printer_fingerprint,
+        )
+        assert execution.state == "SPOOL_SUBMITTING"
+        assert execution.spool_submitting_at is not None
+
+        physical.report_result(
+            execution.id,
+            machine_binding_id=binding.id,
+            state="SPOOL_JOB_CREATED",
+            windows_spool_job_id=411,
+            last_windows_status="QUEUED",
+        )
+        assert execution.state == "SPOOL_JOB_CREATED"
+        assert execution.windows_spool_job_id == 411
+
+        result = physical.report_result(
+            execution.id,
+            machine_binding_id=binding.id,
+            state="SPOOLER_ACCEPTED",
+            windows_spool_job_id=411,
+            last_windows_status="QUEUED",
+        )
+        assert result["state"] == "SPOOLER_ACCEPTED"
+        assert result["display_status"] == "Отправлено на принтер"
+        assert result["physical_output_proven"] is False
+        assert job.state == "COMPLETED"
+        assert item.state == "COMPLETED"
+
+        job_dto = LocalPrintingService(db, _cfg(execute=True)).job_detail(job.id)
+        assert job_dto["display_status"] == "Отправлено на принтер"
+        assert job_dto["physical_output_proven"] is False
+
+        events = set(db.scalars(select(AuditEventRecord.event_type).where(
+            AuditEventRecord.event_type.in_((
+                "PRINT_RENDER_VERIFIED", "PRINT_SPOOL_SUBMITTED", "PRINT_SPOOL_ACCEPTED"
+            ))
+        )))
+        assert {
+            "PRINT_RENDER_VERIFIED", "PRINT_SPOOL_SUBMITTED", "PRINT_SPOOL_ACCEPTED"
+        }.issubset(events)
+
+
+def test_unknown_after_spool_never_reuses_execution_and_explicit_reprint_creates_fresh_ids(factory):
+    with factory() as db:
+        (
+            user, _, _, _, binding, profile, _, job, item, sensitive, execution, reservation, physical
+        ) = _physical_ready(db)
+        physical.mark_rendered(
+            execution.id,
+            machine_binding_id=binding.id,
+            payload_sha256=execution.payload_sha256,
+            layout_sha256=execution.layout_sha256,
+            printer_profile_id=profile.id,
+            printer_profile_fingerprint=profile.local_printer_fingerprint,
+            renderer_version=RENDERER_VERSION,
+            decoder_version="zxing-cpp-test",
+        )
+        physical.begin_spool(
+            execution.id,
+            machine_binding_id=binding.id,
+            payload_sha256=execution.payload_sha256,
+            layout_sha256=execution.layout_sha256,
+            printer_profile_id=profile.id,
+            printer_profile_fingerprint=profile.local_printer_fingerprint,
+        )
+        physical.report_result(
+            execution.id,
+            machine_binding_id=binding.id,
+            state="SPOOL_JOB_CREATED",
+            windows_spool_job_id=9001,
+            last_windows_status="PRINTING",
+        )
+        unknown = physical.report_result(
+            execution.id,
+            machine_binding_id=binding.id,
+            state="UNKNOWN_AFTER_SPOOL",
+            windows_spool_job_id=9001,
+            last_windows_status="UNKNOWN",
+            safe_error_code="AGENT_CRASH_AFTER_START_DOC",
+        )
+        assert unknown["state"] == "UNKNOWN_AFTER_SPOOL"
+        assert unknown["reprint_warning"] == UNKNOWN_REPRINT_WARNING
+        assert job.state == "BLOCKED"
+        assert item.state == "BLOCKED"
+
+        with pytest.raises(SensitiveDeliveryRejected):
+            sensitive.authorize_delivery(
+                print_job_id=job.id,
+                print_job_item_id=item.id,
+                agent_binding_id=binding.id,
+                user_id=user.id,
+            )
+        with pytest.raises(PhysicalExecutionRejected, match="DUPLICATE_LABEL_RISK_ACK_REQUIRED"):
+            physical.explicit_reprint_unknown(
+                execution.id, user_id=user.id, acknowledge_duplicate_risk=False
+            )
+
+        reprint = physical.explicit_reprint_unknown(
+            execution.id, user_id=user.id, acknowledge_duplicate_risk=True
+        )
+        assert reprint["warning"] == UNKNOWN_REPRINT_WARNING
+        assert reprint["new_print_job_id"] != job.id
+        new_job = db.get(PrintJobRecord, reprint["new_print_job_id"])
+        new_item = db.scalar(select(PrintJobItemRecord).where(
+            PrintJobItemRecord.print_job_id == new_job.id
+        ))
+        new_execution, new_reservation = sensitive.authorize_delivery(
+            print_job_id=new_job.id,
+            print_job_item_id=new_item.id,
+            agent_binding_id=binding.id,
+            user_id=user.id,
+        )
+        assert new_execution.id != execution.id
+        assert new_reservation.id != reservation.id
+        assert new_execution.attempt_number == 1
+
+
+def test_profile_change_or_old_agent_blocks_physical_path_before_spool(factory):
+    with factory() as db:
+        (
+            _, _, _, _, binding, profile, _, _, _, _, execution, _, physical
+        ) = _physical_ready(db)
+        original = profile.local_printer_fingerprint
+        profile.local_printer_fingerprint = "e" * 64
+        db.flush()
+        with pytest.raises(PhysicalExecutionRejected, match="PRINTER_PROFILE_FINGERPRINT_CHANGED"):
+            physical.next_control(machine_binding_id=binding.id)
+        profile.local_printer_fingerprint = original
+        db.flush()
+        binding.supported_capabilities_json = [
+            value for value in binding.supported_capabilities_json
+            if value != PHYSICAL_CAPABILITY
+        ]
+        db.flush()
+        with pytest.raises(PhysicalExecutionRejected, match="PRINTING_PHYSICAL_V1_REQUIRED"):
+            physical.next_control(machine_binding_id=binding.id)
+        assert execution.state == "PAYLOAD_DELIVERED"
+
+
+def test_failed_pre_spool_and_unknown_states_are_terminal_and_safe(factory):
+    with factory() as db:
+        (
+            _, _, _, _, binding, profile, _, job, item, _, execution, _, physical
+        ) = _physical_ready(db)
+        physical.mark_rendered(
+            execution.id,
+            machine_binding_id=binding.id,
+            payload_sha256=execution.payload_sha256,
+            layout_sha256=execution.layout_sha256,
+            printer_profile_id=profile.id,
+            printer_profile_fingerprint=profile.local_printer_fingerprint,
+            renderer_version=RENDERER_VERSION,
+            decoder_version="zxing-cpp-test",
+        )
+        physical.begin_spool(
+            execution.id,
+            machine_binding_id=binding.id,
+            payload_sha256=execution.payload_sha256,
+            layout_sha256=execution.layout_sha256,
+            printer_profile_id=profile.id,
+            printer_profile_fingerprint=profile.local_printer_fingerprint,
+        )
+        failed = physical.report_result(
+            execution.id,
+            machine_binding_id=binding.id,
+            state="FAILED_PRE_SPOOL",
+            safe_error_code="GDI_START_DOC_FAILED",
+        )
+        assert failed["state"] == "FAILED_PRE_SPOOL"
+        assert job.state == "FAILED"
+        assert item.state == "FAILED"
+        assert execution.terminal_at is not None
+
+
+def test_physical_execution_is_non_enumerating_across_participants_and_canary_never_enters_safe_rows(factory):
+    canary = (
+        SYNTHETIC_CIS + "\x1d91PHASEC\x1d92PHYSICAL-CANARY-003"
+    ).encode("utf-8")
+    with factory() as db:
+        (
+            user, org, participant, _, binding, profile, _, _, _, _, execution, _, physical
+        ) = _physical_ready(db, full_km=canary)
+        participant_b = _second_participant(db, org, "500100732259")
+        bind_tenant_scope(
+            db,
+            organisation_id=org.id,
+            participant_id=participant_b.id,
+            user_id=user.id,
+            role="OWNER",
+        )
+        foreign = PhysicalPrintingService(db, _cfg(execute=True))
+        with pytest.raises(KeyError):
+            foreign.execution_status(execution.id)
+
+        bind_tenant_scope(
+            db,
+            organisation_id=org.id,
+            participant_id=participant.id,
+            user_id=user.id,
+            role="OWNER",
+        )
+        needle = "PHYSICAL-CANARY-003"
+        blobs = []
+        for model in (PrintExecutionRecord, PrintPayloadDeliveryReservationRecord, AuditEventRecord):
+            blobs.append(json.dumps([str(row.__dict__) for row in db.scalars(select(model))], ensure_ascii=False))
+        jobs = list(db.execute(text("SELECT payload_json::text FROM agent_jobs")).scalars())
+        blobs.extend(value or "" for value in jobs)
+        assert all(needle not in blob for blob in blobs)
+        assert profile.local_printer_fingerprint
+        assert binding.id
+
+
+def test_production_execution_gate_and_suz_gate_remain_independent():
+    base = WebConfig.from_env()
+    with pytest.raises(ValueError):
+        replace(
+            base,
+            environment="production",
+            printing_enabled=True,
+            print_execution_enabled=True,
+            suz_full_km_remote_acquisition_enabled=False,
+        ).validate_for_startup()
+    cfg = replace(
+        base,
+        environment="test",
+        printing_enabled=True,
+        print_execution_enabled=False,
+        suz_full_km_remote_acquisition_enabled=False,
+    ).validate_for_startup()
+    assert cfg.print_execution_enabled is False
+    assert cfg.suz_full_km_remote_acquisition_enabled is False
