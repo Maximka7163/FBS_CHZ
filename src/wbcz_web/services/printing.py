@@ -17,6 +17,7 @@ from wbcz.suz_foundation import KmVault, VaultBinding, VaultEnvelope
 from wbcz_web.config import WebConfig
 from wbcz_web.models import (
     PrintEventRecord,
+    PrintExecutionRecord,
     PrintJobItemRecord,
     PrintJobRecord,
     PrintTemplateRecord,
@@ -745,6 +746,15 @@ class LocalPrintingService:
             )
             .order_by(PrintJobItemRecord.ordinal)
         ))
+        executions = list(self.db.scalars(
+            select(PrintExecutionRecord)
+            .where(
+                PrintExecutionRecord.print_job_id == job.id,
+                PrintExecutionRecord.organisation_id == self.scope.organisation_id,
+                PrintExecutionRecord.participant_id == self.scope.participant_id,
+            )
+            .order_by(PrintExecutionRecord.created_at, PrintExecutionRecord.id)
+        ))
         events = list(self.db.scalars(
             select(PrintEventRecord)
             .where(
@@ -765,6 +775,27 @@ class LocalPrintingService:
             "correlation_id": job.correlation_id,
             "original_print_event_id": job.original_print_event_id,
             "requested_at": job.requested_at.isoformat(),
+            "display_status": "Отправлено на принтер" if job.state == "COMPLETED" else None,
+            "physical_output_proven": False,
+            "executions": [
+                {
+                    "id": execution.id,
+                    "print_job_item_id": execution.print_job_item_id,
+                    "state": execution.state,
+                    "attempt_number": execution.attempt_number,
+                    "printer_profile_id": execution.printer_profile_id,
+                    "printer_profile_fingerprint": execution.printer_profile_fingerprint,
+                    "windows_spool_job_id": execution.windows_spool_job_id,
+                    "last_windows_status": execution.last_windows_status,
+                    "safe_error_code": execution.safe_error_code,
+                    "display_status": (
+                        "Отправлено на принтер"
+                        if execution.state == "SPOOLER_ACCEPTED" else None
+                    ),
+                    "physical_output_proven": False,
+                }
+                for execution in executions
+            ],
             "items": [
                 {
                     "id": item.id,
