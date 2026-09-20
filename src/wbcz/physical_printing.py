@@ -626,6 +626,27 @@ class FakeGdiRasterSpooler:
         return GdiSpoolOutcome(self.job_id, "QUEUED")
 
 
+def derive_gs1_display_values(full_km: bytes) -> dict[str, str]:
+    """Derive only display values already present in the exact in-memory FULL KM."""
+    values: dict[str, str] = {}
+    if full_km.startswith(b"01") and len(full_km) >= 18:
+        gtin = full_km[2:16]
+        if len(gtin) == 14 and gtin.isdigit() and full_km[16:18] == b"21":
+            serial_start = 18
+            separators = [pos for pos in (
+                full_km.find(b"\x1d", serial_start),
+                full_km.find(b"91", serial_start),
+            ) if pos >= serial_start]
+            serial_end = min(separators) if separators else len(full_km)
+            serial = full_km[serial_start:serial_end]
+            try:
+                values["GTIN"] = gtin.decode("ascii")
+                values["HUMAN_READABLE_KI"] = full_km[:serial_end].decode("ascii")
+            except UnicodeDecodeError:
+                pass
+    return values
+
+
 class PhysicalPrintRuntime:
     def __init__(
         self,
@@ -696,7 +717,7 @@ class PhysicalPrintRuntime:
             label_width_mm=render_contract.label_width_mm,
             label_height_mm=render_contract.label_height_mm,
             dpi=render_contract.dpi_x,
-            field_values=render_contract.field_values,
+            field_values={**derive_gs1_display_values(full_km), **dict(render_contract.field_values)},
         )
         if raster.layout_sha256 != control.layout_sha256:
             raise PhysicalPrintSecurityError("physical layout SHA-256 mismatch")
