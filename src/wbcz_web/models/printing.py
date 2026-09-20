@@ -24,7 +24,6 @@ class StoredFullKmItemRecord(Base):
     vault_entry_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("suz_km_vault.id", ondelete="RESTRICT"), nullable=False, index=True)
     gtin: Mapped[str] = mapped_column(Text, nullable=False)
     cis_hmac: Mapped[str] = mapped_column(String(64), nullable=False)
-    cis_tail: Mapped[str | None] = mapped_column(String(12), nullable=True)
     vault_item_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     vault_item_offset: Mapped[int] = mapped_column(Integer, nullable=False)
     vault_item_length: Mapped[int] = mapped_column(Integer, nullable=False)
