@@ -124,6 +124,10 @@ class WebConfig:
     agent_protocol_current: str = "m15-v1"
     agent_protocol_minimum: str = "m14-v1"
     agent_minimum_version: str = "0.5.1"
+    printing_enabled: bool = False
+    print_execution_enabled: bool = False
+    suz_full_km_remote_acquisition_enabled: bool = False
+    suz_km_keyring_root: str | None = None
 
     def organisation_document_config(self) -> P0OrganisationConfig | None:
         if self.organisation_type is None:
@@ -192,6 +196,14 @@ class WebConfig:
             raise ValueError("M14 certificate expiry thresholds are invalid")
         if self.true_api_write_enabled:
             raise ValueError("Production True API write remains disabled pending runtime contract tests")
+        if self.suz_full_km_remote_acquisition_enabled:
+            raise ValueError("Production FULL KM SUZ acquisition remains blocked pending accepted wire contract")
+        if self.print_execution_enabled and not self.printing_enabled:
+            raise ValueError("WBCZ_PRINT_EXECUTION_ENABLED requires WBCZ_PRINTING_ENABLED")
+        if self.print_execution_enabled and not self.agent_enabled:
+            raise ValueError("Physical print execution requires the participant-bound Windows agent")
+        if self.printing_enabled and self.environment == "production" and not self.suz_km_keyring_root:
+            raise ValueError("WBCZ_SUZ_KM_KEYRING_ROOT is required for production local printability")
         if self.true_api_reports_enabled and not self.agent_enabled:
             raise ValueError("True API reports require the Windows agent boundary")
         if self.report_artifact_root is not None and not self.report_artifact_root.strip():
@@ -386,6 +398,10 @@ class WebConfig:
             agent_protocol_current=os.getenv("WBCZ_AGENT_PROTOCOL_CURRENT", "m15-v1").strip() or "m15-v1",
             agent_protocol_minimum=os.getenv("WBCZ_AGENT_PROTOCOL_MINIMUM", "m14-v1").strip() or "m14-v1",
             agent_minimum_version=os.getenv("WBCZ_AGENT_MINIMUM_VERSION", "0.5.1").strip() or "0.5.1",
+            printing_enabled=_env_bool("WBCZ_PRINTING_ENABLED", False),
+            print_execution_enabled=_env_bool("WBCZ_PRINT_EXECUTION_ENABLED", False),
+            suz_full_km_remote_acquisition_enabled=_env_bool("WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED", False),
+            suz_km_keyring_root=os.getenv("WBCZ_SUZ_KM_KEYRING_ROOT", "").strip() or None,
             cookie_secure=secure,
             session_cookie_name=os.getenv("WBCZ_SESSION_COOKIE_NAME", "wbcz_session").strip(),
             csrf_cookie_name=os.getenv("WBCZ_CSRF_COOKIE_NAME", "wbcz_csrf").strip(),
