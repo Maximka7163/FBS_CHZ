@@ -1009,11 +1009,19 @@ def test_concurrent_payload_issue_is_serialized_and_never_loses_issue_count(fact
         assert execution.state == "PAYLOAD_ISSUED"
 
 
-def test_expired_reservation_is_not_disclosed(factory):
+def test_expired_reservation_is_not_disclosed(factory, monkeypatch):
     with factory() as db:
         _, _, _, _, _, _, _, binding, _, _, sensitive, execution, reservation = _sensitive_ready(db)
-        reservation.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        # Keep the durable reservation valid according to the DB invariant
+        # (expires_at > authorized_at), then advance the service clock beyond
+        # that deadline. Expiry is a runtime transition, not an invalid row.
+        expiry = reservation.authorized_at + timedelta(seconds=1)
+        reservation.expires_at = expiry
         db.flush()
+        monkeypatch.setattr(
+            "wbcz_web.services.printing_sensitive_delivery._now",
+            lambda: expiry + timedelta(seconds=1),
+        )
         with pytest.raises(SensitiveDeliveryRejected, match="DELIVERY_RESERVATION_EXPIRED"):
             sensitive.issue(reservation.id, machine_binding_id=binding.id)
         assert reservation.state == "EXPIRED"
