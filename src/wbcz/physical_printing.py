@@ -430,7 +430,13 @@ class GdiSpoolOutcome:
 
 
 class RasterSpoolAdapter(Protocol):
-    def submit(self, *, queue_name: str, raster: PhysicalLabelRaster) -> GdiSpoolOutcome: ...
+    def submit(
+        self,
+        *,
+        queue_name: str,
+        raster: PhysicalLabelRaster,
+        on_job_created: Callable[[int], None],
+    ) -> GdiSpoolOutcome: ...
 
 
 class _DOCINFOW(ctypes.Structure):
@@ -509,7 +515,13 @@ class WindowsGdiRasterSpooler:
             rows.append(bytes(bgr) + padding)
         return b"".join(rows), stride
 
-    def submit(self, *, queue_name: str, raster: PhysicalLabelRaster) -> GdiSpoolOutcome:
+    def submit(
+        self,
+        *,
+        queue_name: str,
+        raster: PhysicalLabelRaster,
+        on_job_created: Callable[[int], None],
+    ) -> GdiSpoolOutcome:
         if not isinstance(queue_name, str) or not queue_name:
             raise DefinitePreSpoolFailure("LOCAL_PRINTER_QUEUE_UNAVAILABLE")
         hdc = self.gdi32.CreateDCW("WINSPOOL", queue_name, None, None)
@@ -527,6 +539,7 @@ class WindowsGdiRasterSpooler:
             job_id = int(self.gdi32.StartDocW(hdc, ctypes.byref(doc)))
             if job_id <= 0:
                 raise DefinitePreSpoolFailure("GDI_START_DOC_FAILED")
+            on_job_created(job_id)
             if self.gdi32.StartPage(hdc) <= 0:
                 raise AmbiguousAfterSpool("GDI_START_PAGE_FAILED", windows_spool_job_id=job_id)
 
@@ -584,13 +597,20 @@ class FakeGdiRasterSpooler:
         self.job_id = job_id
         self.calls: list[str] = []
 
-    def submit(self, *, queue_name: str, raster: PhysicalLabelRaster) -> GdiSpoolOutcome:
+    def submit(
+        self,
+        *,
+        queue_name: str,
+        raster: PhysicalLabelRaster,
+        on_job_created: Callable[[int], None],
+    ) -> GdiSpoolOutcome:
         self.calls.append("CreateDC")
         if self.fail_at == "CreateDC":
             raise DefinitePreSpoolFailure("GDI_CREATE_DC_FAILED")
         self.calls.append("StartDoc")
         if self.fail_at == "StartDoc":
             raise DefinitePreSpoolFailure("GDI_START_DOC_FAILED")
+        on_job_created(self.job_id)
         self.calls.append("StartPage")
         if self.fail_at == "StartPage":
             raise AmbiguousAfterSpool("GDI_START_PAGE_FAILED", windows_spool_job_id=self.job_id)
@@ -714,9 +734,31 @@ class PhysicalPrintRuntime:
         })
 
         try:
+            def on_job_created(job_id: int) -> None:
+                self.replay.record(
+                    execution_id=control.execution_id,
+                    print_job_item_id=control.print_job_item_id,
+                    delivery_reservation_id=control.delivery_reservation_id,
+                    payload_sha256=control.payload_sha256,
+                    layout_sha256=control.layout_sha256,
+                    printer_profile_id=control.printer_profile_id,
+                    printer_profile_fingerprint=control.printer_profile_fingerprint,
+                    state="SPOOL_JOB_CREATED",
+                    windows_spool_job_id=job_id,
+                    windows_status="QUEUED",
+                    durable=True,
+                )
+                self.report_result({
+                    "execution_id": control.execution_id,
+                    "state": "SPOOL_JOB_CREATED",
+                    "windows_spool_job_id": job_id,
+                    "last_windows_status": "QUEUED",
+                })
+
             outcome = self.spooler.submit(
                 queue_name=resolved.descriptor.queue_name,
                 raster=raster,
+                on_job_created=on_job_created,
             )
         except DefinitePreSpoolFailure as exc:
             self.replay.record(
