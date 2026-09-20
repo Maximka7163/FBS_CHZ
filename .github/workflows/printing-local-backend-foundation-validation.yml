@@ -68,6 +68,8 @@ jobs:
           grep -F 'WBCZ_TRUE_API_WRITE_ENABLED: "false"' docker-compose.prod.yml
           grep -F 'WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"' docker-compose.prod.yml
           test -f docs/PRINTING_LOCAL_BACKEND_FOUNDATION.md
+      - name: Production backend image includes libdmtx runtime
+        run: docker build -f Dockerfile.backend -t wbcz-printing-foundation:${{ github.sha }} .
 
   postgres-migration-and-regression:
     runs-on: ubuntu-24.04
