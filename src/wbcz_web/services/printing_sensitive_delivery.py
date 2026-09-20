@@ -705,7 +705,52 @@ class SensitivePrintingDeliveryService:
             },
             event_key=f"print-payload:{reservation.id}:issued:{reservation.issue_count}",
         )
-        return {**envelope, "delivery_reservation_id": reservation.id, "print_execution_id": execution.id}
+        return {
+            **envelope,
+            "delivery_reservation_id": reservation.id,
+            "print_execution_id": execution.id,
+            "print_job_item_id": execution.print_job_item_id,
+            "context": context,
+        }
+
+    def next_control(self, *, machine_binding_id: str) -> dict[str, Any] | None:
+        self._require_delivery_gate()
+        binding = self._binding(machine_binding_id, lock=False)
+        self._validate_binding(binding)
+        now = _now()
+        reservation = self.db.scalar(
+            select(PrintPayloadDeliveryReservationRecord)
+            .where(
+                PrintPayloadDeliveryReservationRecord.organisation_id == self.scope.organisation_id,
+                PrintPayloadDeliveryReservationRecord.participant_id == self.scope.participant_id,
+                PrintPayloadDeliveryReservationRecord.agent_binding_id == machine_binding_id,
+                PrintPayloadDeliveryReservationRecord.state.in_(("AVAILABLE", "ISSUED")),
+                PrintPayloadDeliveryReservationRecord.expires_at > now,
+                PrintPayloadDeliveryReservationRecord.issue_count < PrintPayloadDeliveryReservationRecord.max_issue_count,
+            )
+            .order_by(PrintPayloadDeliveryReservationRecord.authorized_at, PrintPayloadDeliveryReservationRecord.id)
+            .limit(1)
+        )
+        if reservation is None:
+            return None
+        execution = self.db.get(PrintExecutionRecord, reservation.print_execution_id)
+        key = self.db.get(AgentBindingEncryptionKeyRecord, reservation.agent_encryption_key_id)
+        if execution is None or key is None or execution.agent_binding_id != machine_binding_id:
+            raise SensitiveDeliveryRejected("PRINTING_V2_CONTROL_GRAPH_INVALID")
+        return {
+            "contract_version": PRINT_PROTOCOL_VERSION,
+            "required_capabilities": sorted(REQUIRED_CAPABILITIES),
+            "delivery_reservation_id": reservation.id,
+            "print_execution_id": execution.id,
+            "print_job_id": execution.print_job_id,
+            "print_job_item_id": execution.print_job_item_id,
+            "stored_full_km_item_id": execution.stored_full_km_item_id,
+            "template_version_id": execution.template_version_id,
+            "payload_sha256": execution.payload_sha256,
+            "layout_sha256": execution.layout_sha256,
+            "recipient_key_version": key.key_version,
+            "expires_at": self._expires_text(reservation.expires_at),
+        }
 
     def acknowledge(
         self,
