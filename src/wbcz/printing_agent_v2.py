@@ -15,6 +15,7 @@ from typing import Callable, Protocol
 from cryptography.hazmat.primitives.asymmetric import x25519
 
 from wbcz.printer_profiles import DISCOVERY_CAPABILITY
+from wbcz.physical_printing import PHYSICAL_CAPABILITY, PhysicalPrintRuntime
 from wbcz.printing_sensitive import (
     ENVELOPE_VERSION,
     PRINT_PROTOCOL_VERSION,
@@ -239,11 +240,25 @@ class SensitiveDeliveryAgent:
         self.replay_store = replay_store
 
     @staticmethod
-    def capabilities() -> dict:
-        return {
+    def capabilities(*, physical_runtime: PhysicalPrintRuntime | None = None) -> dict:
+        capabilities = set(REQUIRED_CAPABILITIES) | {DISCOVERY_CAPABILITY}
+        result = {
             "print_protocol_version": PRINT_PROTOCOL_VERSION,
-            "capabilities": sorted(set(REQUIRED_CAPABILITIES) | {DISCOVERY_CAPABILITY}),
+            "capabilities": sorted(capabilities),
         }
+        if physical_runtime is not None:
+            physical = physical_runtime.capability_report()
+            if physical.get("renderer_version") and physical.get("decoder_version") != "unavailable":
+                capabilities.add(PHYSICAL_CAPABILITY)
+                result.update({
+                    "capabilities": sorted(capabilities),
+                    "printing_contract_version": physical["printing_contract_version"],
+                    "layout_schema_version": physical["layout_schema_version"],
+                    "renderer_version": physical["renderer_version"],
+                    "libdmtx_version": physical["libdmtx_version"],
+                    "decoder_version": physical["decoder_version"],
+                })
+        return result
 
     def open_verify_and_ack(
         self,
