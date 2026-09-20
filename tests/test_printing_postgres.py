@@ -497,8 +497,15 @@ def test_print_job_uses_only_verified_local_km_reprint_keeps_original_version_an
         contract = service.agent_contract(job.id)
         contract_blob = json.dumps(contract, sort_keys=True)
         assert SYNTHETIC_FULL_KM.decode("utf-8") not in contract_blob
-        assert "full_km" not in contract_blob.lower()
         assert contract["sensitive_payload_delivery"] == "BLOCKED_NOT_IMPLEMENTED"
+        assert set(contract) == {
+            "contract_version", "job_id", "organisation_id", "participant_id",
+            "template_version_id", "mode", "printer_profile_id",
+            "printer_profile_fingerprint", "items", "sensitive_payload_delivery",
+        }
+        assert set(contract["items"][0]) == {
+            "print_job_item_id", "stored_full_km_item_id", "ordinal", "payload_sha256",
+        }
 
         rows_blob = json.dumps({
             "job": service.job_detail(job.id),
