@@ -80,7 +80,7 @@ class CisInventoryService:
         else:
             public_state = "failed"
         read_result = result.get("read_result") if result else None
-        if public_state == "completed" and read_result is not None:
+        if public_state == "completed" and read_result is not None and self.config.printing_enabled:
             read_result = LocalPrintingService(self.db, self.config).enrich_m1_result(read_result)
         return {
             "request_id": row.job_id,
