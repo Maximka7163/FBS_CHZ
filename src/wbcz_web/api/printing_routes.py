@@ -11,6 +11,10 @@ from wbcz.printing_agent import FakePrintExecutor, PrintAgentContractError
 from wbcz_web.api.dependencies import AuthenticatedIdentity, get_db, require_csrf, require_permission
 from wbcz_web.services.authorization import Permission
 from wbcz_web.services.printing import LocalPrintingService, PrintingIntegrityError, PrintingUnavailable
+from wbcz_web.services.printing_sensitive_delivery import (
+    SensitiveDeliveryRejected,
+    SensitivePrintingDeliveryService,
+)
 
 
 printing_router = APIRouter(prefix="/api/printing", tags=["printing"])
@@ -54,6 +58,15 @@ class ReprintRequest(ClosedModel):
     use_current_template: bool = False
 
 
+class PrintKeyIntentRequest(ClosedModel):
+    purpose: str = Field(pattern="^(FIRST_REGISTRATION|ROTATE|REPLACE_LOST)$")
+
+
+class SensitiveDeliveryAuthorizationRequest(ClosedModel):
+    print_job_item_id: str = Field(min_length=1, max_length=64)
+    agent_binding_id: str | None = Field(default=None, max_length=64)
+
+
 def _service(request: Request, db: Session) -> LocalPrintingService:
     return LocalPrintingService(db, request.app.state.config)
 
@@ -61,7 +74,7 @@ def _service(request: Request, db: Session) -> LocalPrintingService:
 def _safe_error(exc: Exception, *, not_found: bool = False) -> HTTPException:
     if not_found:
         return HTTPException(status_code=404, detail="printing object not found")
-    if isinstance(exc, (PrintingUnavailable, PrintingIntegrityError)):
+    if isinstance(exc, (PrintingUnavailable, PrintingIntegrityError, SensitiveDeliveryRejected)):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, (PrintingContractError, PrintingSecurityError, ValueError)):
         return HTTPException(status_code=400, detail=str(exc))
@@ -277,4 +290,64 @@ def print_agent_contract(
     except KeyError as exc:
         raise _safe_error(exc, not_found=True) from exc
     except (PrintAgentContractError, PrintingUnavailable) as exc:
+        raise _safe_error(exc) from exc
+
+
+
+@printing_router.post("/agent-bindings/{binding_id}/encryption-key-intents")
+def create_print_encryption_key_intent(
+    binding_id: str,
+    payload: PrintKeyIntentRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.INTEGRATIONS_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        row, raw = SensitivePrintingDeliveryService(db, request.app.state.config).create_key_intent(
+            binding_id,
+            purpose=payload.purpose,
+            user_id=identity.user_id,
+        )
+        return {
+            "intent_id": row.id,
+            "intent_token": raw,
+            "purpose": row.purpose,
+            "expires_at": row.expires_at.isoformat(),
+            "agent_binding_id": row.agent_binding_id,
+        }
+    except (SensitiveDeliveryRejected, ValueError) as exc:
+        raise _safe_error(exc) from exc
+
+
+@printing_router.post("/jobs/{job_id}/payload-delivery-authorizations")
+def authorize_sensitive_payload_delivery(
+    job_id: str,
+    payload: SensitiveDeliveryAuthorizationRequest,
+    request: Request,
+    _: None = Depends(require_csrf),
+    identity: AuthenticatedIdentity = Depends(require_permission(Permission.PRINT_EXECUTE)),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        execution, reservation = SensitivePrintingDeliveryService(
+            db, request.app.state.config
+        ).authorize_delivery(
+            print_job_id=job_id,
+            print_job_item_id=payload.print_job_item_id,
+            agent_binding_id=payload.agent_binding_id,
+            user_id=identity.user_id,
+        )
+        return {
+            "print_execution_id": execution.id,
+            "delivery_reservation_id": reservation.id,
+            "state": execution.state,
+            "payload_sha256": execution.payload_sha256,
+            "layout_sha256": execution.layout_sha256,
+            "agent_binding_id": execution.agent_binding_id,
+            "expires_at": reservation.expires_at.isoformat(),
+            "max_issue_count": reservation.max_issue_count,
+            "print_protocol_version": execution.print_protocol_version,
+        }
+    except (SensitiveDeliveryRejected, ValueError) as exc:
         raise _safe_error(exc) from exc
