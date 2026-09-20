@@ -242,8 +242,28 @@ def upgrade() -> None:
         ["original_print_event_id"], ["id"], ondelete="RESTRICT",
     )
 
+    # M13 append-only audit registry extension for printing events.
+    op.drop_constraint("ck_audit_event_category", "audit_events", type_="check")
+    op.drop_constraint("ck_audit_event_subject_type", "audit_events", type_="check")
+    op.drop_constraint("ck_audit_event_secondary_subject_type", "audit_events", type_="check")
+    op.create_check_constraint("ck_audit_event_category", "audit_events", "category IN ('SECURITY','AUTHORIZATION','TENANT_ADMIN','INTEGRATION','IMPORT','CONTROL','CIS_READ','REFERENCE_READ','DOCUMENT','TURNOVER','AGGREGATION','EDO','SUZ','WB','OZON','REPORT','AGENT','PRINTING','SYSTEM')")
+    op.create_check_constraint("ck_audit_event_subject_type", "audit_events", "subject_type IN ('USER','SESSION','MEMBERSHIP','INVITATION','ORGANISATION','PARTICIPANT','IMPORT','EVENT','CONTROL_RUN','AGENT_JOB','WRITE_OPERATION','DOCUMENT_OPERATION','TURNOVER_OPERATION','AGGREGATION_OPERATION','EDO_OBJECT','SUZ_CONNECTION','SUZ_ORDER','WB_CONNECTION','WB_OBJECT','OZON_CONNECTION','OZON_OBJECT','REPORT_JOB','REPORT_ARTIFACT','INTEGRATION_CONNECTION','MARKING_IDENTIFIER','PRINT_TEMPLATE','PRINT_JOB','PRINT_EVENT','AUDIT_CHAIN','AUDIT_CHECKPOINT')")
+    op.create_check_constraint(
+        "ck_audit_event_secondary_subject_type", "audit_events",
+        "secondary_subject_type IS NULL OR secondary_subject_type IN ('USER','SESSION','MEMBERSHIP','INVITATION','ORGANISATION','PARTICIPANT','IMPORT','EVENT','CONTROL_RUN','AGENT_JOB','WRITE_OPERATION','DOCUMENT_OPERATION','TURNOVER_OPERATION','AGGREGATION_OPERATION','EDO_OBJECT','SUZ_CONNECTION','SUZ_ORDER','WB_CONNECTION','WB_OBJECT','OZON_CONNECTION','OZON_OBJECT','REPORT_JOB','REPORT_ARTIFACT','INTEGRATION_CONNECTION','MARKING_IDENTIFIER','PRINT_TEMPLATE','PRINT_JOB','PRINT_EVENT','AUDIT_CHAIN','AUDIT_CHECKPOINT')",
+    )
+
 
 def downgrade() -> None:
+    op.drop_constraint("ck_audit_event_category", "audit_events", type_="check")
+    op.drop_constraint("ck_audit_event_subject_type", "audit_events", type_="check")
+    op.drop_constraint("ck_audit_event_secondary_subject_type", "audit_events", type_="check")
+    op.create_check_constraint("ck_audit_event_category", "audit_events", "category IN ('SECURITY','AUTHORIZATION','TENANT_ADMIN','INTEGRATION','IMPORT','CONTROL','CIS_READ','REFERENCE_READ','DOCUMENT','TURNOVER','AGGREGATION','EDO','SUZ','WB','OZON','REPORT','AGENT','SYSTEM')")
+    op.create_check_constraint("ck_audit_event_subject_type", "audit_events", "subject_type IN ('USER','SESSION','MEMBERSHIP','INVITATION','ORGANISATION','PARTICIPANT','IMPORT','EVENT','CONTROL_RUN','AGENT_JOB','WRITE_OPERATION','DOCUMENT_OPERATION','TURNOVER_OPERATION','AGGREGATION_OPERATION','EDO_OBJECT','SUZ_CONNECTION','SUZ_ORDER','WB_CONNECTION','WB_OBJECT','OZON_CONNECTION','OZON_OBJECT','REPORT_JOB','REPORT_ARTIFACT','INTEGRATION_CONNECTION','MARKING_IDENTIFIER','AUDIT_CHAIN','AUDIT_CHECKPOINT')")
+    op.create_check_constraint(
+        "ck_audit_event_secondary_subject_type", "audit_events",
+        "secondary_subject_type IS NULL OR secondary_subject_type IN ('USER','SESSION','MEMBERSHIP','INVITATION','ORGANISATION','PARTICIPANT','IMPORT','EVENT','CONTROL_RUN','AGENT_JOB','WRITE_OPERATION','DOCUMENT_OPERATION','TURNOVER_OPERATION','AGGREGATION_OPERATION','EDO_OBJECT','SUZ_CONNECTION','SUZ_ORDER','WB_CONNECTION','WB_OBJECT','OZON_CONNECTION','OZON_OBJECT','REPORT_JOB','REPORT_ARTIFACT','INTEGRATION_CONNECTION','MARKING_IDENTIFIER','AUDIT_CHAIN','AUDIT_CHECKPOINT')",
+    )
     op.drop_constraint("fk_print_job_original_event", "print_jobs", type_="foreignkey")
     for name in ("ix_print_event_created_at","ix_print_event_job","ix_print_event_participant","ix_print_event_organisation"):
         op.drop_index(name, table_name="print_events")
