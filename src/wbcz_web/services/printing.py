@@ -22,6 +22,7 @@ from wbcz_web.models import (
     PrintJobRecord,
     PrintTemplateRecord,
     PrintTemplateVersionRecord,
+    PrinterProfileRecord,
     StoredFullKmItemRecord,
     SuzCodeBlockRecord,
     SuzConnectionRecord,
@@ -619,10 +620,18 @@ class LocalPrintingService:
                 raise PrintingIntegrityError(f"item is not printable: {exc}") from exc
             items.append(item)
 
-        profile_fingerprint = (
-            hashlib.sha256(("print-profile-v1\0" + printer_profile_id).encode("utf-8")).hexdigest()
-            if printer_profile_id else None
-        )
+        profile_fingerprint = None
+        if printer_profile_id:
+            approved_profile = self.db.scalar(select(PrinterProfileRecord).where(
+                PrinterProfileRecord.id == printer_profile_id,
+                PrinterProfileRecord.organisation_id == self.scope.organisation_id,
+                PrinterProfileRecord.participant_id == self.scope.participant_id,
+            ))
+            profile_fingerprint = (
+                approved_profile.local_printer_fingerprint
+                if approved_profile is not None
+                else hashlib.sha256(("print-profile-v1\0" + printer_profile_id).encode("utf-8")).hexdigest()
+            )
         aggregate_hash = self._aggregate_payload_hash(items, version.id, mode)
         trace = self.db.info.get("audit_trace")
         correlation_id = trace.get("correlation_id") if isinstance(trace, dict) else None
