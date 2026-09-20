@@ -179,7 +179,7 @@ class PhysicalPrintingService:
             PrinterProfileRecord.organisation_id == self.scope.organisation_id,
             PrinterProfileRecord.participant_id == self.scope.participant_id,
         )) if execution.printer_profile_id else None
-        if None in {job, item, reservation, version, stored, profile}:
+        if any(value is None for value in (job, item, reservation, version, stored, profile)):
             raise PhysicalExecutionRejected("PHYSICAL_EXECUTION_GRAPH_INVALID")
         assert job and item and reservation and version and stored and profile
         if item.stored_full_km_item_id != stored.id:
