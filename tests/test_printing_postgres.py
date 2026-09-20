@@ -676,7 +676,7 @@ def _v2_binding(db: Session, org: OrganisationRecord, participant: ParticipantRe
     row = AgentBindingRecord(
         organisation_id=org.id,
         participant_id=participant.id,
-        installation_id="print-v2-" + uuid4().hex,
+        installation_id=str(uuid4()),
         display_name="Printing v2 synthetic agent",
         protocol_version="m15-v1",
         agent_version="0.5.1",
@@ -840,6 +840,12 @@ def test_print_key_intent_is_one_use_and_rotation_retires_old_key(factory):
             intent_token=raw,
             public_key_raw=second_private.public_key().public_bytes_raw(),
         )
+        with pytest.raises(SensitiveDeliveryRejected, match="PRINT_KEY_INTENT_ALREADY_USED"):
+            sensitive.register_public_key(
+                agent_binding_id=binding.id,
+                intent_token=raw,
+                public_key_raw=x25519.X25519PrivateKey.generate().public_key().public_bytes_raw(),
+            )
         assert first.state == "RETIRING"
         assert first.retiring_at is not None
         assert second.state == "ACTIVE"
