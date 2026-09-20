@@ -358,6 +358,8 @@ def complete_printer_discovery_job(
         principal = _machine_principal(request, db)
         service = PrinterProfileService(db, request.app.state.config)
         if payload.status == "FAILED":
+            if payload.observations:
+                return _v2_json({"code": "DISCOVERY_FAILED_WITH_OBSERVATIONS"}, status_code=400)
             value = service.fail_agent_job(
                 job_id=job_id,
                 machine_binding_id=principal.binding_id or "",
