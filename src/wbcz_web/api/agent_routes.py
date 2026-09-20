@@ -20,6 +20,7 @@ from wbcz_web.services.printing_sensitive_delivery import (
     SensitivePrintingDeliveryService,
 )
 from wbcz_web.services.printer_profiles import PrinterProfileRejected, PrinterProfileService
+from wbcz_web.services.physical_printing import PhysicalExecutionRejected, PhysicalPrintingService
 
 from .dependencies import get_db
 
@@ -69,6 +70,35 @@ class PrinterDiscoveryResult(_ClosedModel):
     status: str = Field(pattern="^(COMPLETED|FAILED)$")
     observations: list[PrinterObservationPayload] = Field(default_factory=list, max_length=64)
     safe_error_code: str | None = Field(default=None, max_length=80)
+
+
+class PhysicalRenderVerifiedRequest(_ClosedModel):
+    payload_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    layout_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    printer_profile_id: str = Field(min_length=1, max_length=64)
+    printer_profile_fingerprint: str = Field(pattern="^[0-9a-f]{64}$")
+    renderer_version: str = Field(min_length=1, max_length=64)
+    decoder_version: str = Field(min_length=1, max_length=64)
+
+
+class PhysicalSpoolBoundaryRequest(_ClosedModel):
+    payload_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    layout_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    printer_profile_id: str = Field(min_length=1, max_length=64)
+    printer_profile_fingerprint: str = Field(pattern="^[0-9a-f]{64}$")
+
+
+class PhysicalResultRequest(_ClosedModel):
+    state: str = Field(pattern="^(SPOOL_JOB_CREATED|SPOOLER_ACCEPTED|FAILED_PRE_SPOOL|UNKNOWN_AFTER_SPOOL)$")
+    windows_spool_job_id: int | None = Field(default=None, ge=1, le=4294967295)
+    last_windows_status: str | None = Field(default=None, max_length=64)
+    safe_error_code: str | None = Field(default=None, max_length=96)
+
+
+class PhysicalStatusRequest(_ClosedModel):
+    windows_spool_job_id: int = Field(ge=1, le=4294967295)
+    normalized_state: str = Field(min_length=1, max_length=64)
+    safe_error_code: str | None = Field(default=None, max_length=96)
 
 
 def _machine_principal(request: Request, db: Session):
@@ -381,3 +411,131 @@ def complete_printer_discovery_job(
         return _v2_json({"code": exc.code}, status_code=409)
     except ValueError:
         return _v2_json({"code": "PRINTER_DISCOVERY_RESULT_REJECTED"}, status_code=400)
+
+
+@agent_v2_printing_router.get("/physical-executions/next")
+def next_physical_execution(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PhysicalPrintingService(db, request.app.state.config).next_control(
+            machine_binding_id=principal.binding_id or "",
+        )
+        if value is None:
+            return Response(status_code=204, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PhysicalExecutionRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.get("/physical-executions/{execution_id}/render-contract")
+def physical_render_contract(
+    execution_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PhysicalPrintingService(db, request.app.state.config).render_contract(
+            execution_id,
+            machine_binding_id=principal.binding_id or "",
+        )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except (PhysicalExecutionRejected, KeyError) as exc:
+        code = exc.code if isinstance(exc, PhysicalExecutionRejected) else "PHYSICAL_EXECUTION_NOT_FOUND"
+        return _v2_json({"code": code}, status_code=409 if isinstance(exc, PhysicalExecutionRejected) else 404)
+
+
+@agent_v2_printing_router.post("/physical-executions/{execution_id}/render-verified")
+def physical_render_verified(
+    execution_id: str,
+    payload: PhysicalRenderVerifiedRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PhysicalPrintingService(db, request.app.state.config).mark_rendered(
+            execution_id,
+            machine_binding_id=principal.binding_id or "",
+            **payload.model_dump(),
+        )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PhysicalExecutionRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.post("/physical-executions/{execution_id}/spool-submitting")
+def physical_spool_submitting(
+    execution_id: str,
+    payload: PhysicalSpoolBoundaryRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PhysicalPrintingService(db, request.app.state.config).begin_spool(
+            execution_id,
+            machine_binding_id=principal.binding_id or "",
+            **payload.model_dump(),
+        )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PhysicalExecutionRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.post("/physical-executions/{execution_id}/result")
+def physical_execution_result(
+    execution_id: str,
+    payload: PhysicalResultRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PhysicalPrintingService(db, request.app.state.config).report_result(
+            execution_id,
+            machine_binding_id=principal.binding_id or "",
+            **payload.model_dump(),
+        )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PhysicalExecutionRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
+
+
+@agent_v2_printing_router.post("/physical-executions/{execution_id}/status")
+def physical_execution_status_update(
+    execution_id: str,
+    payload: PhysicalStatusRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        principal = _machine_principal(request, db)
+        value = PhysicalPrintingService(db, request.app.state.config).observe_status(
+            execution_id,
+            machine_binding_id=principal.binding_id or "",
+            **payload.model_dump(),
+        )
+        return _v2_json(value)
+    except AgentAuthError:
+        return _v2_json({"code": "MACHINE_AUTH_REQUIRED"}, status_code=401)
+    except PhysicalExecutionRejected as exc:
+        db.commit()
+        return _v2_json({"code": exc.code}, status_code=409)
