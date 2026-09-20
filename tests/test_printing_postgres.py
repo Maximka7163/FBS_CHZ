@@ -1100,3 +1100,260 @@ def test_sensitive_delivery_feature_gates_block_before_payload_disclosure(factor
             SensitivePrintingDeliveryService(
                 db, execution_off, key_provider=StaticKeyProvider()
             ).issue(reservation.id, machine_binding_id=binding.id)
+
+
+
+def _printer_observation(
+    *,
+    agent_printer_id: str = "prn_phase_b_001",
+    fingerprint: str = "1" * 64,
+    dpi_x: int = 300,
+    dpi_y: int = 300,
+    availability_state: str = "AVAILABLE",
+    display_name: str = "Synthetic Label Printer",
+) -> dict:
+    physical_width = round(50.0 * max(dpi_x, 1) / 25.4) if dpi_x else 0
+    physical_height = round(35.0 * max(dpi_y, 1) / 25.4) if dpi_y else 0
+    raw = {
+        "agent_printer_id": agent_printer_id,
+        "local_printer_fingerprint": fingerprint,
+        "display_name_sanitized": display_name,
+        "driver_name_sanitized": "Synthetic Driver",
+        "dpi_x": dpi_x,
+        "dpi_y": dpi_y,
+        "media_width_mm": 50.0 if dpi_x and dpi_y else 0.0,
+        "media_height_mm": 35.0 if dpi_x and dpi_y else 0.0,
+        "orientation": "LANDSCAPE",
+        "physical_width_px": physical_width,
+        "physical_height_px": physical_height,
+        "printable_width_px": physical_width,
+        "printable_height_px": physical_height,
+        "offset_x_px": 0,
+        "offset_y_px": 0,
+        "availability_state": availability_state,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "safe_error_code": None if availability_state == "AVAILABLE" else "PRINTER_UNAVAILABLE",
+    }
+    raw["capability_hash"] = capability_hash(raw)
+    return raw
+
+
+def test_0019_printer_profile_schema_is_tenant_bound_and_has_no_raw_device_or_sensitive_columns(factory):
+    with factory() as db:
+        inspector = inspect(db.get_bind())
+        tables = {
+            "printer_discovery_runs",
+            "printer_discovery_observations",
+            "printer_profiles",
+        }
+        assert tables.issubset(set(inspector.get_table_names()))
+        forbidden_tokens = {
+            "queue", "unc", "share", "port", "devmode", "command", "zpl", "epl",
+            "cpcl", "full_km", "ciphertext", "private_key",
+        }
+        for table in tables:
+            names = {column["name"].lower() for column in inspector.get_columns(table)}
+            assert not any(
+                token in name
+                for name in names
+                for token in forbidden_tokens
+            )
+        profile_uniques = {
+            tuple(item["column_names"])
+            for item in inspector.get_unique_constraints("printer_profiles")
+        }
+        assert ("agent_binding_id", "agent_printer_id") in profile_uniques
+        profile_fks = {item["name"] for item in inspector.get_foreign_keys("printer_profiles")}
+        assert "fk_printer_profile_binding_tenant" in profile_fks
+
+
+def test_printer_discovery_sync_approval_stale_reapproval_missing_disable_and_safe_queue(factory):
+    with factory() as db:
+        user, org, participant = _tenant(db, "printer-profile", "7707083893")
+        _scope(db, user, org, participant)
+        binding = _v2_binding(db, org, participant)
+        service = PrinterProfileService(db, _cfg(execute=True))
+
+        run = service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+        job = service.fetch_agent_job(machine_binding_id=binding.id)
+        assert job is not None
+        assert job["operation"] == "LIST"
+        assert set(job) == {
+            "job_id", "contract_version", "operation", "discovery_request_id", "agent_printer_id"
+        }
+        queued = db.get(AgentJobRecord, job["job_id"])
+        queued_blob = json.dumps(queued.payload_json, sort_keys=True)
+        for forbidden in ("queue", "port", "devmode", "zpl", "epl", "cpcl", "full_km"):
+            assert forbidden not in queued_blob.casefold()
+
+        first = _printer_observation()
+        completed = service.complete_agent_job(
+            job_id=job["job_id"],
+            machine_binding_id=binding.id,
+            observations=[first],
+        )
+        assert completed == {"state": "COMPLETED", "printer_count": 1}
+        status = service.discovery_status(run.id)
+        assert status["state"] == "COMPLETED"
+        assert len(status["observations"]) == 1
+        obs_id = status["observations"][0]["id"]
+
+        profile = service.approve_observation(obs_id, user_id=user.id)
+        assert profile.state == "ACTIVE"
+        assert profile.capability_revision == 1
+        assert profile.local_printer_fingerprint == first["local_printer_fingerprint"]
+        safe = service.profile_detail(profile.id)
+        assert set(safe) == {
+            "printer_profile_id", "display_name", "driver_display_name", "state",
+            "dpi_x", "dpi_y", "media_width_mm", "media_height_mm", "orientation",
+            "printable_width_px", "printable_height_px", "offset_x_px", "offset_y_px",
+            "last_seen_at", "capability_revision", "synthetic_test_state",
+        }
+        safe_blob = json.dumps(safe, sort_keys=True)
+        assert first["local_printer_fingerprint"] not in safe_blob
+        assert "queue" not in safe_blob.casefold()
+        assert "port" not in safe_blob.casefold()
+
+        # Material local identity/capability evidence changes -> STALE without
+        # silently replacing the approved evidence.
+        second_run = service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+        second_job = service.fetch_agent_job(machine_binding_id=binding.id)
+        changed = _printer_observation(fingerprint="2" * 64)
+        service.complete_agent_job(
+            job_id=second_job["job_id"],
+            machine_binding_id=binding.id,
+            observations=[changed],
+        )
+        db.refresh(profile)
+        assert profile.state == "STALE"
+        assert profile.local_printer_fingerprint == "1" * 64
+
+        changed_obs = service.discovery_status(second_run.id)["observations"][0]["id"]
+        profile = service.approve_observation(changed_obs, user_id=user.id)
+        assert profile.state == "ACTIVE"
+        assert profile.local_printer_fingerprint == "2" * 64
+        assert profile.capability_revision == 2
+
+        # Complete LIST without this printer -> MISSING.
+        third = service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+        third_job = service.fetch_agent_job(machine_binding_id=binding.id)
+        service.complete_agent_job(
+            job_id=third_job["job_id"],
+            machine_binding_id=binding.id,
+            observations=[],
+        )
+        db.refresh(profile)
+        assert profile.state == "MISSING"
+
+        profile = service.disable_profile(profile.id, user_id=user.id)
+        assert profile.state == "DISABLED"
+        assert service.refresh_profile(profile.id, user_id=user.id).agent_binding_id == binding.id
+
+
+def test_printer_profile_incompatible_dpi_and_template_compatibility_are_fail_closed(factory):
+    with factory() as db:
+        user, org, participant = _tenant(db, "printer-dpi", "7707083893")
+        _scope(db, user, org, participant)
+        binding = _v2_binding(db, org, participant)
+        service = PrinterProfileService(db, _cfg(execute=True))
+        printing = _service(db, execute=True)
+        template = printing.create_template(
+            name="Printer compatibility",
+            label_width_mm=50,
+            label_height_mm=35,
+            layout=_layout("Printer compatibility"),
+            user_id=user.id,
+        )
+
+        run = service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+        job = service.fetch_agent_job(machine_binding_id=binding.id)
+        anisotropic = _printer_observation(
+            agent_printer_id="prn_anisotropic",
+            fingerprint="3" * 64,
+            dpi_x=300,
+            dpi_y=600,
+        )
+        service.complete_agent_job(
+            job_id=job["job_id"],
+            machine_binding_id=binding.id,
+            observations=[anisotropic],
+        )
+        observation_id = service.discovery_status(run.id)["observations"][0]["id"]
+        profile = service.approve_observation(observation_id, user_id=user.id)
+        assert profile.state == "INCOMPATIBLE"
+        result = service.compatibility(profile.id, template.current_version_id)
+        assert result["result"] == "PRINTER_PROFILE_INCOMPATIBLE"
+
+
+def test_printer_profiles_are_non_enumerating_across_participants(factory):
+    with factory() as db:
+        user, org, participant = _tenant(db, "printer-tenant", "7707083893")
+        _scope(db, user, org, participant)
+        binding = _v2_binding(db, org, participant)
+        service = PrinterProfileService(db, _cfg(execute=True))
+        run = service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+        job = service.fetch_agent_job(machine_binding_id=binding.id)
+        service.complete_agent_job(
+            job_id=job["job_id"],
+            machine_binding_id=binding.id,
+            observations=[_printer_observation()],
+        )
+        profile = service.approve_observation(
+            service.discovery_status(run.id)["observations"][0]["id"],
+            user_id=user.id,
+        )
+
+        participant_b = _second_participant(db, org, "500100732259")
+        bind_tenant_scope(
+            db,
+            organisation_id=org.id,
+            participant_id=participant_b.id,
+            user_id=user.id,
+            role="OWNER",
+        )
+        foreign = PrinterProfileService(db, _cfg(execute=True))
+        with pytest.raises(KeyError):
+            foreign.profile_detail(profile.id)
+        with pytest.raises(PrinterProfileRejected, match="AGENT_BINDING_NOT_FOUND"):
+            foreign.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+
+
+def test_printer_discovery_does_not_touch_m8_vault_and_audit_contains_only_safe_profile_metadata(factory, monkeypatch):
+    with factory() as db:
+        user, org, participant = _tenant(db, "printer-no-vault", "7707083893")
+        _scope(db, user, org, participant)
+        binding = _v2_binding(db, org, participant)
+
+        from wbcz_web.services.printing import LocalPrintingService
+
+        def forbidden_vault_decrypt(*args, **kwargs):
+            raise AssertionError("printer discovery must not decrypt M8 vault")
+
+        monkeypatch.setattr(LocalPrintingService, "_decrypt_and_verify", forbidden_vault_decrypt)
+        service = PrinterProfileService(db, _cfg(execute=True))
+        run = service.request_discovery(agent_binding_id=binding.id, user_id=user.id)
+        job = service.fetch_agent_job(machine_binding_id=binding.id)
+        canary = "FULL-KM-CANARY-MUST-NOT-APPEAR"
+        observation = _printer_observation(display_name="Safe Printer")
+        service.complete_agent_job(
+            job_id=job["job_id"],
+            machine_binding_id=binding.id,
+            observations=[observation],
+        )
+        profile = service.approve_observation(
+            service.discovery_status(run.id)["observations"][0]["id"],
+            user_id=user.id,
+        )
+        audits = list(db.scalars(select(AuditEventRecord).where(
+            AuditEventRecord.event_type.in_((
+                "PRINTER_DISCOVERY_REQUESTED",
+                "PRINTER_DISCOVERY_COMPLETED",
+                "PRINTER_PROFILE_CREATED",
+            ))
+        )))
+        assert len(audits) == 3
+        blob = json.dumps([row.metadata_sanitized_json for row in audits], sort_keys=True)
+        assert canary not in blob
+        for forbidden in ("queue_name", "port_name", "devmode", "zpl", "epl", "cpcl", "full_km"):
+            assert forbidden not in blob.casefold()
+        assert profile.state == "ACTIVE"
