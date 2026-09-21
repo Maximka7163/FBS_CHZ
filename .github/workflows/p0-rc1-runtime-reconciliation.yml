@@ -214,6 +214,8 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --name wbcz-agent --paths src --collect-all arbez_dmtx windows-agent/wbcz_agent_entry.py
+          $dmtx = @(Get-ChildItem -LiteralPath '.\dist\wbcz-agent' -Recurse -File | Where-Object { $_.Name -ieq 'libdmtx.dll' })
+          if ($dmtx.Count -ne 1) { throw "Expected exactly one bundled libdmtx.dll, found $($dmtx.Count)" }
           .\dist\wbcz-agent\wbcz-agent.exe --help | Out-Null
       - name: Stage Windows package
         id: package

@@ -11,6 +11,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 import math
 import os
 from pathlib import Path
+import sys
 from typing import Any, Mapping
 
 
@@ -292,7 +293,7 @@ def _bundled_libdmtx_path() -> Path | None:
         ("libdmtx.dll", "dmtx.dll")
         if os.name == "nt"
         else ("libdmtx.dylib", "libdmtx.0.dylib")
-        if os.sys.platform == "darwin"
+        if sys.platform == "darwin"
         else ("libdmtx.so", "libdmtx.so.0", "libdmtx.so.1")
     )
     for name in names:
@@ -315,7 +316,13 @@ def _load_libdmtx() -> Any:
     library = None
     if bundled is not None:
         try:
-            library = ctypes.CDLL(str(bundled))
+            if os.name == "nt":
+                # Restrict dependency resolution to the trusted package
+                # directory plus the normal Windows system search policy.
+                with os.add_dll_directory(str(bundled.parent)):
+                    library = ctypes.CDLL(str(bundled))
+            else:
+                library = ctypes.CDLL(str(bundled))
         except OSError as exc:
             raise PrintingRuntimeUnavailable("bundled libdmtx runtime failed to load") from exc
 

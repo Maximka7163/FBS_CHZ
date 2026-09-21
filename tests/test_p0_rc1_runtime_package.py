@@ -47,6 +47,7 @@ def test_windows_agent_package_bundles_pinned_libdmtx_runtime() -> None:
     readme = text("windows-agent/README.txt")
     assert "arbez-dmtx==0.0.2" in lock
     assert "--collect-all arbez_dmtx" in workflow
+    assert "Expected exactly one bundled libdmtx.dll" in workflow
     assert "bundled libdmtx" in readme.lower()
 
 
