@@ -738,9 +738,8 @@ def _sensitive_ready(db: Session, *, full_km: bytes = SYNTHETIC_FULL_KM):
     item = db.scalar(select(PrintJobItemRecord).where(PrintJobItemRecord.print_job_id == job.id))
     assert item is not None
     binding = _v2_binding(db, org, participant)
-    key_provider = StaticKeyProvider()
     sensitive = SensitivePrintingDeliveryService(
-        db, _cfg(execute=True), key_provider=key_provider
+        db, _cfg(execute=True), key_provider=StaticKeyProvider()
     )
     private = x25519.X25519PrivateKey.generate()
     intent, raw = sensitive.create_key_intent(binding.id, purpose="FIRST_REGISTRATION", user_id=user.id)
@@ -1466,8 +1465,9 @@ def _physical_ready(db: Session, *, full_km: bytes = SYNTHETIC_FULL_KM):
     item = db.scalar(select(PrintJobItemRecord).where(PrintJobItemRecord.print_job_id == job.id))
     assert item is not None
 
+    key_provider = StaticKeyProvider()
     sensitive = SensitivePrintingDeliveryService(
-        db, _cfg(execute=True), key_provider=StaticKeyProvider()
+        db, _cfg(execute=True), key_provider=key_provider
     )
     private = x25519.X25519PrivateKey.generate()
     _, intent_token = sensitive.create_key_intent(
