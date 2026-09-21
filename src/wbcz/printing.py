@@ -309,32 +309,23 @@ def _bundled_libdmtx_path() -> Path | None:
 
 
 def _load_libdmtx() -> Any:
-    # Primary runtime: exact pinned arbez-dmtx wheel, which bundles libdmtx.
-    # The path is derived from the imported package itself and resolved before
-    # CDLL, preventing current-directory/PATH DLL search hijacking.
-    bundled = _bundled_libdmtx_path()
     library = None
-    if bundled is not None:
+    if os.name == "nt":
+        # Windows runtime is deterministic: load only the exact package-local
+        # DLL from the pinned arbez-dmtx wheel. Never search CWD/PATH or accept
+        # a caller/operator-selected native-library path.
+        bundled = _bundled_libdmtx_path()
+        if bundled is None:
+            raise PrintingRuntimeUnavailable("trusted bundled libdmtx runtime is unavailable")
         try:
-            if os.name == "nt":
-                # Restrict dependency resolution to the trusted package
-                # directory plus the normal Windows system search policy.
-                with os.add_dll_directory(str(bundled.parent)):
-                    library = ctypes.CDLL(str(bundled))
-            else:
+            # Restrict dependent-DLL resolution to the trusted package
+            # directory plus the normal Windows system search policy.
+            with os.add_dll_directory(str(bundled.parent)):
                 library = ctypes.CDLL(str(bundled))
         except OSError as exc:
             raise PrintingRuntimeUnavailable("bundled libdmtx runtime failed to load") from exc
-
-    # Windows physical Agent must be deterministic: no fallback to a bare DLL
-    # name, PATH, CWD or user-controlled location. The self-contained Agent
-    # package is required to carry the pinned bundled DLL.
-    if library is None and os.name == "nt":
-        raise PrintingRuntimeUnavailable("trusted bundled libdmtx runtime is unavailable")
-
-    # Preserve accepted Linux/macOS system-lib behavior as a compatibility
-    # fallback. Production dependencies also include the bundled provider.
-    if library is None:
+    else:
+        # Preserve the accepted Linux/macOS runtime behavior unchanged.
         candidates = [find_library("dmtx"), "libdmtx.so.0", "libdmtx.so", "libdmtx.dylib"]
         for candidate in candidates:
             if not candidate:
