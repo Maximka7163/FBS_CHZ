@@ -38,7 +38,7 @@ from wbcz_web.services.audit_history import (
     TraceContext,
 )
 from wbcz_web.services.printer_profiles import COMPATIBLE, PrinterProfileRejected, PrinterProfileService
-from wbcz_web.services.printing import LocalPrintingService
+from wbcz_web.services.printing import KmKeyProvider, LocalPrintingService
 from wbcz_web.services.tenant import active_tenant
 
 
@@ -63,10 +63,17 @@ def _aware(value: datetime) -> datetime:
 
 
 class PhysicalPrintingService:
-    def __init__(self, db: Session, config: WebConfig) -> None:
+    def __init__(
+        self,
+        db: Session,
+        config: WebConfig,
+        *,
+        key_provider: KmKeyProvider | None = None,
+    ) -> None:
         self.db = db
         self.config = config
         self.scope = active_tenant(db)
+        self._key_provider = key_provider
 
     def _require_gate(self) -> None:
         if not self.config.printing_enabled:
@@ -621,7 +628,11 @@ class PhysicalPrintingService:
             raise PhysicalExecutionRejected("DUPLICATE_LABEL_RISK_ACK_REQUIRED")
         if not execution.printer_profile_id:
             raise PhysicalExecutionRejected("PRINTER_PROFILE_REQUIRED")
-        new_job = LocalPrintingService(self.db, self.config).create_print_job(
+        new_job = LocalPrintingService(
+            self.db,
+            self.config,
+            key_provider=self._key_provider,
+        ).create_print_job(
             stored_item_ids=[execution.stored_full_km_item_id],
             template_version_id=execution.template_version_id,
             user_id=user_id,

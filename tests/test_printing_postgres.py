@@ -738,8 +738,9 @@ def _sensitive_ready(db: Session, *, full_km: bytes = SYNTHETIC_FULL_KM):
     item = db.scalar(select(PrintJobItemRecord).where(PrintJobItemRecord.print_job_id == job.id))
     assert item is not None
     binding = _v2_binding(db, org, participant)
+    key_provider = StaticKeyProvider()
     sensitive = SensitivePrintingDeliveryService(
-        db, _cfg(execute=True), key_provider=StaticKeyProvider()
+        db, _cfg(execute=True), key_provider=key_provider
     )
     private = x25519.X25519PrivateKey.generate()
     intent, raw = sensitive.create_key_intent(binding.id, purpose="FIRST_REGISTRATION", user_id=user.id)
@@ -1493,7 +1494,9 @@ def _physical_ready(db: Session, *, full_km: bytes = SYNTHETIC_FULL_KM):
         context_sha256=envelope["context_sha256"],
     )
     assert execution.state == "PAYLOAD_DELIVERED"
-    physical = PhysicalPrintingService(db, _cfg(execute=True))
+    physical = PhysicalPrintingService(
+        db, _cfg(execute=True), key_provider=key_provider
+    )
     return (
         user, org, participant, stored, binding, profile, template,
         job, item, sensitive, execution, reservation, physical,
@@ -1509,11 +1512,19 @@ def test_0020_schema_extends_execution_without_sensitive_or_raw_printer_columns(
             "last_windows_status", "rendered_at", "spool_submitting_at",
             "spool_job_created_at", "spooler_accepted_at",
         }.issubset(columns)
+        # This opaque FK is intentionally safe: it identifies the encrypted
+        # retained item but cannot store or disclose plaintext FULL KM.
+        assert "stored_full_km_item_id" in columns
+        sensitive_storage_columns = columns - {"stored_full_km_item_id"}
         forbidden = {
             "full_km", "raster", "queue", "unc", "port", "devmode",
             "spool_file", "zpl", "epl", "cpcl", "command",
         }
-        assert not any(token in name for name in columns for token in forbidden)
+        assert not any(
+            token in name
+            for name in sensitive_storage_columns
+            for token in forbidden
+        )
         fk_names = {fk["name"] for fk in inspector.get_foreign_keys("print_executions")}
         assert "fk_print_execution_printer_profile_tenant" in fk_names
 
