@@ -16,6 +16,7 @@ from wbcz.printing import (
     MAX_MODULE_SIZE_MM,
     MIN_MODULE_SIZE_MM,
     PrintingContractError,
+    PrintingRuntimeUnavailable,
     SYNTHETIC_PREVIEW_FULL_KM,
     render_gs1_datamatrix,
     validate_layout,
@@ -701,6 +702,11 @@ def evaluate_template_compatibility(
             quiet_zone_modules=dm["quiet_zone_modules"],
             dpi=dpi,
         )
+    except PrintingRuntimeUnavailable:
+        return {
+            "result": "PRINT_RENDERER_RUNTIME_UNAVAILABLE",
+            "safe_reason_code": "LIBDMTX_RUNTIME_UNAVAILABLE",
+        }
     except PrintingContractError:
         return {"result": "DATAMATRIX_MODULE_SIZE_UNSUPPORTED"}
     dm_width_px = round(dm["width"] * dpi / 25.4)

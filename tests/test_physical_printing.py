@@ -31,6 +31,8 @@ from wbcz.printing import (
     RENDERER_VERSION,
     SYNTHETIC_PREVIEW_FULL_KM,
     PrintingSecurityError,
+    libdmtx_version,
+    _bundled_libdmtx_path,
     render_decode_verify_physical_label,
 )
 from wbcz.printer_profiles import (
@@ -185,6 +187,58 @@ def test_physical_control_is_closed_versions_exact_and_copies_one():
         PhysicalExecutionControl.from_mapping({**control, "renderer_version": "different"})
     with pytest.raises(Exception):
         PhysicalExecutionControl.from_mapping({**control, "copies": 2})
+
+
+def test_replay_fsync_uses_write_capable_descriptor(tmp_path, monkeypatch):
+    replay = AgentPhysicalReplayStore(tmp_path / "fsync-flags.sqlite")
+    seen = []
+    real_open = os.open
+
+    def traced_open(path, flags, *args):
+        seen.append(flags)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr("wbcz.physical_printing.os.open", traced_open)
+    replay._fsync_db()
+    assert seen
+    assert seen[-1] & os.O_RDWR == os.O_RDWR
+    binary_flag = getattr(os, "O_BINARY", 0)
+    if binary_flag:
+        assert seen[-1] & binary_flag == binary_flag
+
+
+def test_failed_durable_spool_boundary_never_calls_physical_spooler(tmp_path):
+    class BoundarySyncFailureReplay(AgentPhysicalReplayStore):
+        def __init__(self, path):
+            self.sync_count = 0
+            super().__init__(path)
+
+        def _fsync_db(self):
+            self.sync_count += 1
+            # init=1, RENDERED_VERIFIED=2, SPOOL_SUBMITTING=3
+            if self.sync_count == 3:
+                raise OSError("synthetic durable flush failure")
+            return super()._fsync_db()
+
+    local, control, render_contract = contracts()
+    replay = BoundarySyncFailureReplay(tmp_path / "boundary-sync.sqlite")
+    spooler = FakeGdiRasterSpooler()
+    events = []
+    physical = PhysicalPrintRuntime(
+        resolver=LocalPrinterResolver(FakeDiscovery(local)),
+        spooler=spooler,
+        replay=replay,
+        mark_rendered=lambda payload: events.append(("rendered", payload)) or payload,
+        begin_spool=lambda payload: events.append(("boundary", payload)) or payload,
+        report_result=lambda payload: events.append(("result", payload)) or payload,
+    )
+    with pytest.raises(OSError, match="durable flush failure"):
+        physical.execute(control, render_contract, full_km=SYNTHETIC_PREVIEW_FULL_KM)
+    assert spooler.calls == []
+    assert [name for name, _ in events] == ["rendered"]
+    assert replay.get(control["execution_id"])["state"] == "SPOOL_SUBMITTING"
+    with pytest.raises(PhysicalReplayBlocked):
+        physical.execute(control, render_contract, full_km=SYNTHETIC_PREVIEW_FULL_KM)
 
 
 @pytest.mark.parametrize(
@@ -355,6 +409,33 @@ def test_synthetic_physical_test_uses_only_builtin_fixture(tmp_path):
             label_height_mm=35,
             dpi=300,
         )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows replay fsync only")
+def test_windows_replay_fsync_smoke_uses_real_os_fsync(tmp_path):
+    replay = AgentPhysicalReplayStore(tmp_path / "windows-replay.sqlite")
+    replay.record(
+        execution_id="windows-fsync-exec",
+        print_job_item_id="item",
+        delivery_reservation_id="reservation",
+        payload_sha256="a" * 64,
+        layout_sha256="b" * 64,
+        printer_profile_id="profile",
+        printer_profile_fingerprint="c" * 64,
+        state="RENDERED_VERIFIED",
+        durable=True,
+    )
+    assert replay.get("windows-fsync-exec")["state"] == "RENDERED_VERIFIED"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows bundled libdmtx runtime only")
+def test_windows_libdmtx_is_loaded_from_pinned_package_path_without_printing():
+    path = _bundled_libdmtx_path()
+    assert path is not None
+    assert path.is_absolute()
+    assert path.name.lower() in {"libdmtx.dll", "dmtx.dll"}
+    parts = tuple(int(piece) for piece in libdmtx_version().split(".")[:3])
+    assert parts >= (0, 7, 5)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows GDI load smoke only")

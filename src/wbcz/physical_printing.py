@@ -285,10 +285,17 @@ class AgentPhysicalReplayStore:
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
+    @staticmethod
+    def _fsync_open_flags() -> int:
+        # Windows CRT _commit(), used by os.fsync(), requires a descriptor
+        # opened with write access. O_BINARY avoids text-mode translation on
+        # Windows and is zero/absent on POSIX.
+        return os.O_RDWR | getattr(os, "O_BINARY", 0)
+
     def _fsync_db(self) -> None:
         if not self.path.exists():
             return
-        fd = os.open(self.path, os.O_RDONLY)
+        fd = os.open(self.path, self._fsync_open_flags())
         try:
             os.fsync(fd)
         finally:

@@ -164,5 +164,5 @@ jobs:
           python -m pip install -r requirements.production.lock
           python -m pip install --no-deps -e .
           python -m pip install "pytest==9.1.1"
-      - name: Load GDI and status adapters without printing
-        run: python -m pytest -q tests/test_physical_printing.py -k windows_gdi_and_status_adapters_load_without_printing
+      - name: Load Windows printing runtime without printing
+        run: python -m pytest -q tests/test_physical_printing.py -k "windows_gdi_and_status_adapters_load_without_printing or windows_replay_fsync_smoke_uses_real_os_fsync or windows_libdmtx_is_loaded_from_pinned_package_path_without_printing"

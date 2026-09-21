@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+from wbcz.printing import PrintingRuntimeUnavailable
+
 from wbcz.printer_profiles import (
     BoundedPrinterDiscovery,
     LocalPrinterCapabilities,
@@ -211,6 +213,18 @@ def test_representative_printer_dpi_is_compatible(dpi):
     result = evaluate_template_compatibility(**_profile_kwargs(dpi))
     assert result["result"] == "COMPATIBLE"
     assert result["module_pixels"] >= 1
+
+
+def test_missing_renderer_runtime_is_not_misclassified_as_module_size(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise PrintingRuntimeUnavailable("libdmtx unavailable")
+
+    monkeypatch.setattr("wbcz.printer_profiles.render_gs1_datamatrix", unavailable)
+    result = evaluate_template_compatibility(**_profile_kwargs(300))
+    assert result == {
+        "result": "PRINT_RENDERER_RUNTIME_UNAVAILABLE",
+        "safe_reason_code": "LIBDMTX_RUNTIME_UNAVAILABLE",
+    }
 
 
 def test_anisotropic_dpi_media_mismatch_clipping_and_module_rounding_fail_closed():

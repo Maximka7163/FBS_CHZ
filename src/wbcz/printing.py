@@ -5,9 +5,12 @@ import ctypes
 from ctypes import POINTER, byref, c_int, c_ubyte, c_void_p
 from ctypes.util import find_library
 import hashlib
+import importlib
 import json
 from importlib.metadata import PackageNotFoundError, version as package_version
 import math
+import os
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -52,6 +55,10 @@ class PrintingContractError(ValueError):
 
 class PrintingSecurityError(PrintingContractError):
     pass
+
+
+class PrintingRuntimeUnavailable(PrintingContractError):
+    """Required local native printing runtime is unavailable or untrusted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,25 +275,76 @@ class _DmtxEncode(ctypes.Structure):
     ]
 
 
-def _load_libdmtx() -> Any:
-    candidates = [find_library("dmtx"), "libdmtx.so.0", "libdmtx.so", "libdmtx.dll", "libdmtx.dylib"]
-    library = None
-    for candidate in candidates:
-        if not candidate:
-            continue
+def _bundled_libdmtx_path() -> Path | None:
+    """Resolve only the pinned package-local native library, never CWD/PATH."""
+    try:
+        package = importlib.import_module("arbez_dmtx._libdmtx")
+    except ImportError:
+        return None
+    module_file = getattr(package, "__file__", None)
+    if not module_file:
+        return None
+    try:
+        trusted_dir = Path(module_file).resolve(strict=True).parent
+    except OSError:
+        return None
+    names = (
+        ("libdmtx.dll", "dmtx.dll")
+        if os.name == "nt"
+        else ("libdmtx.dylib", "libdmtx.0.dylib")
+        if os.sys.platform == "darwin"
+        else ("libdmtx.so", "libdmtx.so.0", "libdmtx.so.1")
+    )
+    for name in names:
+        candidate = trusted_dir / name
         try:
-            library = ctypes.CDLL(candidate)
-            break
+            resolved = candidate.resolve(strict=True)
         except OSError:
             continue
+        if resolved.parent != trusted_dir or not resolved.is_file():
+            continue
+        return resolved
+    return None
+
+
+def _load_libdmtx() -> Any:
+    # Primary runtime: exact pinned arbez-dmtx wheel, which bundles libdmtx.
+    # The path is derived from the imported package itself and resolved before
+    # CDLL, preventing current-directory/PATH DLL search hijacking.
+    bundled = _bundled_libdmtx_path()
+    library = None
+    if bundled is not None:
+        try:
+            library = ctypes.CDLL(str(bundled))
+        except OSError as exc:
+            raise PrintingRuntimeUnavailable("bundled libdmtx runtime failed to load") from exc
+
+    # Windows physical Agent must be deterministic: no fallback to a bare DLL
+    # name, PATH, CWD or user-controlled location. The self-contained Agent
+    # package is required to carry the pinned bundled DLL.
+    if library is None and os.name == "nt":
+        raise PrintingRuntimeUnavailable("trusted bundled libdmtx runtime is unavailable")
+
+    # Preserve accepted Linux/macOS system-lib behavior as a compatibility
+    # fallback. Production dependencies also include the bundled provider.
     if library is None:
-        raise PrintingContractError("libdmtx runtime is unavailable")
+        candidates = [find_library("dmtx"), "libdmtx.so.0", "libdmtx.so", "libdmtx.dylib"]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                library = ctypes.CDLL(candidate)
+                break
+            except OSError:
+                continue
+    if library is None:
+        raise PrintingRuntimeUnavailable("libdmtx runtime is unavailable")
 
     library.dmtxVersion.restype = ctypes.c_char_p
     version = (library.dmtxVersion() or b"").decode("ascii", errors="strict")
     parts = tuple(int(piece) for piece in version.split(".")[:3] if piece.isdigit())
     if not parts or parts < (0, 7, 5):
-        raise PrintingContractError("libdmtx >=0.7.5 is required")
+        raise PrintingRuntimeUnavailable("libdmtx >=0.7.5 is required")
 
     library.dmtxEncodeCreate.argtypes = []
     library.dmtxEncodeCreate.restype = POINTER(_DmtxEncode)

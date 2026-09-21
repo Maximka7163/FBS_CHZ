@@ -8,6 +8,7 @@ SAFETY
 - The agent is outbound HTTPS only.
 - Participant-bound permanent agent credential storage is handled by the accepted M15 DPAPI enrollment path.
 - Private key and PIN remain inside the Windows/CryptoPro boundary.
+- The self-contained package includes the pinned bundled libdmtx runtime used by the Sellari DataMatrix renderer; no runtime DLL download or arbitrary DLL path is supported.
 
 FUTURE OPERATOR FLOW — ONLY AFTER SEPARATE AUTHORIZATION
 1. Verify the ZIP SHA256 sidecar.

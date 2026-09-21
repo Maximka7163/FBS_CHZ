@@ -126,6 +126,25 @@ Runtime compatibility evidence includes:
 - libdmtx version;
 - decoder version.
 
+### Windows libdmtx runtime packaging
+
+Sellari continues to use the same `wbcz.printing` ctypes renderer and libdmtx C API;
+there is no alternate marking-code renderer. The native runtime is supplied by the
+pinned `arbez-dmtx==0.0.2` platform wheel, whose bundled libdmtx is validated at
+runtime as version >= 0.7.5.
+
+On Windows the loader accepts only the DLL located inside the installed
+`arbez_dmtx._libdmtx` package directory. It does not fall back to CWD, PATH,
+a browser/server path or an operator-selected arbitrary DLL. The self-contained
+Windows Agent build uses PyInstaller `--collect-all arbez_dmtx` so the DLL is
+already present before the Agent starts; no network download occurs during render
+or physical printing.
+
+Linux/macOS retain the accepted system-lib fallback for compatibility if the
+bundled provider is unavailable. A missing/untrusted renderer runtime is reported
+as `PRINT_RENDERER_RUNTIME_UNAVAILABLE / LIBDMTX_RUNTIME_UNAVAILABLE`; it is not
+misclassified as a DataMatrix module-size or DPI incompatibility.
+
 `PRINTING_PHYSICAL_V1` is advertised only when the physical runtime reports the
 required renderer/decoder capability.
 

@@ -209,10 +209,11 @@ jobs:
         run: |
           python -m pytest -q tests/test_windows_agent.py tests/test_agent_protocol_runtime.py tests/test_p0_rc1_runtime_package.py
           python -m pytest -q tests/test_p0_endtoend_wiring.py::test_preflight_is_mutation_free_even_with_optional_cis
+          python -m pytest -q tests/test_physical_printing.py -k "windows_replay_fsync_smoke or windows_libdmtx_is_loaded"
       - name: Build self-contained Windows agent
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --name wbcz-agent --paths src windows-agent/wbcz_agent_entry.py
+          python -m PyInstaller --noconfirm --clean --onedir --name wbcz-agent --paths src --collect-all arbez_dmtx windows-agent/wbcz_agent_entry.py
           .\dist\wbcz-agent\wbcz-agent.exe --help | Out-Null
       - name: Stage Windows package
         id: package

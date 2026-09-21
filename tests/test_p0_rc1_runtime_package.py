@@ -41,6 +41,15 @@ def test_rc1_bundle_targets_current_m15_runtime_not_legacy_p0_sha() -> None:
     assert '"src/wbcz_web/worker.py"' in builder
 
 
+def test_windows_agent_package_bundles_pinned_libdmtx_runtime() -> None:
+    workflow = text(".github/workflows/p0-rc1-runtime-reconciliation.yml")
+    lock = text("requirements.production.lock")
+    readme = text("windows-agent/README.txt")
+    assert "arbez-dmtx==0.0.2" in lock
+    assert "--collect-all arbez_dmtx" in workflow
+    assert "bundled libdmtx" in readme.lower()
+
+
 def test_production_write_and_legacy_agent_bootstrap_remain_fail_closed() -> None:
     compose = text("docker-compose.prod.yml")
     common = text("windows-agent/Runtime-Common.ps1")

@@ -13,6 +13,7 @@ Required operating contract:
 - replay DB may contain job replay state, M11 rate windows and non-secret runtime/protocol metadata only;
 - certificate private key and PIN never enter replay DB, logs or VPS;
 - no automatic self-update;
+- the physical-print capable Agent package carries its pinned libdmtx native runtime inside the signed/verified package; printing never downloads a DLL at execution time and never accepts an operator/browser DLL path;
 - operator-controlled version rollout and protocol compatibility check.
 
 Enrollment uses `wbcz-agent enroll` with a short-lived one-use token supplied only for enrollment. The command stores the returned permanent credential through DPAPI and does not print it. Remove the enrollment token from the environment immediately after exchange.
