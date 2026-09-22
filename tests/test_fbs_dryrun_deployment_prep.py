@@ -203,5 +203,5 @@ def test_0016_database_upgrades_through_printing_chain_to_exact_0020() -> None:
     _reset_database()
     _upgrade_production_like(M15)
     assert _revision() == M15
-    _upgrade(TARGET)
+    _upgrade_production_like(TARGET)
     assert _revision() == TARGET
