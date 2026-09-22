@@ -278,7 +278,9 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
             if owner_inn is not None and participant_inn is not None
             else None
         )
-        fetched_at = check.checked_at.isoformat() if check and check.checked_at else None
+        raw_fetched_at = snapshot.get("fetched_at")
+        fetched_at = raw_fetched_at if isinstance(raw_fetched_at, str) else None
+        checked_at = check.checked_at.isoformat() if check and check.checked_at else None
         action_label = (
             "Вывести из оборота"
             if decision == Decision.READY_TO_WITHDRAW.value
@@ -315,7 +317,7 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
                 "attention_title": attention_title,
                 "attention_detail": attention_detail,
                 "user_action": user_action,
-                "checked_at": fetched_at,
+                "checked_at": checked_at,
                 "write_operation_id": write.operation_id if write else None,
                 "write_state": write.state if write else None,
                 "document_id": write.document_id if write else None,
