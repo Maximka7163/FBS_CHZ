@@ -20,6 +20,14 @@ M15 = "0016_m15_production_hardening"
 def source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
+def test_alembic_env_isolated_from_application_web_config() -> None:
+    env_source = source("migrations/env.py")
+    assert "WebConfig" not in env_source
+    assert "WBCZ_MIGRATION_DATABASE_URL" in env_source
+    assert "WBCZ_DATABASE_URL" in env_source
+    assert 'url.get_backend_name() != "postgresql"' in env_source
+
+
 def test_current_runtime_and_compose_are_aligned_to_0020() -> None:
     compose = source("docker-compose.prod.yml")
     migrator = compose.split("  marking-migrate:", 1)[1].split("  marking-backend:", 1)[0]
@@ -74,6 +82,7 @@ def test_fbs_bundle_has_separate_exact_sha_and_0020_contract() -> None:
     assert "source tree must be clean" in builder
     assert "single-tree builder_sha must equal source_sha" in builder
     assert "frontend_dist must be outside the verified Git source tree" in builder
+    assert "output_dir must be outside the verified Git source tree" in builder
     assert '"git", "-C", str(root), "ls-files", "-z"' in builder
     assert "SHA256SUMS" in builder
     assert "SECRET_MARKERS" in builder
