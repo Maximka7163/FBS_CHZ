@@ -49,6 +49,8 @@ from wbcz_web.services.workspace import (
 DB_URL = os.getenv("WBCZ_TEST_DATABASE_URL")
 OWN = "1234567890"
 TOKEN = "frontend-integration-machine-token-0123456789"
+TEST_AUDIT_KEY = "synthetic-test-audit-pseudonym-key-000000000001"
+TEST_AUDIT_KEY_ID = "frontend-test-audit-v1"
 FIAS = "11111111-2222-3333-4444-555555555555"
 KPP = "123456789"
 CIS_PREFIX = "010290089707781021"
@@ -89,6 +91,8 @@ def config(database_url: str, *, agent: bool = True, org: bool = True, dry_run: 
         agent_poll_max_attempts=3,
         true_api_write_enabled=False,
         fbs_dry_run_only=dry_run,
+        audit_pseudonym_key=TEST_AUDIT_KEY,
+        audit_pseudonym_key_id=TEST_AUDIT_KEY_ID,
     )
     if org:
         kwargs.update(
@@ -630,6 +634,8 @@ def test_238_row_upload_agent_results_and_workspace_regression(pg_factory, wb_re
 
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
+        db.info["audit_pseudonym_key"] = TEST_AUDIT_KEY.encode("utf-8")
+        db.info["audit_pseudonym_key_id"] = TEST_AUDIT_KEY_ID
         user, org, participant, _ = BootstrapService(db).bootstrap(
             username="operator238",
             password="very-secure-238-password",
@@ -755,7 +761,10 @@ def test_production_write_default_remains_off():
 def test_fbs_dry_run_env_flag_and_frontend_execution_gate(monkeypatch):
     monkeypatch.setenv("WBCZ_ENV", "test")
     monkeypatch.setenv("WBCZ_FBS_DRY_RUN_ONLY", "true")
-    monkeypatch.setenv("WBCZ_DATABASE_URL", "sqlite:///dryrun-config.sqlite")
+    monkeypatch.setenv(
+        "WBCZ_DATABASE_URL",
+        "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_test",
+    )
     monkeypatch.setenv("WBCZ_OWN_INN", OWN)
     monkeypatch.delenv("WBCZ_AGENT_ENABLED", raising=False)
     monkeypatch.delenv("WBCZ_PRINTING_ENABLED", raising=False)
