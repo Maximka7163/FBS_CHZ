@@ -219,8 +219,11 @@ def build_bundle(*, source_root: Path, frontend_dist: Path, output_dir: Path, so
     _verify_source(source_root, source_sha, source_branch, builder_sha)
     source_root = source_root.resolve()
     frontend_dist = frontend_dist.resolve()
+    output_dir = output_dir.resolve()
     if frontend_dist == source_root or source_root in frontend_dist.parents:
         raise ValueError("frontend_dist must be outside the verified Git source tree")
+    if output_dir == source_root or source_root in output_dir.parents:
+        raise ValueError("output_dir must be outside the verified Git source tree")
     tracked = _tracked_files(source_root)
     mtime, normalized = _timestamp(build_timestamp_utc)
     output_dir.mkdir(parents=True, exist_ok=True)
