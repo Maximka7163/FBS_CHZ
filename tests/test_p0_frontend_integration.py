@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -466,6 +467,7 @@ def test_workspace_evidence_is_explicit_whitelist_and_dryrun_runtime(pg_factory)
                 "withdrawReason": None,
                 "ownerInn": OWN,
                 "productGroup": "lp",
+                "fetched_at": "2026-09-22T06:00:00+00:00",
                 "raw_internal": "MUST_NOT_LEAK",
                 "token": "MUST_NOT_LEAK",
             },
@@ -488,7 +490,7 @@ def test_workspace_evidence_is_explicit_whitelist_and_dryrun_runtime(pg_factory)
             "source": "windows-agent-true-api",
             "reason_code": "SALE_IN_CIRCULATION",
         }
-        assert row["fetched_at"] is None
+        assert row["fetched_at"] == "2026-09-22T06:00:00+00:00"
         assert row["checked_at"] is not None
         serialized = json.dumps(view)
         assert "MUST_NOT_LEAK" not in serialized
@@ -522,6 +524,49 @@ def test_http_dry_run_bulk_bypass_is_typed_409_and_creates_no_write(pg_factory):
     with pg_factory() as db:
         assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_exact_duplicate_rows_create_one_event_and_one_cis_check(pg_factory):
+    wb = Workbook()
+    sheet = wb.active
+    sheet.title = "КИЗ"
+    headers = (
+        "№ задания", "Стикер", "КИЗ", "Номер чека", "Стоимость", "Валюта",
+        "Номер фискального накопителя", "Дата", "Тип операции", "Признак продажи юрлицу",
+    )
+    sheet.append(list(headers))
+    row = [
+        "dup-task", "dup-sticker", valid_cis("DUP"), "dup-check", 100, "RUB",
+        "7380440903834317", "12:00:00 19.08.2026", "Продажа", "нет",
+    ]
+    sheet.append(row)
+    sheet.append(row)
+    stream = BytesIO()
+    wb.save(stream)
+    wb.close()
+
+    cfg = config(DB_URL, dry_run=True)
+    with pg_factory() as db:
+        user, org, participant, _ = BootstrapService(db).bootstrap(
+            username="operator-dup",
+            password="very-secure-duplicate-password",
+            organisation_name="Duplicate Regression",
+            participant_inn=OWN,
+        )
+        bind_tenant_scope(
+            db,
+            organisation_id=org.id,
+            participant_id=participant.id,
+            user_id=user.id,
+            role="ADMIN",
+        )
+        imported = FileImportService(db).import_xlsx("duplicate.xlsx", stream.getvalue(), user.id)
+        assert imported.new_events == 1
+        assert imported.duplicate_events == 1
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        assert response["pending"] == 1
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)) == 1
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
@@ -708,9 +753,13 @@ def test_production_write_default_remains_off():
 
 
 def test_fbs_dry_run_env_flag_and_frontend_execution_gate(monkeypatch):
+    monkeypatch.setenv("WBCZ_ENV", "test")
     monkeypatch.setenv("WBCZ_FBS_DRY_RUN_ONLY", "true")
     monkeypatch.setenv("WBCZ_DATABASE_URL", "sqlite:///dryrun-config.sqlite")
     monkeypatch.setenv("WBCZ_OWN_INN", OWN)
+    monkeypatch.delenv("WBCZ_AGENT_ENABLED", raising=False)
+    monkeypatch.delenv("WBCZ_PRINTING_ENABLED", raising=False)
+    monkeypatch.delenv("WBCZ_PRINT_EXECUTION_ENABLED", raising=False)
     cfg = WebConfig.from_env()
     assert cfg.fbs_dry_run_only is True
     assert cfg.true_api_write_enabled is False
