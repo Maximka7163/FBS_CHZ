@@ -70,7 +70,7 @@ def test_fbs_bundle_has_separate_exact_sha_and_0020_contract() -> None:
     builder = source("scripts/build_fbs_dryrun_runtime_bundle.py")
     historical = source("scripts/build_p0_rc1_runtime_bundle.py")
     assert 'EXPECTED_ALEMBIC_HEAD = "0020_printing_physical_spool"' in builder
-    assert 'EXPECTED_SOURCE_BRANCH = "fbs/server-dryrun-deployment-prep-001"' in builder
+    assert 'EXPECTED_SOURCE_BRANCH = "fix/fbs-dryrun-artifact-closure-001"' in builder
     assert '"fbs_dry_run_only": True' in builder
     assert '"agent_enabled": True' in builder
     assert '"legacy_global_agent_bootstrap": False' in builder
@@ -88,6 +88,27 @@ def test_fbs_bundle_has_separate_exact_sha_and_0020_contract() -> None:
     assert "SECRET_MARKERS" in builder
     assert 'EXPECTED_ALEMBIC_HEAD = "0016_m15_production_hardening"' in historical
     assert 'source_branch != "release/p0-rc1"' in historical
+
+def test_server_imports_do_not_eagerly_require_wbcz_ui() -> None:
+    script = r'''\
+import builtins
+
+_real_import = builtins.__import__
+
+def _guard(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "wbcz_ui" or name.startswith("wbcz_ui."):
+        raise AssertionError("server import attempted wbcz_ui")
+    return _real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = _guard
+import wbcz.windows_agent
+import wbcz_web.main
+import wbcz_web.worker
+'''
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=env, check=True)
+
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
@@ -116,7 +137,7 @@ def test_bundle_source_integrity_rejects_dirty_tree(tmp_path, dirty_kind: str) -
     else:
         (repo / "untracked.txt").write_text("unexpected\n", encoding="utf-8")
     with pytest.raises(ValueError, match="source tree must be clean"):
-        _verify_source(repo, sha, "fbs/server-dryrun-deployment-prep-001", sha)
+        _verify_source(repo, sha, "fix/fbs-dryrun-artifact-closure-001", sha)
 
 
 def test_bundle_builder_sha_must_equal_verified_source_sha(tmp_path) -> None:
@@ -124,14 +145,14 @@ def test_bundle_builder_sha_must_equal_verified_source_sha(tmp_path) -> None:
     repo.mkdir()
     sha = _init_git_repo(repo)
     with pytest.raises(ValueError, match="builder_sha must equal source_sha"):
-        _verify_source(repo, sha, "fbs/server-dryrun-deployment-prep-001", "b" * 40)
+        _verify_source(repo, sha, "fix/fbs-dryrun-artifact-closure-001", "b" * 40)
 
 
 def test_fbs_release_metadata_claims_current_head_not_historical_m15(tmp_path) -> None:
     _write_metadata(
         tmp_path,
         source_sha="a" * 40,
-        source_branch="fbs/server-dryrun-deployment-prep-001",
+        source_branch="fix/fbs-dryrun-artifact-closure-001",
         build_timestamp_utc="2026-09-22T00:00:00Z",
         builder_sha="b" * 40,
     )

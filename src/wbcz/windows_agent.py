@@ -77,22 +77,11 @@ from wbcz.write_pipeline import (
     WriteState,
     classify_poll_status,
 )
-from wbcz_ui.live_true_api import (
-    AuthSession,
-    CryptoProGostTlsTunnel,
-    GostTlsUnavailable,
-    JsonlLiveAudit,
-    PRODUCTION_BASE_PATH,
-    PRODUCTION_HOST,
-    ReadOnlyTrueApiTransport,
-    TrueApiAuthenticator,
-    TrueApiCisesInfoAdapter,
-    TrueApiError,
-    TrueApiHttpError,
-    TrueApiProtocolError,
-    WindowsCryptoProCertificateInspector,
-    _find_cryptopro_binary,
-)
+def _load_windows_local_true_api() -> Any:
+    """Load desktop/CryptoPro implementation only inside the Windows-local execution boundary."""
+    from wbcz_ui import live_true_api
+
+    return live_true_api
 
 
 P0_PG = "lp"
@@ -409,8 +398,9 @@ class ProductionAgentTrueApiTransport:
         production_true_api_reports: bool = False,
         remote_download_byte_ceiling: int = DEFAULT_REMOTE_DOWNLOAD_BYTE_CEILING,
     ) -> None:
-        self.tunnel = tunnel or CryptoProGostTlsTunnel()
-        self.audit = audit or JsonlLiveAudit("windows_agent_true_api.jsonl")
+        self._local_true_api = _load_windows_local_true_api()
+        self.tunnel = tunnel or self._local_true_api.CryptoProGostTlsTunnel()
+        self.audit = audit or self._local_true_api.JsonlLiveAudit("windows_agent_true_api.jsonl")
         self.timeout = timeout
         self._connection_factory = connection_factory
         self.rate_limiter = rate_limiter or SharedRateLimiter()
@@ -420,7 +410,7 @@ class ProductionAgentTrueApiTransport:
         self.remote_download_byte_ceiling = int(remote_download_byte_ceiling)
         if self.remote_download_byte_ceiling <= 0:
             raise ValueError("remote_download_byte_ceiling must be positive")
-        self._read_only = ReadOnlyTrueApiTransport(
+        self._read_only = self._local_true_api.ReadOnlyTrueApiTransport(
             tunnel=self.tunnel,
             audit=self.audit,
             timeout=timeout,
@@ -479,7 +469,7 @@ class ProductionAgentTrueApiTransport:
             raise AgentSecurityError("True API bearer token is required")
         headers = {
             "Accept": "application/json, application/xml, text/xml",
-            "Host": PRODUCTION_HOST,
+            "Host": self._local_true_api.PRODUCTION_HOST,
             "Connection": "close",
             "Authorization": "Bearer " + bearer_token,
         }
@@ -506,14 +496,14 @@ class ProductionAgentTrueApiTransport:
                 endpoint=spec.audit_endpoint,
                 cis_count=spec.cis_count,
                 http_status=status,
-                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+                request_id=self._local_true_api.ReadOnlyTrueApiTransport._request_id(response.headers),
             )
             return AgentHttpResponse(
                 status=status,
                 body=raw,
                 headers={str(k): str(v) for k, v in response.headers.items()},
             )
-        except GostTlsUnavailable:
+        except self._local_true_api.GostTlsUnavailable:
             raise
         except (OSError, http.client.HTTPException) as exc:
             self.audit.record(
@@ -523,7 +513,7 @@ class ProductionAgentTrueApiTransport:
                 http_status=None,
                 error=type(exc).__name__,
             )
-            raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
+            raise self._local_true_api.TrueApiError("CryptoPro GOST TLS agent transport error") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -536,7 +526,7 @@ class ProductionAgentTrueApiTransport:
             raise AgentSecurityError("True API bearer token is required")
         headers = {
             "Accept": "application/json, application/xml, text/xml",
-            "Host": PRODUCTION_HOST,
+            "Host": self._local_true_api.PRODUCTION_HOST,
             "Connection": "close",
             "Authorization": "Bearer " + bearer_token,
         }
@@ -560,14 +550,14 @@ class ProductionAgentTrueApiTransport:
             self.tunnel.assert_gost_session(marker)
             self.audit.record(
                 method=spec.method, endpoint=spec.audit_endpoint, cis_count=0,
-                http_status=status, request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+                http_status=status, request_id=self._local_true_api.ReadOnlyTrueApiTransport._request_id(response.headers),
             )
             return AgentHttpResponse(status=status, body=raw, headers={str(k): str(v) for k, v in response.headers.items()})
-        except GostTlsUnavailable:
+        except self._local_true_api.GostTlsUnavailable:
             raise
         except (OSError, http.client.HTTPException) as exc:
             self.audit.record(method=spec.method, endpoint=spec.audit_endpoint, cis_count=0, http_status=None, error=type(exc).__name__)
-            raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
+            raise self._local_true_api.TrueApiError("CryptoPro GOST TLS agent transport error") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -580,7 +570,7 @@ class ProductionAgentTrueApiTransport:
             raise AgentSecurityError("True API bearer token is required")
         headers = {
             "Accept": "application/json, application/xml, text/xml",
-            "Host": PRODUCTION_HOST,
+            "Host": self._local_true_api.PRODUCTION_HOST,
             "Connection": "close",
             "Authorization": "Bearer " + bearer_token,
         }
@@ -602,21 +592,21 @@ class ProductionAgentTrueApiTransport:
                 endpoint=spec.audit_endpoint,
                 cis_count=0,
                 http_status=status,
-                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+                request_id=self._local_true_api.ReadOnlyTrueApiTransport._request_id(response.headers),
             )
             return AgentHttpResponse(
                 status=status,
                 body=raw,
                 headers={str(k): str(v) for k, v in response.headers.items()},
             )
-        except GostTlsUnavailable:
+        except self._local_true_api.GostTlsUnavailable:
             raise
         except (OSError, http.client.HTTPException) as exc:
             self.audit.record(
                 method=spec.method, endpoint=spec.audit_endpoint, cis_count=0,
                 http_status=None, error=type(exc).__name__,
             )
-            raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
+            raise self._local_true_api.TrueApiError("CryptoPro GOST TLS agent transport error") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -652,7 +642,7 @@ class ProductionAgentTrueApiTransport:
         self._m11_rate_admit(spec.capability, scope_key=rate_scope)
         headers = {
             "Accept": "application/json",
-            "Host": PRODUCTION_HOST,
+            "Host": self._local_true_api.PRODUCTION_HOST,
             "Connection": "close",
             "Authorization": "Bearer " + bearer_token,
         }
@@ -678,10 +668,10 @@ class ProductionAgentTrueApiTransport:
                 endpoint=spec.audit_endpoint,
                 cis_count=0,
                 http_status=status,
-                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+                request_id=self._local_true_api.ReadOnlyTrueApiTransport._request_id(response.headers),
             )
             return AgentHttpResponse(status, raw, {str(k): str(v) for k, v in response.headers.items()})
-        except GostTlsUnavailable:
+        except self._local_true_api.GostTlsUnavailable:
             raise
         except (OSError, http.client.HTTPException) as exc:
             self.audit.record(
@@ -691,7 +681,7 @@ class ProductionAgentTrueApiTransport:
                 http_status=None,
                 error=type(exc).__name__,
             )
-            raise TrueApiError("CryptoPro GOST TLS report transport error") from exc
+            raise self._local_true_api.TrueApiError("CryptoPro GOST TLS report transport error") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -715,7 +705,7 @@ class ProductionAgentTrueApiTransport:
         self._m11_rate_admit(spec.capability, scope_key=rate_scope)
         headers = {
             "Accept": "application/zip, application/octet-stream",
-            "Host": PRODUCTION_HOST,
+            "Host": self._local_true_api.PRODUCTION_HOST,
             "Connection": "close",
             "Authorization": "Bearer " + bearer_token,
         }
@@ -755,7 +745,7 @@ class ProductionAgentTrueApiTransport:
                 endpoint=spec.audit_endpoint,
                 cis_count=0,
                 http_status=status,
-                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+                request_id=self._local_true_api.ReadOnlyTrueApiTransport._request_id(response.headers),
             )
             return {
                 "http_status": status,
@@ -763,7 +753,7 @@ class ProductionAgentTrueApiTransport:
                 "sha256": digest.hexdigest(),
                 "content_type": content_type,
             }
-        except GostTlsUnavailable:
+        except self._local_true_api.GostTlsUnavailable:
             raise
         except (OSError, http.client.HTTPException) as exc:
             self.audit.record(
@@ -773,7 +763,7 @@ class ProductionAgentTrueApiTransport:
                 http_status=None,
                 error=type(exc).__name__,
             )
-            raise TrueApiError("CryptoPro GOST TLS report download transport error") from exc
+            raise self._local_true_api.TrueApiError("CryptoPro GOST TLS report download transport error") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -839,7 +829,7 @@ class ProductionAgentTrueApiTransport:
             raise AgentSecurityError("arbitrary True API target denied")
         headers = {
             "Accept": "application/json",
-            "Host": PRODUCTION_HOST,
+            "Host": self._local_true_api.PRODUCTION_HOST,
             "Connection": "close",
         }
         data: bytes | None = None
@@ -870,14 +860,14 @@ class ProductionAgentTrueApiTransport:
                 endpoint=audit_endpoint,
                 cis_count=0,
                 http_status=status,
-                request_id=ReadOnlyTrueApiTransport._request_id(response.headers),
+                request_id=self._local_true_api.ReadOnlyTrueApiTransport._request_id(response.headers),
             )
             return AgentHttpResponse(
                 status=status,
                 body=raw,
                 headers={str(k): str(v) for k, v in response.headers.items()},
             )
-        except GostTlsUnavailable:
+        except self._local_true_api.GostTlsUnavailable:
             raise
         except (OSError, http.client.HTTPException) as exc:
             self.audit.record(
@@ -887,7 +877,7 @@ class ProductionAgentTrueApiTransport:
                 http_status=None,
                 error=type(exc).__name__,
             )
-            raise TrueApiError("CryptoPro GOST TLS agent transport error") from exc
+            raise self._local_true_api.TrueApiError("CryptoPro GOST TLS agent transport error") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -910,17 +900,18 @@ class WindowsCryptoProDocumentSigner:
             raise ValueError("certificate thumbprint is required")
         if not participant_inn:
             raise ValueError("participant_inn is required")
+        self._local_true_api = _load_windows_local_true_api()
         self.thumbprint = normalized
         self.participant_inn = participant_inn
         self._explicit_cryptcp = Path(cryptcp_path) if cryptcp_path else None
         self._runner = runner
-        self.inspector = inspector or WindowsCryptoProCertificateInspector(
+        self.inspector = inspector or self._local_true_api.WindowsCryptoProCertificateInspector(
             normalized, cryptcp_path=cryptcp_path, runner=runner
         )
 
     @property
     def cryptcp(self) -> Path:
-        return _find_cryptopro_binary(self._explicit_cryptcp, "cryptcp.exe")
+        return self._local_true_api._find_cryptopro_binary(self._explicit_cryptcp, "cryptcp.exe")
 
     def sign_document_bytes(
         self,
@@ -979,18 +970,18 @@ class WindowsCryptoProDocumentSigner:
                 creationflags=creationflags,
             )
             if completed.returncode != 0:
-                raise TrueApiError(
+                raise self._local_true_api.TrueApiError(
                     (completed.stderr.strip() or completed.stdout.strip() or "CryptoPro document signing failed")[:1000]
                 )
             expected = source.with_name(source.name + ".sgn")
             if not expected.is_file():
                 candidates = list(temp.glob("*.sgn"))
                 if len(candidates) != 1:
-                    raise TrueApiError("CryptoPro did not produce detached document signature")
+                    raise self._local_true_api.TrueApiError("CryptoPro did not produce detached document signature")
                 expected = candidates[0]
             signature = expected.read_bytes()
             if not signature:
-                raise TrueApiError("empty detached document signature")
+                raise self._local_true_api.TrueApiError("empty detached document signature")
             metadata = {
                 "certificate_thumbprint": self.thumbprint,
                 "certificate_subject": cert.get("subject"),
@@ -1068,11 +1059,12 @@ class WindowsAgentExecutor:
         poll_status_parser: PollStatusParser | None = None,
         production_write: bool = False,
     ) -> None:
+        self._local_true_api = _load_windows_local_true_api()
         self.participant_inn = participant_inn
         self.transport = transport
         self.session_manager = session_manager
         self.document_signer = document_signer
-        self.cises_adapter = cises_adapter or TrueApiCisesInfoAdapter()
+        self.cises_adapter = cises_adapter or self._local_true_api.TrueApiCisesInfoAdapter()
         self.create_id_parser = create_id_parser or UnconfirmedAgentCreateIdParser()
         self.poll_status_parser = poll_status_parser or UnconfirmedAgentPollStatusParser()
         self.production_write = bool(production_write)
@@ -1238,7 +1230,7 @@ class WindowsAgentExecutor:
                 error_code="LOCAL_RATE_LIMIT",
                 read_result={"retry_after_seconds": exc.retry_after_seconds, "rate_family": exc.family},
             )
-        except TrueApiError:
+        except self._local_true_api.TrueApiError:
             if job.job_type is AgentJobType.REPORT_CREATE:
                 return AgentResult(
                     job.job_id, job.operation_id, REMOTE_CREATE_AMBIGUOUS,
@@ -1335,7 +1327,7 @@ class WindowsAgentExecutor:
                         error_code="LOCAL_RATE_LIMIT",
                         read_result={"retry_after_seconds": exc.retry_after_seconds, "rate_family": exc.family},
                     )
-                except TrueApiError:
+                except self._local_true_api.TrueApiError:
                     return AgentResult(
                         job.job_id, job.operation_id, "MANUAL_REVIEW",
                         error_code="TRUE_API_TRANSPORT_ERROR",
@@ -1434,7 +1426,7 @@ class WindowsAgentExecutor:
                     "status": "ERROR",
                     "reason_code": "CERTIFICATE_PARTICIPANT_MISMATCH",
                 }
-        except TrueApiError as exc:
+        except self._local_true_api.TrueApiError as exc:
             safe = str(exc)
             reason = (
                 "CERTIFICATE_NOT_FOUND" if "not found" in safe.casefold()
@@ -1465,11 +1457,11 @@ class WindowsAgentExecutor:
                 components["TRUE_API_AUTH"] = {"status": "READY"}
                 outcome = "HEALTH_READY" if components["CERTIFICATE_PARTICIPANT_MATCH"]["status"] == "READY" else "HEALTH_DEGRADED"
                 error_code = None
-            except TrueApiHttpError as exc:
+            except self._local_true_api.TrueApiHttpError as exc:
                 getattr(self.session_manager, "observe_http_status", lambda _status: None)(exc.status)
                 components["TRUE_API_AUTH"] = {"status": "ERROR", "reason_code": "AUTH_FAILED"}
                 outcome, error_code = "HEALTH_FAILED", "AUTH_FAILED"
-            except TrueApiError:
+            except self._local_true_api.TrueApiError:
                 components["TRUE_API_AUTH"] = {"status": "ERROR", "reason_code": "REMOTE_UNAVAILABLE"}
                 outcome, error_code = "HEALTH_FAILED", "REMOTE_UNAVAILABLE"
         return AgentResult(
@@ -1489,7 +1481,7 @@ class WindowsAgentExecutor:
     def _cis_check(self, job: AgentJob) -> AgentResult:
         try:
             payload = self.transport.cises_info(job.cises, bearer_token=self.session_manager.bearer_token())
-        except TrueApiHttpError as exc:
+        except self._local_true_api.TrueApiHttpError as exc:
             getattr(self.session_manager, "observe_http_status", lambda _status: None)(exc.status)
             raise
         if isinstance(payload, dict) and isinstance(payload.get("results"), list):
@@ -1497,9 +1489,9 @@ class WindowsAgentExecutor:
         elif isinstance(payload, list):
             items = payload
         else:
-            raise TrueApiProtocolError("cises/info returned unexpected payload")
+            raise self._local_true_api.TrueApiProtocolError("cises/info returned unexpected payload")
         if len(items) != len(job.cises):
-            raise TrueApiProtocolError("cises/info result count mismatch")
+            raise self._local_true_api.TrueApiProtocolError("cises/info result count mismatch")
         normalized = []
         for cis, item in zip(job.cises, items, strict=True):
             state = self.cises_adapter.normalize(cis, item)

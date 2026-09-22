@@ -2,7 +2,7 @@ name: FBS server dry-run deployment prep
 
 on:
   push:
-    branches: [fbs/server-dryrun-deployment-prep-001]
+    branches: [fix/fbs-dryrun-artifact-closure-001]
   workflow_dispatch:
 
 permissions:
@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.sha }}"
-          test "${{ github.ref_name }}" = "fbs/server-dryrun-deployment-prep-001"
+          test "${{ github.ref_name }}" = "fix/fbs-dryrun-artifact-closure-001"
 
       - name: Install locked runtime and focused test tools
         run: |
@@ -106,7 +106,7 @@ jobs:
               --frontend-dist "$RUNNER_TEMP/fbs-frontend-dist" \
               --output-dir "$OUT" \
               --source-sha "${{ github.sha }}" \
-              --source-branch fbs/server-dryrun-deployment-prep-001 \
+              --source-branch fix/fbs-dryrun-artifact-closure-001 \
               --build-timestamp-utc "$TS" \
               --builder-sha "${{ github.sha }}"
           done
@@ -124,7 +124,7 @@ jobs:
           root=Path(os.environ["RUNNER_TEMP"]) / "extracted" / f"sellari-marking-fbs-dryrun-0.5.1-{os.environ['GITHUB_SHA'][:12]}"
           data=json.loads((root/"RELEASE.json").read_text())
           assert data["source_git_sha"] == os.environ["GITHUB_SHA"]
-          assert data["source_branch"] == "fbs/server-dryrun-deployment-prep-001"
+          assert data["source_branch"] == "fix/fbs-dryrun-artifact-closure-001"
           assert data["alembic_head"] == "0020_printing_physical_spool"
           assert data["fbs_dry_run_only"] is True
           assert data["agent_enabled"] is True
@@ -135,6 +135,115 @@ jobs:
           assert data["suz_full_km_remote_acquisition_enabled"] is False
           PY
           python "$ROOT/scripts/m15_release_safety.py" "$ROOT/RELEASE.json"
+          test ! -e "$ROOT/src/wbcz_ui"
+          echo "NEW_ARCHIVE_NAME=$ARCHIVE"
+          echo "NEW_ARCHIVE_SHA256=$(cut -d' ' -f1 "$RUNNER_TEMP/build-a/$ARCHIVE.sha256")"
+          echo "DETERMINISTIC_BUILD=PASS"
+          echo "INTERNAL_SHA256SUMS=PASS"
+          echo "RELEASE_SAFETY=PASS"
+
+      - name: Packaged imports and artifact-only PostgreSQL migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/extracted/sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}"
+          test ! -e "$ROOT/src/wbcz_ui"
+
+          VENV="$RUNNER_TEMP/fbs-artifact-venv"
+          python -m venv "$VENV"
+          "$VENV/bin/python" -m pip install --disable-pip-version-check -r "$ROOT/requirements.production.lock"
+          "$VENV/bin/python" -m pip install --disable-pip-version-check --no-deps "$ROOT"
+
+          (
+            cd "$RUNNER_TEMP"
+            unset PYTHONPATH
+            ARTIFACT_ROOT="$ROOT" "$VENV/bin/python" -I - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+
+          assert importlib.util.find_spec("wbcz_ui") is None
+          import wbcz
+          import wbcz.windows_agent
+          import wbcz_web
+          import wbcz_web.main
+          import wbcz_web.worker
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          for module in (wbcz, wbcz_web):
+              module_path = Path(module.__file__).resolve()
+              assert workspace not in module_path.parents, (module.__name__, module_path)
+          print("PACKAGED_WEB_IMPORT=PASS")
+          print("PACKAGED_WORKER_IMPORT=PASS")
+          print("WBCZ_UI_RUNTIME_REQUIRED_BY_SERVER=NO")
+          PY
+          )
+
+          export WBCZ_ENV=production
+          export WBCZ_MIGRATION_DATABASE_URL="$WBCZ_TEST_DATABASE_URL"
+          export WBCZ_DATABASE_URL="$WBCZ_TEST_DATABASE_URL"
+          export WBCZ_FBS_DRY_RUN_ONLY=true
+          export WBCZ_TRUE_API_WRITE_ENABLED=false
+          export WBCZ_PRINTING_ENABLED=false
+          export WBCZ_PRINT_EXECUTION_ENABLED=false
+          export WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED=false
+          export WBCZ_AGENT_ENABLED=false
+          export WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED=false
+          unset PYTHONPATH
+
+          reset_db() {
+            "$VENV/bin/python" - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"], future=True)
+          try:
+              with engine.begin() as connection:
+                  connection.exec_driver_sql("DROP SCHEMA public CASCADE")
+                  connection.exec_driver_sql("CREATE SCHEMA public")
+          finally:
+              engine.dispose()
+          PY
+          }
+
+          revision() {
+            "$VENV/bin/python" - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"], future=True)
+          try:
+              with engine.connect() as connection:
+                  value = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                  print(value)
+          finally:
+              engine.dispose()
+          PY
+          }
+
+          reset_db
+          (cd "$ROOT" && "$VENV/bin/python" -m alembic -c alembic.ini upgrade 0020_printing_physical_spool)
+          test "$(revision)" = "0020_printing_physical_spool"
+          echo "ARTIFACT_FRESH_DB_TO_0020=PASS"
+          echo "PACKAGED_ALEMBIC_IMPORT=PASS"
+
+          reset_db
+          (cd "$ROOT" && "$VENV/bin/python" -m alembic -c alembic.ini upgrade 0016_m15_production_hardening)
+          test "$(revision)" = "0016_m15_production_hardening"
+          (cd "$ROOT" && "$VENV/bin/python" -m alembic -c alembic.ini upgrade 0020_printing_physical_spool)
+          test "$(revision)" = "0020_printing_physical_spool"
+          echo "ARTIFACT_0016_TO_0020=PASS"
+
+      - name: Docker build smoke from extracted artifact only
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/extracted/sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}"
+          docker build \
+            -f "$ROOT/Dockerfile.backend" \
+            --build-arg APP_VERSION=0.5.1 \
+            --build-arg BUILD_SHA="$GITHUB_SHA" \
+            -t "wbcz-fbs-artifact-smoke:${GITHUB_SHA:0:12}" \
+            "$ROOT"
+          echo "DOCKER_ARTIFACT_BUILD=PASS"
 
       - name: Validate packaged compose contract
         shell: bash
