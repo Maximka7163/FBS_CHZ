@@ -21,12 +21,13 @@ The historical `scripts/build_p0_rc1_runtime_bundle.py` and M15 release metadata
 The VPS runtime contract hard-codes:
 
 - `WBCZ_FBS_DRY_RUN_ONLY=true`;
+- `WBCZ_AGENT_ENABLED=true` with `WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED=false`;
 - `WBCZ_TRUE_API_WRITE_ENABLED=false`;
 - `WBCZ_PRINTING_ENABLED=false`;
 - `WBCZ_PRINT_EXECUTION_ENABLED=false`;
 - `WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED=false`.
 
-The application-level FBS dry-run guard remains authoritative even if a browser attempts to call the bulk endpoint directly. This packaging layer adds another deployment invariant; it does not replace the application guard.
+The participant-bound agent runtime is enabled only so a separately enrolled Windows Agent can service read-only CIS checks. Enrollment and certificate use are not part of this preparation task. The application-level FBS dry-run guard remains authoritative even if a browser attempts to call the bulk endpoint directly. This packaging layer adds another deployment invariant; it does not replace the application guard.
 
 ## Migration preparation
 
