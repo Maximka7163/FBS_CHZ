@@ -488,6 +488,8 @@ def test_workspace_evidence_is_explicit_whitelist_and_dryrun_runtime(pg_factory)
             "source": "windows-agent-true-api",
             "reason_code": "SALE_IN_CIRCULATION",
         }
+        assert row["fetched_at"] is None
+        assert row["checked_at"] is not None
         serialized = json.dumps(view)
         assert "MUST_NOT_LEAK" not in serialized
         assert "raw_internal" not in serialized
@@ -703,3 +705,15 @@ def test_production_write_default_remains_off():
     config_value = WebConfig(database_url="sqlite:///ignored", own_inn=OWN)
     assert config_value.true_api_write_enabled is False
     assert config_value.fbs_dry_run_only is False
+
+
+def test_fbs_dry_run_env_flag_and_frontend_execution_gate(monkeypatch):
+    monkeypatch.setenv("WBCZ_FBS_DRY_RUN_ONLY", "true")
+    monkeypatch.setenv("WBCZ_DATABASE_URL", "sqlite:///dryrun-config.sqlite")
+    monkeypatch.setenv("WBCZ_OWN_INN", OWN)
+    cfg = WebConfig.from_env()
+    assert cfg.fbs_dry_run_only is True
+    assert cfg.true_api_write_enabled is False
+    source = (ROOT / "frontend" / "src" / "main.ts").read_text(encoding="utf-8")
+    assert "view.runtime.fbs_dry_run_only" in source
+    assert "DRY RUN — реальные действия отключены" in source
