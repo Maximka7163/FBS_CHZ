@@ -163,6 +163,8 @@ services:
       WBCZ_PROCESS_ROLE: worker
       WBCZ_DB_APPLICATION_NAME: wbcz-worker
     command: ["python", "-m", "wbcz_web.worker"]
+    healthcheck:
+      disable: true
     volumes:
       - marking_artifacts:/var/lib/wbcz/artifacts
       - marking_secret_store:/var/lib/wbcz/secret-store
