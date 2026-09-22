@@ -99,7 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           TS="$(git show -s --format=%cI HEAD)"
-          for OUT in build-a build-b; do
+          for NAME in build-a build-b; do
+            OUT="$RUNNER_TEMP/$NAME"
             python scripts/build_fbs_dryrun_runtime_bundle.py \
               --source-root . \
               --frontend-dist "$RUNNER_TEMP/fbs-frontend-dist" \
@@ -110,17 +111,17 @@ jobs:
               --builder-sha "${{ github.sha }}"
           done
           ARCHIVE="sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}.tar.gz"
-          cmp "build-a/$ARCHIVE" "build-b/$ARCHIVE"
-          cmp "build-a/$ARCHIVE.sha256" "build-b/$ARCHIVE.sha256"
-          (cd build-a && sha256sum -c "$ARCHIVE.sha256")
-          mkdir extracted
-          tar -xzf "build-a/$ARCHIVE" -C extracted
-          ROOT="extracted/sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}"
+          cmp "$RUNNER_TEMP/build-a/$ARCHIVE" "$RUNNER_TEMP/build-b/$ARCHIVE"
+          cmp "$RUNNER_TEMP/build-a/$ARCHIVE.sha256" "$RUNNER_TEMP/build-b/$ARCHIVE.sha256"
+          (cd "$RUNNER_TEMP/build-a" && sha256sum -c "$ARCHIVE.sha256")
+          mkdir "$RUNNER_TEMP/extracted"
+          tar -xzf "$RUNNER_TEMP/build-a/$ARCHIVE" -C "$RUNNER_TEMP/extracted"
+          ROOT="$RUNNER_TEMP/extracted/sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}"
           (cd "$ROOT" && sha256sum -c SHA256SUMS)
           python - <<'PY'
           import json, os
           from pathlib import Path
-          root=Path("extracted") / f"sellari-marking-fbs-dryrun-0.5.1-{os.environ['GITHUB_SHA'][:12]}"
+          root=Path(os.environ["RUNNER_TEMP"]) / "extracted" / f"sellari-marking-fbs-dryrun-0.5.1-{os.environ['GITHUB_SHA'][:12]}"
           data=json.loads((root/"RELEASE.json").read_text())
           assert data["source_git_sha"] == os.environ["GITHUB_SHA"]
           assert data["source_branch"] == "fbs/server-dryrun-deployment-prep-001"
@@ -139,7 +140,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ROOT="extracted/sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}"
+          ROOT="$RUNNER_TEMP/extracted/sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}"
           grep -F 'command: ["alembic", "upgrade", "0020_printing_physical_spool"]' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_FBS_DRY_RUN_ONLY: "true"' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_AGENT_ENABLED: "true"' "$ROOT/docker-compose.prod.yml"
