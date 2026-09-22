@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from wbcz.document_assembler import OrganisationType
 from wbcz.models import Decision, Event, Operation
 from wbcz.windows_agent import AgentResult
+from wbcz.write_pipeline import ExactDocumentBuilder, InvalidWriteOperation
 from wbcz_web.auth import hash_password
 from wbcz_web.config import WebConfig
 from wbcz_web.main import create_app
@@ -33,8 +34,9 @@ from wbcz_web.models import (
 from wbcz_web.repositories import ImportRepository
 from wbcz_web.services.agent_orchestration import AgentControlService, CONTROL_CIS, WRITE
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
-from wbcz_web.services.imports import event_to_record
+from wbcz_web.services.imports import FileImportService, event_to_record
 from wbcz_web.services.authorization import BootstrapService
+from wbcz_web.services.tenant import bind_tenant_scope
 from wbcz_web.services.workspace import (
     FbsDryRunWriteBlocked,
     bulk_preview,
@@ -435,6 +437,13 @@ def test_dry_run_blocks_bulk_and_prepare_write_without_creating_state(pg_factory
         add_check(db, imported, user, item, Decision.READY_TO_WITHDRAW, "SALE_IN_CIRCULATION")
         with pytest.raises(FbsDryRunWriteBlocked, match="FBS_DRY_RUN_ONLY"):
             execute_bulk_actions(db, cfg, imported.id, user.id)
+        document = ExactDocumentBuilder.from_json_value({"dry_run": True})
+        with pytest.raises(InvalidWriteOperation, match="FBS_DRY_RUN_ONLY"):
+            AgentOrchestrationBroker(db, cfg).prepare_approved_write(
+                item.event_id,
+                document,
+                decision=Decision.READY_TO_WITHDRAW,
+            )
         assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
 
@@ -514,6 +523,134 @@ def test_http_dry_run_bulk_bypass_is_typed_409_and_creates_no_write(pg_factory):
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_result_time_sequence_recheck_prevents_stale_ready_after_newer_import(pg_factory):
+    older = event("RACE", Operation.SALE)
+    cfg = config(DB_URL, dry_run=True)
+    with pg_factory() as db:
+        user, imported = seed_import(db, [older])
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        assert response["pending"] == 1
+        job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
+        assert job is not None
+
+        newer = replace(
+            older,
+            operation=Operation.RETURN,
+            task_number="race-later",
+            occurred_at=older.occurred_at + timedelta(minutes=1),
+        )
+        db.add(event_to_record(newer))
+        db.flush()
+
+        AgentOrchestrationBroker(db, cfg).submit_result(
+            TOKEN,
+            AgentResult(
+                job.job_id,
+                job.operation_id,
+                "CIS_CHECKED",
+                cises=({
+                    "cis": older.kiz,
+                    "status": "IN_CIRCULATION",
+                    "statusEx": None,
+                    "withdrawReason": None,
+                    "ownerInn": OWN,
+                    "productGroup": "lp",
+                },),
+            ),
+        )
+        check = ImportRepository(db).latest_check(older.event_id)
+        assert check.decision == Decision.NO_ACTION.value
+        assert check.reason == "SUPERSEDED_BY_LATER_WB_EVENT"
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_238_row_upload_agent_results_and_workspace_regression(pg_factory, wb_regression_rows):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "КИЗ"
+    headers = (
+        "№ задания", "Стикер", "КИЗ", "Номер чека", "Стоимость", "Валюта",
+        "Номер фискального накопителя", "Дата", "Тип операции", "Признак продажи юрлицу",
+    )
+    sheet.append(list(headers))
+    for row in wb_regression_rows:
+        sheet.append([row.get(name) for name in headers])
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+
+    cfg = config(DB_URL, dry_run=True)
+    with pg_factory() as db:
+        user, org, participant, _ = BootstrapService(db).bootstrap(
+            username="operator238",
+            password="very-secure-238-password",
+            organisation_name="Regression 238",
+            participant_inn=OWN,
+        )
+        bind_tenant_scope(
+            db,
+            organisation_id=org.id,
+            participant_id=participant.id,
+            user_id=user.id,
+            role="ADMIN",
+        )
+        imported = FileImportService(db).import_xlsx("wb-regression-238.xlsx", stream.getvalue(), user.id)
+        assert imported.row_count == 238
+        assert imported.new_events == 238
+        assert imported.duplicate_events == 0
+
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        assert response["pending"] == 238
+        assert response["checked"] == 0
+        jobs = list(db.scalars(
+            select(AgentJobRecord)
+            .where(AgentJobRecord.purpose == CONTROL_CIS)
+            .order_by(AgentJobRecord.created_at, AgentJobRecord.job_id)
+        ))
+        assert len(jobs) == 238
+
+        broker = AgentOrchestrationBroker(db, cfg)
+        imports = ImportRepository(db)
+        for job in jobs:
+            row = imports.event(job.event_id)
+            assert row is not None
+            event_value = Event.from_dict(dict(row.payload))
+            withdrawn = event_value.operation is Operation.RETURN
+            broker.submit_result(
+                TOKEN,
+                AgentResult(
+                    job.job_id,
+                    job.operation_id,
+                    "CIS_CHECKED",
+                    cises=({
+                        "cis": event_value.kiz,
+                        "status": "WITHDRAWN" if withdrawn else "IN_CIRCULATION",
+                        "statusEx": None,
+                        "withdrawReason": "DISTANCE" if withdrawn else None,
+                        "ownerInn": OWN,
+                        "productGroup": "lp",
+                    },),
+                ),
+            )
+
+        view = workspace_overview(db, cfg, imported.id)
+        assert len(view["items"]) == 238
+        decisions = Counter(item["decision"] for item in view["items"])
+        assert decisions == {
+            Decision.READY_TO_WITHDRAW.value: 63,
+            Decision.READY_TO_RETURN.value: 5,
+            Decision.MANUAL_REVIEW.value: 170,
+        }
+        assert all(item["source"] == "windows-agent-true-api" for item in view["items"])
+        assert all(item["owner_match"] is True for item in view["items"])
+        assert all(item["productGroup"] == "lp" for item in view["items"])
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
 def test_http_upload_restore_history_and_machine_secret_non_exposure(pg_factory):
     password = "very-secure-frontend-password"
     cfg = config(DB_URL, agent=True, org=True)
@@ -563,4 +700,6 @@ def test_http_upload_restore_history_and_machine_secret_non_exposure(pg_factory)
 
 
 def test_production_write_default_remains_off():
-    assert WebConfig(database_url="sqlite:///ignored", own_inn=OWN).true_api_write_enabled is False
+    config_value = WebConfig(database_url="sqlite:///ignored", own_inn=OWN)
+    assert config_value.true_api_write_enabled is False
+    assert config_value.fbs_dry_run_only is False
