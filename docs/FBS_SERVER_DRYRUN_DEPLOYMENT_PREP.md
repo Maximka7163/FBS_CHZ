@@ -38,10 +38,14 @@ Acceptance must prove both:
 1. a fresh empty PostgreSQL database upgrades to 0020; and
 2. a database at `0016_m15_production_hardening` upgrades through 0017 -> 0018 -> 0019 -> 0020 and finishes exactly at 0020.
 
+Alembic reads only the migration PostgreSQL URL from WBCZ_MIGRATION_DATABASE_URL or WBCZ_DATABASE_URL. It does not instantiate application WebConfig, so the one-shot migrator does not receive Agent credentials, certificate material, audit keys, browser host settings, or other web/worker runtime secrets. Web and worker startup validation is unchanged.
+
+The one-shot compose service explicitly has WBCZ_AGENT_ENABLED=false and WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED=false. Backend/worker remain participant-Agent-enabled for future read-only CIS_CHECK.
+
 No migration is executed against a VPS or production database by this task.
 
 ## Package build
 
-Build the accepted frontend first, then invoke `scripts/build_fbs_dryrun_runtime_bundle.py` with the exact source SHA, source branch, UTC build timestamp and builder SHA. The builder verifies the working tree HEAD equals the supplied source SHA, rejects any other branch label, writes `RELEASE.json`, validates dry-run compose gates and migration 0020, writes `SHA256SUMS`, and emits a deterministic archive sidecar.
+Build the accepted frontend into a directory outside the Git checkout, then invoke `scripts/build_fbs_dryrun_runtime_bundle.py` with that external frontend directory, the exact source SHA, source branch, UTC build timestamp and builder SHA. The builder requires builder SHA == source SHA, verifies checkout HEAD, rejects staged/unstaged/untracked changes, and copies Git source only from the tracked-file set. Ignored or other untracked checkout files therefore cannot enter the bundle. It writes `RELEASE.json`, validates dry-run compose gates and migration 0020, writes `SHA256SUMS`, and emits a deterministic archive sidecar.
 
 Building or validating this archive performs no deployment and no external business operation.

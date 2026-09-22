@@ -44,15 +44,13 @@ services:
     environment:
       WBCZ_ENV: production
       WBCZ_DATABASE_URL: ${WBCZ_MIGRATION_DATABASE_URL:?migrator DB URL is required}
-      WBCZ_OWN_INN: ${WBCZ_OWN_INN:?WBCZ_OWN_INN is required}
-      WBCZ_PUBLIC_REGISTRATION_ENABLED: "false"
-      WBCZ_TRUE_API_WRITE_ENABLED: "false"
       WBCZ_FBS_DRY_RUN_ONLY: "true"
+      WBCZ_TRUE_API_WRITE_ENABLED: "false"
       WBCZ_PRINTING_ENABLED: "false"
       WBCZ_PRINT_EXECUTION_ENABLED: "false"
       WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED: "false"
-      WBCZ_AGENT_ENABLED: "true"
-      WBCZ_M15_STRICT_PRODUCTION: "false"
+      WBCZ_AGENT_ENABLED: "false"
+      WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"
     command: ["alembic", "upgrade", "0020_printing_physical_spool"]
     networks:
       - marking_internal

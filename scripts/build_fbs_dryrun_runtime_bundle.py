@@ -43,20 +43,34 @@ SECRET_MARKERS = (
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
-def _copy_file(root: Path, bundle: Path, relative: str) -> None:
+def _tracked_files(root: Path) -> set[str]:
+    raw = subprocess.check_output(
+        ["git", "-C", str(root), "ls-files", "-z"],
+    )
+    return {item.decode("utf-8") for item in raw.split(b"\0") if item}
+
+
+def _copy_file(root: Path, bundle: Path, relative: str, tracked: set[str]) -> None:
+    if relative not in tracked:
+        raise ValueError(f"required bundle source is not Git-tracked: {relative}")
     source = root / relative
-    if not source.is_file():
-        raise FileNotFoundError(f"required FBS dry-run file missing: {relative}")
+    if not source.is_file() or source.is_symlink():
+        raise FileNotFoundError(f"required FBS dry-run file missing or unsafe: {relative}")
     target = bundle / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, target)
 
-def _copy_tree(root: Path, bundle: Path, relative: str) -> None:
-    source = root / relative
-    if not source.is_dir():
-        raise FileNotFoundError(f"required FBS dry-run directory missing: {relative}")
-    for path in sorted(p for p in source.rglob("*") if p.is_file()):
-        rel = path.relative_to(root)
+
+def _copy_tree(root: Path, bundle: Path, relative: str, tracked: set[str]) -> None:
+    prefix = relative.rstrip("/") + "/"
+    candidates = sorted(path for path in tracked if path.startswith(prefix))
+    if not candidates:
+        raise FileNotFoundError(f"required tracked FBS dry-run directory missing: {relative}")
+    for rel_text in candidates:
+        rel = Path(rel_text)
+        path = root / rel
+        if not path.is_file() or path.is_symlink():
+            raise FileNotFoundError(f"tracked FBS dry-run file missing or unsafe: {rel_text}")
         if any(part in FORBIDDEN_PARTS for part in rel.parts):
             continue
         if path.name in FORBIDDEN_FILENAMES or path.suffix.lower() in FORBIDDEN_SUFFIXES:
@@ -65,8 +79,8 @@ def _copy_tree(root: Path, bundle: Path, relative: str) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
 
-def _copy_frontend_dist(source_root: Path, bundle: Path) -> None:
-    dist = source_root / "frontend" / "dist"
+
+def _copy_frontend_dist(dist: Path, bundle: Path) -> None:
     if not (dist / "index.html").is_file():
         raise FileNotFoundError("frontend/dist/index.html missing; build the accepted frontend first")
     for path in sorted(p for p in dist.rglob("*") if p.is_file()):
@@ -95,11 +109,22 @@ def _timestamp(value: str) -> tuple[int, str]:
 def _verify_source(source_root: Path, source_sha: str, source_branch: str, builder_sha: str) -> None:
     if _SHA_RE.fullmatch(source_sha) is None or _SHA_RE.fullmatch(builder_sha) is None:
         raise ValueError("source_sha and builder_sha must be exact lowercase 40-char git SHAs")
+    if builder_sha != source_sha:
+        raise ValueError("single-tree builder_sha must equal source_sha")
     if source_branch != EXPECTED_SOURCE_BRANCH:
         raise ValueError(f"FBS dry-run bundle must be built from {EXPECTED_SOURCE_BRANCH}")
-    actual = subprocess.check_output(["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True).strip()
+    actual = subprocess.check_output(
+        ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
     if actual != source_sha:
         raise ValueError("source_root HEAD does not match source_sha")
+    dirty = subprocess.check_output(
+        ["git", "-C", str(source_root), "status", "--porcelain=v1", "--untracked-files=all"],
+        text=True,
+    )
+    if dirty.strip():
+        raise ValueError("source tree must be clean: staged, unstaged and untracked changes are forbidden")
 
 def _write_metadata(bundle: Path, *, source_sha: str, source_branch: str, build_timestamp_utc: str, builder_sha: str) -> None:
     metadata = {
@@ -190,18 +215,26 @@ def _archive(bundle: Path, output: Path, mtime: int) -> None:
     finally:
         tar_path.unlink(missing_ok=True)
 
-def build_bundle(*, source_root: Path, output_dir: Path, source_sha: str, source_branch: str, build_timestamp_utc: str, builder_sha: str) -> tuple[Path, Path]:
+def build_bundle(*, source_root: Path, frontend_dist: Path, output_dir: Path, source_sha: str, source_branch: str, build_timestamp_utc: str, builder_sha: str) -> tuple[Path, Path]:
     _verify_source(source_root, source_sha, source_branch, builder_sha)
+    source_root = source_root.resolve()
+    frontend_dist = frontend_dist.resolve()
+    if frontend_dist == source_root or source_root in frontend_dist.parents:
+        raise ValueError("frontend_dist must be outside the verified Git source tree")
+    tracked = _tracked_files(source_root)
     mtime, normalized = _timestamp(build_timestamp_utc)
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"sellari-marking-fbs-dryrun-{APP_VERSION}-{source_sha[:12]}"
     with tempfile.TemporaryDirectory(prefix="wbcz-fbs-dryrun-") as temp:
         bundle = Path(temp) / prefix
         bundle.mkdir()
-        for relative in ROOT_FILES: _copy_file(source_root, bundle, relative)
-        for relative in SOURCE_DIRS: _copy_tree(source_root, bundle, relative)
-        for relative in OPERATIONAL_FILES: _copy_file(source_root, bundle, relative)
-        _copy_frontend_dist(source_root, bundle)
+        for relative in ROOT_FILES:
+            _copy_file(source_root, bundle, relative, tracked)
+        for relative in SOURCE_DIRS:
+            _copy_tree(source_root, bundle, relative, tracked)
+        for relative in OPERATIONAL_FILES:
+            _copy_file(source_root, bundle, relative, tracked)
+        _copy_frontend_dist(frontend_dist, bundle)
         _write_metadata(bundle, source_sha=source_sha, source_branch=source_branch, build_timestamp_utc=normalized, builder_sha=builder_sha)
         _scan(bundle)
         _write_sums(bundle)
@@ -214,6 +247,7 @@ def build_bundle(*, source_root: Path, output_dir: Path, source_sha: str, source
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build deterministic FBS server dry-run VPS archive")
     parser.add_argument("--source-root", required=True, type=Path)
+    parser.add_argument("--frontend-dist", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--source-branch", required=True)
@@ -221,7 +255,8 @@ def main() -> int:
     parser.add_argument("--builder-sha", required=True)
     args = parser.parse_args()
     archive, sidecar = build_bundle(
-        source_root=args.source_root.resolve(), output_dir=args.output_dir.resolve(),
+        source_root=args.source_root.resolve(), frontend_dist=args.frontend_dist.resolve(),
+        output_dir=args.output_dir.resolve(),
         source_sha=args.source_sha, source_branch=args.source_branch,
         build_timestamp_utc=args.build_timestamp_utc, builder_sha=args.builder_sha,
     )

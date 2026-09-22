@@ -78,7 +78,7 @@ jobs:
           python scripts/m15_verify_dependency_lock.py
           python scripts/m15_secret_scan.py
 
-      - name: Build accepted frontend
+      - name: Build accepted frontend outside verified source tree
         working-directory: frontend
         run: |
           npm ci --no-audit --no-fund
@@ -89,6 +89,10 @@ jobs:
             echo "localhost URL found in production frontend bundle" >&2
             exit 1
           fi
+          rm -rf "$RUNNER_TEMP/fbs-frontend-dist"
+          cp -a dist "$RUNNER_TEMP/fbs-frontend-dist"
+          rm -rf dist
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
       - name: Build deterministic FBS dry-run bundle twice
         shell: bash
@@ -98,6 +102,7 @@ jobs:
           for OUT in build-a build-b; do
             python scripts/build_fbs_dryrun_runtime_bundle.py \
               --source-root . \
+              --frontend-dist "$RUNNER_TEMP/fbs-frontend-dist" \
               --output-dir "$OUT" \
               --source-sha "${{ github.sha }}" \
               --source-branch fbs/server-dryrun-deployment-prep-001 \
