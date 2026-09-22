@@ -113,6 +113,8 @@ def _write_metadata(bundle: Path, *, source_sha: str, source_branch: str, build_
         "build_timestamp_utc": build_timestamp_utc,
         "alembic_head": EXPECTED_ALEMBIC_HEAD,
         "fbs_dry_run_only": True,
+        "agent_enabled": True,
+        "legacy_global_agent_bootstrap": False,
         "true_api_write_enabled": False,
         "printing_enabled": False,
         "print_execution_enabled": False,
@@ -138,6 +140,8 @@ def _scan(bundle: Path) -> None:
     compose = (bundle / "docker-compose.prod.yml").read_text(encoding="utf-8")
     required_compose = (
         'WBCZ_FBS_DRY_RUN_ONLY: "true"',
+        'WBCZ_AGENT_ENABLED: "true"',
+        'WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"',
         'WBCZ_TRUE_API_WRITE_ENABLED: "false"',
         'WBCZ_PRINTING_ENABLED: "false"',
         'WBCZ_PRINT_EXECUTION_ENABLED: "false"',
