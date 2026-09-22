@@ -14,7 +14,7 @@ import tempfile
 
 APP_VERSION = "0.5.1"
 EXPECTED_ALEMBIC_HEAD = "0020_printing_physical_spool"
-EXPECTED_SOURCE_BRANCH = "fix/fbs-dryrun-artifact-closure-001"
+EXPECTED_SOURCE_BRANCH = "fix/fbs-worker-healthcheck-001"
 ARCHIVE_FORMAT = "sellari-marking-fbs-dryrun-v1"
 
 ROOT_FILES = (

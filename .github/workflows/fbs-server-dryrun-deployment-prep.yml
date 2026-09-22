@@ -2,7 +2,7 @@ name: FBS server dry-run deployment prep
 
 on:
   push:
-    branches: [fix/fbs-dryrun-artifact-closure-001]
+    branches: [fix/fbs-worker-healthcheck-001]
   workflow_dispatch:
 
 permissions:
@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.sha }}"
-          test "${{ github.ref_name }}" = "fix/fbs-dryrun-artifact-closure-001"
+          test "${{ github.ref_name }}" = "fix/fbs-worker-healthcheck-001"
 
       - name: Install locked runtime and focused test tools
         run: |
@@ -71,7 +71,7 @@ jobs:
           python -m pip install "pytest==9.1.1" "httpx==0.28.1"
 
       - name: Focused deployment-prep tests
-        run: python -m pytest -q tests/test_fbs_dryrun_deployment_prep.py
+        run: python -m pytest -q tests/test_fbs_worker_healthcheck.py tests/test_fbs_dryrun_deployment_prep.py
 
       - name: Production dependency and secret contracts
         run: |
@@ -106,7 +106,7 @@ jobs:
               --frontend-dist "$RUNNER_TEMP/fbs-frontend-dist" \
               --output-dir "$OUT" \
               --source-sha "${{ github.sha }}" \
-              --source-branch fix/fbs-dryrun-artifact-closure-001 \
+              --source-branch fix/fbs-worker-healthcheck-001 \
               --build-timestamp-utc "$TS" \
               --builder-sha "${{ github.sha }}"
           done
@@ -124,7 +124,7 @@ jobs:
           root=Path(os.environ["RUNNER_TEMP"]) / "extracted" / f"sellari-marking-fbs-dryrun-0.5.1-{os.environ['GITHUB_SHA'][:12]}"
           data=json.loads((root/"RELEASE.json").read_text())
           assert data["source_git_sha"] == os.environ["GITHUB_SHA"]
-          assert data["source_branch"] == "fix/fbs-dryrun-artifact-closure-001"
+          assert data["source_branch"] == "fix/fbs-worker-healthcheck-001"
           assert data["alembic_head"] == "0020_printing_physical_spool"
           assert data["fbs_dry_run_only"] is True
           assert data["agent_enabled"] is True
