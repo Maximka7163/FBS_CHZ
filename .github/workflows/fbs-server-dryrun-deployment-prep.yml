@@ -14,6 +14,8 @@ env:
   WBCZ_OWN_INN: "1234567890"
   WBCZ_TRUE_API_WRITE_ENABLED: "false"
   WBCZ_FBS_DRY_RUN_ONLY: "true"
+  WBCZ_AGENT_ENABLED: "true"
+  WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"
   WBCZ_PRINTING_ENABLED: "false"
   WBCZ_PRINT_EXECUTION_ENABLED: "false"
   WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED: "false"
@@ -119,11 +121,14 @@ jobs:
           assert data["source_branch"] == "fbs/server-dryrun-deployment-prep-001"
           assert data["alembic_head"] == "0020_printing_physical_spool"
           assert data["fbs_dry_run_only"] is True
+          assert data["agent_enabled"] is True
+          assert data["legacy_global_agent_bootstrap"] is False
           assert data["true_api_write_enabled"] is False
           assert data["printing_enabled"] is False
           assert data["print_execution_enabled"] is False
           assert data["suz_full_km_remote_acquisition_enabled"] is False
           PY
+          python "$ROOT/scripts/m15_release_safety.py" "$ROOT/RELEASE.json"
 
       - name: Validate packaged compose contract
         shell: bash
@@ -132,6 +137,8 @@ jobs:
           ROOT="extracted/sellari-marking-fbs-dryrun-0.5.1-${GITHUB_SHA:0:12}"
           grep -F 'command: ["alembic", "upgrade", "0020_printing_physical_spool"]' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_FBS_DRY_RUN_ONLY: "true"' "$ROOT/docker-compose.prod.yml"
+          grep -F 'WBCZ_AGENT_ENABLED: "true"' "$ROOT/docker-compose.prod.yml"
+          grep -F 'WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_TRUE_API_WRITE_ENABLED: "false"' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_PRINTING_ENABLED: "false"' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_PRINT_EXECUTION_ENABLED: "false"' "$ROOT/docker-compose.prod.yml"
