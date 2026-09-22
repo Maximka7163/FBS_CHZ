@@ -46,6 +46,14 @@ export interface WorkspaceItem {
   operation: string;
   operation_label: string;
   chz_status: string;
+  status: string | null;
+  statusEx: string | null;
+  withdrawReason: string | null;
+  ownerInn: string | null;
+  owner_match: boolean | null;
+  productGroup: string | null;
+  source: string | null;
+  fetched_at: string | null;
   decision: string | null;
   decision_label: string;
   action_label: string;
@@ -55,6 +63,7 @@ export interface WorkspaceItem {
   filter_group: Exclude<FilterKey, "ALL"> | "OTHER";
   ready_for_bulk: boolean;
   reason: string | null;
+  reason_code: string | null;
   error: string | null;
   attention_title: string | null;
   attention_detail: string | null;
@@ -90,6 +99,7 @@ export interface WorkspaceView {
   runtime: {
     agent_enabled: boolean;
     production_write_enabled: boolean;
+    fbs_dry_run_only: boolean;
   };
 }
 

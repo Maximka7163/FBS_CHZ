@@ -267,6 +267,13 @@ function detailMarkup(item: WorkspaceItem, detail?: EventDetail): string {
       <div><span>Дата операции</span><b>${fmtDate(item.details.occurred_at)}</b></div>
       <div><span>Чек</span><b>${esc(item.details.receipt_number || "—")}</b></div>
       <div><span>Сумма</span><b>${esc(item.details.amount)} ${esc(item.details.currency)}</b></div>
+      <div><span>status</span><b>${esc(item.status || "—")}</b></div>
+      <div><span>statusEx</span><b>${esc(item.statusEx || "—")}</b></div>
+      <div><span>Причина выбытия</span><b>${esc(item.withdrawReason || "—")}</b></div>
+      <div><span>Владелец</span><b>${esc(item.ownerInn || "—")}</b></div>
+      <div><span>Владелец совпадает</span><b>${item.owner_match == null ? "—" : item.owner_match ? "Да" : "Нет"}</b></div>
+      <div><span>Товарная группа</span><b>${esc(item.productGroup || "—")}</b></div>
+      <div><span>Источник</span><b>${esc(item.source || "—")}</b></div>
     </section>
     ${detail ? `<section class="kiz-history"><div class="detail-section-head"><strong>История КИЗ</strong><span>${detail.history.length}</span></div>${detail.history.map((entry) => `<div class="history-event"><span>${esc(entry.operation === "SALE" ? "Продажа" : entry.operation === "RETURN" ? "Возврат" : entry.operation)}</span><span>${fmtDate(entry.occurred_at)}</span><span>Задание ${esc(entry.task_number)}</span></div>`).join("")}${detail.history_order_ambiguous ? '<p class="inline-warning">Порядок событий неоднозначен — автоматическое действие запрещено.</p>' : ""}</section>` : '<div class="detail-loading">Загружаем историю…</div>'}
     ${(item.reason || item.error) ? `<details class="technical-detail"><summary>Технические детали</summary><code>${esc(item.reason || "")}${item.error ? ` · ${esc(item.error)}` : ""}</code></details>` : ""}
@@ -284,6 +291,9 @@ function statusBanner(view: WorkspaceView): string {
 
 function bulkBar(view: WorkspaceView): string {
   const total = view.bulk.eligible_count;
+  if (view.runtime.fbs_dry_run_only) {
+    return `<div class="bulk-bar"><div class="bulk-copy"><strong>DRY RUN — реальные действия отключены</strong><span>Результаты проверки доступны только для просмотра; backend запрещает создание операций и WRITE jobs.</span></div></div>`;
+  }
   return `<div class="bulk-bar">
     <div class="bulk-copy">${total ? `<strong>${total} ${plural(total, "готовое действие", "готовых действия", "готовых действий")}</strong><span>Состав определён backend</span>` : `<strong>Готовых действий нет</strong><span>Сначала проверьте КИЗ или устраните проблемы</span>`}</div>
     <button id="bulk-action" class="primary-button" ${total === 0 || bulkBusy ? "disabled" : ""}>${bulkBusy ? '<span class="spinner light"></span>Запускаем…' : "Выполнить готовые действия"}</button>

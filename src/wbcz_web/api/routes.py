@@ -25,6 +25,7 @@ from wbcz_web.services.document_lifecycle import DocumentLifecycleService, Docum
 from wbcz_web.services.authorization import Permission
 from wbcz_web.services.workspace import (
     BulkActionUnavailable,
+    FbsDryRunWriteBlocked,
     bulk_preview,
     execute_bulk_actions,
     workspace_history,
@@ -262,6 +263,11 @@ def file_bulk_actions(
         return execute_bulk_actions(db, request.app.state.config, import_id, identity.user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FbsDryRunWriteBlocked as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except BulkActionUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidWriteOperation as exc:

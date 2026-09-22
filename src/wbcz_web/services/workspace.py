@@ -72,6 +72,11 @@ _REASON_GUIDANCE: dict[str, tuple[str, str, str]] = {
         "Несколько событий этого КИЗ невозможно безопасно упорядочить автоматически.",
         "Откройте детали строки и проверьте историю событий вручную.",
     ),
+    "SUPERSEDED_BY_LATER_WB_EVENT": (
+        "Есть более позднее событие WB",
+        "Эта строка относится к более раннему событию того же КИЗ.",
+        "Действие по старому событию не требуется; решение принимается только по последнему достоверному событию WB.",
+    ),
     "ORGANISATION_CONFIG_MISSING": (
         "Не настроены данные организации",
         "Backend не может собрать официальный документ без явной конфигурации организации и места деятельности.",
@@ -249,6 +254,8 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
     event_ids = [row.event_id for row in records]
     checks, writes, jobs = _batch_state(db, event_ids)
     result: list[dict[str, Any]] = []
+    scope = optional_tenant(db)
+    participant_inn = scope.participant_inn if scope is not None else None
 
     for row in records:
         event = record_to_event(row)
@@ -264,6 +271,14 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
         error = check.error if check else None
         attention_title, attention_detail, user_action = _guidance(reason, error)
         decision = check.decision if check else None
+        snapshot = check.snapshot if check and isinstance(check.snapshot, dict) else {}
+        owner_inn = snapshot.get("ownerInn")
+        owner_match = (
+            owner_inn == participant_inn
+            if owner_inn is not None and participant_inn is not None
+            else None
+        )
+        fetched_at = check.checked_at.isoformat() if check and check.checked_at else None
         action_label = (
             "Вывести из оборота"
             if decision == Decision.READY_TO_WITHDRAW.value
@@ -277,7 +292,15 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
                 "kiz": event.kiz,
                 "operation": event.operation.value,
                 "operation_label": _operation_label(event.operation.value),
-                "chz_status": _chz_label(check.snapshot if check else None),
+                "chz_status": _chz_label(snapshot),
+                "status": snapshot.get("status"),
+                "statusEx": snapshot.get("statusEx"),
+                "withdrawReason": snapshot.get("withdrawReason"),
+                "ownerInn": owner_inn,
+                "owner_match": owner_match,
+                "productGroup": snapshot.get("productGroup"),
+                "source": check.source if check else None,
+                "fetched_at": fetched_at,
                 "decision": decision,
                 "decision_label": _decision_label(decision),
                 "action_label": action_label,
@@ -287,11 +310,12 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
                 "filter_group": filter_group,
                 "ready_for_bulk": decision in READY_DECISIONS and write is None,
                 "reason": reason,
+                "reason_code": reason,
                 "error": error,
                 "attention_title": attention_title,
                 "attention_detail": attention_detail,
                 "user_action": user_action,
-                "checked_at": check.checked_at.isoformat() if check and check.checked_at else None,
+                "checked_at": fetched_at,
                 "write_operation_id": write.operation_id if write else None,
                 "write_state": write.state if write else None,
                 "document_id": write.document_id if write else None,
@@ -374,6 +398,7 @@ def workspace_overview(db: Session, config: WebConfig, import_id: str) -> dict[s
         "runtime": {
             "agent_enabled": config.agent_enabled,
             "production_write_enabled": config.true_api_write_enabled,
+            "fbs_dry_run_only": config.fbs_dry_run_only,
         },
     }
 
@@ -382,7 +407,13 @@ class BulkActionUnavailable(InvalidWriteOperation):
     pass
 
 
+class FbsDryRunWriteBlocked(BulkActionUnavailable):
+    code = "FBS_DRY_RUN_ONLY"
+
+
 def execute_bulk_actions(db: Session, config: WebConfig, import_id: str, user_id: int) -> dict[str, Any]:
+    if config.fbs_dry_run_only:
+        raise FbsDryRunWriteBlocked("FBS_DRY_RUN_ONLY: bulk actions are disabled in dry-run-only mode")
     if not config.agent_enabled or not config.agent_machine_token:
         raise BulkActionUnavailable("Windows agent is not configured; ready actions were not started")
 

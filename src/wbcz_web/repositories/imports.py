@@ -23,7 +23,8 @@ class ImportRepository(Repository):
   return list(self.db.scalars(self._events(q).order_by(ImportRow.row_number)))
  def import_event_ids(self,import_id:str):
   if self.get(import_id) is None:return []
-  return list(self.db.scalars(select(ImportRow.event_id).where(ImportRow.import_id==import_id,ImportRow.event_id.is_not(None)).order_by(ImportRow.row_number)))
+  values=list(self.db.scalars(select(ImportRow.event_id).where(ImportRow.import_id==import_id,ImportRow.event_id.is_not(None)).order_by(ImportRow.row_number)))
+  return list(dict.fromkeys(values))
  def event(self,event_id:str):return self.db.scalar(self._events(select(EventRecord).where(EventRecord.event_id==event_id)))
  def history_for_kiz(self,kiz:str):return list(self.db.scalars(self._events(select(EventRecord).where(EventRecord.kiz==kiz)).order_by(EventRecord.occurred_at.is_(None),EventRecord.occurred_at,EventRecord.event_id)))
  def history_order_ambiguous(self,kiz:str)->bool:

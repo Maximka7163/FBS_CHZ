@@ -26,8 +26,9 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
     try {
-      const body = (await response.json()) as { detail?: string };
-      message = body.detail || message;
+      const body = (await response.json()) as { detail?: string | { code?: string; message?: string } };
+      if (typeof body.detail === "string") message = body.detail;
+      else if (body.detail?.message) message = body.detail.message;
     } catch {
       // Keep the HTTP status when the response is intentionally not JSON.
     }

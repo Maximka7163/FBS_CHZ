@@ -13,6 +13,7 @@ from wbcz_web.services.agent_orchestration import (
     _tenant_or_legacy_inn,
 )
 from wbcz_web.services.imports import record_to_event
+from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 from wbcz_web.services.tenant import optional_tenant
 
 
@@ -54,14 +55,13 @@ class AgentOrchestrationBroker(_BaseAgentOrchestrationBroker):
             raise KeyError(event_id)
         event = record_to_event(row)
         snapshot: KiState | None = None
-        try:
-            snapshot = self._single_state(event, result)
-            outcome = decide(event, snapshot, _tenant_or_legacy_inn(self.db, self.config))
-        except Exception as exc:
-            outcome = Outcome(Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED", type(exc).__name__)
-        if self.imports.history_order_ambiguous(event.kiz):
-            snapshot = None
-            outcome = Outcome(Decision.MANUAL_REVIEW, "HISTORY_ORDER_AMBIGUOUS")
+        outcome = sequence_outcome_for_event(self.imports, event_id)
+        if outcome is None:
+            try:
+                snapshot = self._single_state(event, result)
+                outcome = decide(event, snapshot, _tenant_or_legacy_inn(self.db, self.config))
+            except Exception as exc:
+                outcome = Outcome(Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED", type(exc).__name__)
 
         check = CheckRecord(
             run_id=run_id,

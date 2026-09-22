@@ -28,6 +28,7 @@ from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentBindingRecord, AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun, ParticipantRecord, ReportJobRecord
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
+from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 from wbcz_web.services.agent_bindings import AgentBindingService, AgentPrincipal
 from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
 from wbcz_web.services.production_secrets import build_artifact_key_provider
@@ -90,14 +91,14 @@ def _select_event_ids(imports: ImportRepository, import_id: str, event_ids: list
     allowed = imports.import_event_ids(import_id)
     allowed_set = set(allowed)
     if event_ids is None:
-        return allowed
+        return list(dict.fromkeys(allowed))
     requested = list(dict.fromkeys(event_ids))
     if not requested:
         raise ValueError("Не выбран ни один КИЗ")
     if any(event_id not in allowed_set for event_id in requested):
         raise ValueError("КИЗ не относится к выбранному импорту")
     wanted = set(requested)
-    return [event_id for event_id in allowed if event_id in wanted]
+    return list(dict.fromkeys(event_id for event_id in allowed if event_id in wanted))
 
 
 class AgentControlService:
@@ -127,11 +128,27 @@ class AgentControlService:
         self.db.add(run)
         self.db.flush()
         queued = 0
+        immediate: list[Outcome] = []
         for event_id in selected:
             row = self.imports.event(event_id)
             if row is None:
                 raise KeyError(event_id)
             event = record_to_event(row)
+            policy_outcome = sequence_outcome_for_event(self.imports, event_id)
+            if policy_outcome is not None:
+                self.db.add(
+                    CheckRecord(
+                        run_id=run.id,
+                        event_id=event_id,
+                        source="wb-sequence-policy",
+                        snapshot=None,
+                        decision=policy_outcome.decision.value,
+                        reason=policy_outcome.reason,
+                        error=policy_outcome.error,
+                    )
+                )
+                immediate.append(policy_outcome)
+                continue
             seed = hashlib.sha256(event.kiz.encode("utf-8")).hexdigest()
             operation_id = f"cis:{run.id}:{event_id}"
             job = AgentJob(
@@ -150,14 +167,18 @@ class AgentControlService:
             )
             queued += 1
         self.db.flush()
+        counts = Counter(item.decision.value for item in immediate)
+        if queued:
+            counts["PENDING"] += queued
+        reasons = Counter(item.reason for item in immediate)
         return {
             "run_id": run.id,
             "provider": "windows-agent",
             "mode": getattr(mode, "value", str(mode)),
-            "checked": 0,
+            "checked": len(immediate),
             "pending": queued,
-            "counts": {"PENDING": queued} if queued else {},
-            "reasons": {},
+            "counts": dict(counts),
+            "reasons": dict(reasons),
             "production_submission_available": False,
         }
 
@@ -460,14 +481,13 @@ class AgentOrchestrationBroker:
             raise KeyError(event_id)
         event = record_to_event(row)
         snapshot: KiState | None = None
-        try:
-            snapshot = self._single_state(event, result)
-            outcome = decide(event, snapshot, _tenant_or_legacy_inn(self.db, self.config))
-        except Exception as exc:
-            outcome = Outcome(Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED", type(exc).__name__)
-        if self.imports.history_order_ambiguous(event.kiz):
-            snapshot = None
-            outcome = Outcome(Decision.MANUAL_REVIEW, "HISTORY_ORDER_AMBIGUOUS")
+        outcome = sequence_outcome_for_event(self.imports, event_id)
+        if outcome is None:
+            try:
+                snapshot = self._single_state(event, result)
+                outcome = decide(event, snapshot, _tenant_or_legacy_inn(self.db, self.config))
+            except Exception as exc:
+                outcome = Outcome(Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED", type(exc).__name__)
         self.db.add(
             CheckRecord(
                 run_id=run_id,
@@ -481,6 +501,8 @@ class AgentOrchestrationBroker:
         )
         self.db.flush()
         if outcome.decision in {Decision.READY_TO_WITHDRAW, Decision.READY_TO_RETURN}:
+            if self.config.fbs_dry_run_only:
+                return
             try:
                 document = self.document_assembler.build_exact(event, outcome.decision)
             except ProductionDocumentContractUnconfirmed:
@@ -496,6 +518,8 @@ class AgentOrchestrationBroker:
         *,
         decision: Decision | None = None,
     ) -> AgentJob:
+        if self.config.fbs_dry_run_only:
+            raise InvalidWriteOperation("FBS_DRY_RUN_ONLY: write operation creation is disabled")
         row = self.imports.event(event_id)
         if row is None:
             raise KeyError(event_id)
