@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import json
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -9,6 +10,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from wbcz_web.services.production_hardening import EXPECTED_MIGRATION_REVISION
+from scripts.build_fbs_dryrun_runtime_bundle import _write_metadata
 
 ROOT = Path(__file__).parents[1]
 DB_URL = os.getenv("WBCZ_TEST_DATABASE_URL")
@@ -29,6 +31,8 @@ def test_compose_and_env_example_are_hard_dry_run_only() -> None:
     env_example = source(".env.production.example")
     for value in (
         'WBCZ_FBS_DRY_RUN_ONLY: "true"',
+        'WBCZ_AGENT_ENABLED: "true"',
+        'WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"',
         'WBCZ_TRUE_API_WRITE_ENABLED: "false"',
         'WBCZ_PRINTING_ENABLED: "false"',
         'WBCZ_PRINT_EXECUTION_ENABLED: "false"',
@@ -37,6 +41,7 @@ def test_compose_and_env_example_are_hard_dry_run_only() -> None:
         assert value in compose
     for value in (
         "WBCZ_FBS_DRY_RUN_ONLY=true",
+        "WBCZ_AGENT_ENABLED=true",
         "WBCZ_TRUE_API_WRITE_ENABLED=false",
         "WBCZ_PRINTING_ENABLED=false",
         "WBCZ_PRINT_EXECUTION_ENABLED=false",
@@ -50,6 +55,8 @@ def test_fbs_bundle_has_separate_exact_sha_and_0020_contract() -> None:
     assert 'EXPECTED_ALEMBIC_HEAD = "0020_printing_physical_spool"' in builder
     assert 'EXPECTED_SOURCE_BRANCH = "fbs/server-dryrun-deployment-prep-001"' in builder
     assert '"fbs_dry_run_only": True' in builder
+    assert '"agent_enabled": True' in builder
+    assert '"legacy_global_agent_bootstrap": False' in builder
     assert '"true_api_write_enabled": False' in builder
     assert '"printing_enabled": False' in builder
     assert '"print_execution_enabled": False' in builder
@@ -59,6 +66,23 @@ def test_fbs_bundle_has_separate_exact_sha_and_0020_contract() -> None:
     assert "SECRET_MARKERS" in builder
     assert 'EXPECTED_ALEMBIC_HEAD = "0016_m15_production_hardening"' in historical
     assert 'source_branch != "release/p0-rc1"' in historical
+
+def test_fbs_release_metadata_claims_current_head_not_historical_m15(tmp_path) -> None:
+    _write_metadata(
+        tmp_path,
+        source_sha="a" * 40,
+        source_branch="fbs/server-dryrun-deployment-prep-001",
+        build_timestamp_utc="2026-09-22T00:00:00Z",
+        builder_sha="b" * 40,
+    )
+    data = json.loads((tmp_path / "RELEASE.json").read_text(encoding="utf-8"))
+    assert data["alembic_head"] == TARGET
+    assert data["fbs_dry_run_only"] is True
+    assert data["agent_enabled"] is True
+    assert data["legacy_global_agent_bootstrap"] is False
+    assert data["true_api_write_enabled"] is False
+    assert M15 not in data.values()
+
 
 def test_dryrun_release_document_declares_0020_and_historical_predecessor_only() -> None:
     runbook = source("docs/FBS_SERVER_DRYRUN_DEPLOYMENT_PREP.md")
