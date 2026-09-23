@@ -411,3 +411,19 @@ def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint()
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()
+
+def test_p0_read_transport_errors_cover_429_and_5xx_safely():
+    rate = safe_transport_error(
+        429,
+        {"Content-Type": "application/json", "Retry-After": "2"},
+        b'{"message":"synthetic throttling response"}',
+    )
+    server = safe_transport_error(
+        503,
+        {"Content-Type": "text/plain"},
+        b"synthetic temporary server response",
+    )
+    assert rate.http_status == 429
+    assert server.http_status == 503
+    assert rate.body_sha256
+    assert server.body_sha256
