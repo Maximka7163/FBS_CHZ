@@ -628,3 +628,135 @@ def test_m14_health_table_is_append_style(db: Session):
     )))
     assert len(rows) == 1
     assert rows[0].completed_at is not None
+
+
+def _p0_candidate(participant_inn: str, thumbprint: str, **overrides):
+    value = {
+        "thumbprint": thumbprint,
+        "subject": f"CN=Synthetic, INN={participant_inn}",
+        "issuer": "CN=Synthetic CA",
+        "serial": thumbprint[-16:],
+        "certificate_inn": participant_inn,
+        "valid_from": (NOW() - timedelta(days=1)).isoformat(),
+        "valid_to": (NOW() + timedelta(days=90)).isoformat(),
+        "has_private_key": True,
+        "public_key_oid": "1.2.643.7.1.1.1.1",
+        "signature_oid": "1.2.643.7.1.1.3.2",
+        "crypto_provider": "Crypto-Pro GOST R 34.10",
+        "compatibility": "GOST_CRYPTOPRO",
+    }
+    value.update(overrides)
+    return value
+
+
+def test_p0_certificate_inventory_auto_select_multiple_and_invalid_candidates(db: Session):
+    user, org, participant = _tenant(db, "cert-inventory", "7707083893")
+    _scope(db, user, org, participant)
+    binding, _ = AgentBindingService(db).create(
+        installation_id=str(uuid4()), display_name="Discovery Agent", user_id=user.id
+    )
+    service = IntegrationSettingsService(db, _config(), secret_provider=ReadOnlySecretProvider())
+    service.create_true_api(
+        environment="PRODUCTION", primary_agent_binding_id=binding.id, user_id=user.id
+    )
+
+    empty = service.record_certificate_inventory(
+        binding.id, candidates=[], selected_thumbprint=None, cryptopro_available=True
+    )
+    assert empty["candidates"] == []
+    assert service.certificate_status()["reason_code"] == "CERTIFICATE_NOT_FOUND"
+
+    thumb = "A" * 40
+    one = service.record_certificate_inventory(
+        binding.id,
+        candidates=[_p0_candidate(participant.inn, thumb)],
+        selected_thumbprint=None,
+        cryptopro_available=True,
+    )
+    assert one["auto_selected"] is True
+    assert one["desired_certificate_thumbprint"] == thumb
+    assert one["selection_state"] == "PENDING_LOCAL_APPLY"
+    applied = service.record_certificate_inventory(
+        binding.id,
+        candidates=[_p0_candidate(participant.inn, thumb)],
+        selected_thumbprint=thumb,
+        cryptopro_available=True,
+    )
+    assert applied["selection_state"] == "READY"
+    assert service.certificate_status()["status"] == "READY"
+
+    user2, org2, participant2 = _tenant(db, "cert-multiple", "500100732259")
+    _scope(db, user2, org2, participant2)
+    binding2, _ = AgentBindingService(db).create(
+        installation_id=str(uuid4()), display_name="Multi Agent", user_id=user2.id
+    )
+    service2 = IntegrationSettingsService(db, _config(), secret_provider=ReadOnlySecretProvider())
+    conn2 = service2.create_true_api(
+        environment="PRODUCTION", primary_agent_binding_id=binding2.id, user_id=user2.id
+    )
+    a, b = "B" * 40, "C" * 40
+    multiple = service2.record_certificate_inventory(
+        binding2.id,
+        candidates=[_p0_candidate(participant2.inn, a), _p0_candidate(participant2.inn, b)],
+        selected_thumbprint=None,
+        cryptopro_available=True,
+    )
+    assert multiple["auto_selected"] is False
+    assert multiple["desired_certificate_thumbprint"] is None
+    assert service2.certificate_status()["reason_code"] == "CERTIFICATE_SELECTION_REQUIRED"
+    service2.select_certificate(conn2["id"], b, user_id=user2.id)
+    applied2 = service2.record_certificate_inventory(
+        binding2.id,
+        candidates=[_p0_candidate(participant2.inn, a), _p0_candidate(participant2.inn, b)],
+        selected_thumbprint=b,
+        cryptopro_available=True,
+    )
+    assert applied2["selection_state"] == "READY"
+
+    user3, org3, participant3 = _tenant(db, "cert-invalid", "7811088331")
+    _scope(db, user3, org3, participant3)
+    binding3, _ = AgentBindingService(db).create(
+        installation_id=str(uuid4()), display_name="Invalid Agent", user_id=user3.id
+    )
+    service3 = IntegrationSettingsService(db, _config(), secret_provider=ReadOnlySecretProvider())
+    service3.create_true_api(environment="PRODUCTION", primary_agent_binding_id=binding3.id, user_id=user3.id)
+    bad = service3.record_certificate_inventory(
+        binding3.id,
+        candidates=[
+            _p0_candidate(participant3.inn, "D" * 40, has_private_key=False),
+            _p0_candidate(participant3.inn, "E" * 40, valid_to=(NOW() - timedelta(days=1)).isoformat()),
+            _p0_candidate("7707083893", "F" * 40),
+        ],
+        selected_thumbprint=None,
+        cryptopro_available=True,
+    )
+    reasons = {item["reason_code"] for item in bad["candidates"]}
+    assert {"CERTIFICATE_NO_PRIVATE_KEY", "CERTIFICATE_EXPIRED", "CERTIFICATE_PARTICIPANT_MISMATCH"} <= reasons
+    assert not any(item["readiness_state"] == "READY" for item in bad["candidates"])
+
+
+def test_p0_true_api_check_stops_before_real_auth_until_authorized(db: Session):
+    user, org, participant = _tenant(db, "local-readiness", "7707083893")
+    _scope(db, user, org, participant)
+    binding, _ = AgentBindingService(db).create(
+        installation_id=str(uuid4()), display_name="Local readiness Agent", user_id=user.id
+    )
+    cfg = _config(true_api_real_read_enabled=False)
+    service = IntegrationSettingsService(db, cfg, secret_provider=ReadOnlySecretProvider())
+    conn = service.create_true_api(
+        environment="PRODUCTION", primary_agent_binding_id=binding.id, user_id=user.id
+    )
+    thumb = "9" * 40
+    service.record_certificate_inventory(
+        binding.id,
+        candidates=[_p0_candidate(participant.inn, thumb)],
+        selected_thumbprint=thumb,
+        cryptopro_available=True,
+    )
+    health = service.check("true-api", conn["id"], user_id=user.id)
+    assert health["overall_status"] == "BLOCKED"
+    assert health["error_code"] == "REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED"
+    assert health["components"]["TRUE_API_AUTH"]["status"] == "BLOCKED"
+    assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(
+        AgentJobRecord.purpose == "INTEGRATION_HEALTH"
+    )) == 0
