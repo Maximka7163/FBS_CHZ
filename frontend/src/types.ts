@@ -81,6 +81,8 @@ export interface WorkspaceItem {
     amount: string;
     currency: string;
     reason_code: string | null;
+    source_row_number: number | null;
+    source_file: string;
   };
 }
 
@@ -209,7 +211,7 @@ export interface EnrollmentIntent {
   enrollment_id: string;
   enrollment_token: string;
   expires_at: string;
-  requested_protocol_version: string;
+  requested_protocol_version: string | null;
 }
 
 export interface CisInventoryRequest {
