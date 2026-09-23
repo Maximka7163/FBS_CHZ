@@ -45,6 +45,7 @@ ERROR_CODES = frozenset({
     "CERTIFICATE_PARTICIPANT_MISMATCH","CRYPTO_PROVIDER_UNAVAILABLE","AUTH_FAILED",
     "REMOTE_UNAVAILABLE","RATE_LIMITED","REMOTE_IDENTITY_MISMATCH","CONTRACT_BLOCKED",
     "FEATURE_DISABLED","CHECK_IN_PROGRESS","UNKNOWN_REMOTE_ERROR",
+    "REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED","CERTIFICATE_SELECTION_REQUIRED",
     "SECRET_PROVIDER_WRITE_UNAVAILABLE","SECRET_PROVIDER_ATOMIC_ROTATION_UNSUPPORTED",
 })
 
@@ -323,6 +324,8 @@ class IntegrationSettingsService:
             "recommended_action": None,
             "capabilities": self._capabilities(),
             "blockers": blockers,
+            "read_only": True if kind == "true-api" else None,
+            "real_read_authorized": bool(self.config.true_api_real_read_enabled) if kind == "true-api" else None,
             "requires_local_action": bool(
                 kind == "true-api" and row.certificate_selection_state == "PENDING_LOCAL_APPLY"
             ) if kind == "true-api" else False,
@@ -819,6 +822,57 @@ class IntegrationSettingsService:
             raise IntegrationCheckBlocked("AGENT_PROTOCOL_MISMATCH")
         if row.primary_agent_binding_id is None:
             row.primary_agent_binding_id = binding.id
+
+        if not self.config.true_api_real_read_enabled:
+            check, reused = self._start_check(
+                "true-api", row, check_kind="LOCAL_CERTIFICATE_READINESS", user_id=user_id, binding_id=binding.id
+            )
+            if reused:
+                return {**self.health_dto(check), "reused": True}
+            status = self.certificate_status()
+            observation = status.get("observation") if isinstance(status, dict) else None
+            cert_ready = bool(observation and observation.get("readiness_state") == "READY")
+            reason = (
+                "REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED"
+                if cert_ready
+                else str(status.get("reason_code") or "CERTIFICATE_NOT_FOUND")
+            )
+            components = {
+                "AGENT_REACHABILITY": {"status": "READY"},
+                "CRYPTO_PROVIDER": {
+                    "status": "READY" if observation and observation.get("compatibility") == "GOST_CRYPTOPRO" else "ERROR"
+                },
+                "CERTIFICATE_PRESENT": {"status": "READY" if observation else "ERROR"},
+                "CERTIFICATE_TIME_VALIDITY": {"status": "READY" if cert_ready else "ERROR"},
+                "CERTIFICATE_PRIVATE_KEY": {
+                    "status": "READY" if observation and observation.get("has_private_key") else "ERROR"
+                },
+                "CERTIFICATE_COMPATIBILITY": {
+                    "status": "READY" if observation and observation.get("compatibility") == "GOST_CRYPTOPRO" else "ERROR"
+                },
+                "CERTIFICATE_PARTICIPANT_MATCH": {
+                    "status": "READY" if observation and observation.get("match_state") == "MATCH" else "ERROR"
+                },
+                "TRUE_API_AUTH": {
+                    "status": "BLOCKED",
+                    "reason_code": "REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED",
+                },
+                "TRUE_API_READ_PROBE": {"status": "NOT_TESTED"},
+                "WRITE_FEATURE_GATE": {"status": "BLOCKED"},
+            }
+            self._complete_check(
+                check,
+                overall="BLOCKED" if cert_ready else "ERROR",
+                components=components,
+                error_code=reason,
+                certificate=observation or {},
+                user_id=user_id,
+            )
+            row.last_check_at = check.completed_at
+            row.last_error_code = reason
+            self.db.flush()
+            return {**self.health_dto(check), "reused": False}
+
         check, reused = self._start_check(
             "true-api", row, check_kind="TRUE_API_TYPED_AGENT", user_id=user_id, binding_id=binding.id
         )
@@ -1121,11 +1175,193 @@ class IntegrationSettingsService:
         conn.last_error_code = _safe_error(result.error_code)
         self.db.flush()
 
+    def record_certificate_inventory(
+        self,
+        binding_id: str,
+        *,
+        candidates: list[Mapping[str, Any]],
+        selected_thumbprint: str | None,
+        cryptopro_available: bool,
+    ) -> dict[str, Any]:
+        binding = self.db.scalar(select(AgentBindingRecord).where(
+            AgentBindingRecord.id == binding_id,
+            AgentBindingRecord.organisation_id == self.scope.organisation_id,
+            AgentBindingRecord.participant_id == self.scope.participant_id,
+            AgentBindingRecord.state == "ACTIVE",
+        ).with_for_update())
+        if binding is None:
+            raise IntegrationNotFound("agent binding not found")
+        if len(candidates) > 64:
+            raise ValueError("certificate candidate limit exceeded")
+
+        now = _now()
+        observed: list[AgentCertificateObservationRecord] = []
+        for raw in candidates:
+            thumb = re.sub(r"[^0-9A-F]", "", str(raw.get("thumbprint") or "").upper())[:160]
+            if len(thumb) < 32:
+                continue
+            subject = str(raw.get("subject") or "")[:2000]
+            cert_inn = str(raw.get("certificate_inn") or "") or None
+            if cert_inn is None and subject:
+                matched = re.search(
+                    r"(?:OID\.1\.2\.643\.100\.4|INN|ИНН)\s*[=:]\s*(\d{10}|\d{12})",
+                    subject,
+                    re.IGNORECASE,
+                )
+                cert_inn = matched.group(1) if matched else None
+            valid_from = _parse_dt(raw.get("valid_from"))
+            valid_to = _parse_dt(raw.get("valid_to"))
+            expiry = certificate_expiry_status(
+                valid_to,
+                critical_days=int(getattr(self.config, "certificate_expiry_critical_days", 7)),
+                soon_days=int(getattr(self.config, "certificate_expiry_soon_days", 30)),
+            )
+            match_state = (
+                "MATCH" if cert_inn == self.scope.participant_inn
+                else "MISMATCH" if cert_inn
+                else "UNKNOWN"
+            )
+            has_key = bool(raw.get("has_private_key"))
+            compatible = cryptopro_available and str(raw.get("compatibility") or "") == "GOST_CRYPTOPRO"
+            not_yet_valid = bool(valid_from and valid_from > now)
+            ready = (
+                has_key
+                and compatible
+                and not not_yet_valid
+                and expiry in {"VALID", "EXPIRING_SOON", "EXPIRING_CRITICAL"}
+                and match_state == "MATCH"
+            )
+            reason = (
+                "CERTIFICATE_PARTICIPANT_MISMATCH" if match_state == "MISMATCH"
+                else "CERTIFICATE_NO_PRIVATE_KEY" if not has_key
+                else "CRYPTO_PROVIDER_UNAVAILABLE" if not compatible
+                else "CERTIFICATE_NOT_YET_VALID" if not_yet_valid
+                else "CERTIFICATE_EXPIRED" if expiry == "EXPIRED"
+                else "CERTIFICATE_PARTICIPANT_MISMATCH" if match_state == "UNKNOWN"
+                else None
+            )
+            row = self.db.scalar(select(AgentCertificateObservationRecord).where(
+                AgentCertificateObservationRecord.agent_binding_id == binding.id,
+                AgentCertificateObservationRecord.organisation_id == binding.organisation_id,
+                AgentCertificateObservationRecord.participant_id == binding.participant_id,
+                AgentCertificateObservationRecord.thumbprint == thumb,
+            ).order_by(AgentCertificateObservationRecord.observed_at.desc()).limit(1).with_for_update())
+            if row is None:
+                row = AgentCertificateObservationRecord(
+                    agent_binding_id=binding.id,
+                    organisation_id=binding.organisation_id,
+                    participant_id=binding.participant_id,
+                    thumbprint=thumb,
+                    observed_at=now,
+                    readiness_state="UNKNOWN",
+                    match_state="UNKNOWN",
+                    expiry_state="UNKNOWN",
+                )
+                self.db.add(row)
+            row.subject = subject or None
+            row.issuer = str(raw.get("issuer") or "")[:2000] or None
+            row.certificate_inn = cert_inn if cert_inn and cert_inn.isdigit() and len(cert_inn) in {10, 12} else None
+            row.valid_from = valid_from
+            row.valid_to = valid_to
+            row.algorithm = str(raw.get("public_key_oid") or raw.get("signature_oid") or "")[:128] or None
+            row.has_private_key = has_key
+            row.crypto_provider = str(raw.get("crypto_provider") or "")[:160] or None
+            row.compatibility = "GOST_CRYPTOPRO" if compatible else "UNSUPPORTED"
+            row.serial = str(raw.get("serial") or "")[:160] or None
+            row.observed_at = now
+            row.readiness_state = "READY" if ready else "NOT_READY"
+            row.match_state = match_state
+            row.expiry_state = expiry
+            row.reason_code = reason
+            observed.append(row)
+        self.db.flush()
+
+        normalized_selected = (
+            re.sub(r"[^0-9A-F]", "", selected_thumbprint.upper())[:160]
+            if selected_thumbprint else None
+        )
+        conn = self.db.scalar(select(TrueApiConnectionRecord).where(
+            TrueApiConnectionRecord.organisation_id == self.scope.organisation_id,
+            TrueApiConnectionRecord.participant_id == self.scope.participant_id,
+            TrueApiConnectionRecord.state != "ARCHIVED",
+        ).with_for_update())
+        auto_selected = False
+        if conn is not None:
+            by_thumb = {row.thumbprint: row for row in observed}
+            if not conn.desired_certificate_ref and len(observed) == 1 and observed[0].readiness_state == "READY":
+                conn.desired_certificate_ref = observed[0].thumbprint
+                conn.certificate_selection_state = "PENDING_LOCAL_APPLY"
+                auto_selected = True
+            if conn.desired_certificate_ref:
+                desired = by_thumb.get(conn.desired_certificate_ref)
+                if normalized_selected:
+                    if (
+                        desired is not None
+                        and normalized_selected == conn.desired_certificate_ref
+                        and desired.readiness_state == "READY"
+                    ):
+                        conn.certificate_selection_state = "READY"
+                        conn.observed_certificate_observation_id = desired.id
+                    else:
+                        conn.certificate_selection_state = "MISMATCH"
+                elif desired is None or desired.readiness_state != "READY":
+                    conn.certificate_selection_state = "MISMATCH"
+                else:
+                    conn.certificate_selection_state = "PENDING_LOCAL_APPLY"
+
+        binding.capabilities_sanitized = {
+            **dict(binding.capabilities_sanitized or {}),
+            "cryptopro_available": bool(cryptopro_available),
+            "certificate_candidate_count": len(observed),
+            "certificate_discovery": True,
+        }
+        self.db.flush()
+
+        def public(row: AgentCertificateObservationRecord) -> dict[str, Any]:
+            return {
+                "id": row.id,
+                "thumbprint": row.thumbprint,
+                "subject": row.subject,
+                "issuer": row.issuer,
+                "certificate_inn": row.certificate_inn,
+                "valid_from": _iso(row.valid_from),
+                "valid_to": _iso(row.valid_to),
+                "has_private_key": row.has_private_key,
+                "crypto_provider": row.crypto_provider,
+                "compatibility": row.compatibility,
+                "match_state": row.match_state,
+                "expiry_state": row.expiry_state,
+                "readiness_state": row.readiness_state,
+                "reason_code": row.reason_code,
+                "observed_at": _iso(row.observed_at),
+            }
+
+        return {
+            "cryptopro_available": bool(cryptopro_available),
+            "candidates": [public(row) for row in observed],
+            "selected_thumbprint": normalized_selected,
+            "desired_certificate_thumbprint": conn.desired_certificate_ref if conn else None,
+            "selection_state": conn.certificate_selection_state if conn else "NONE",
+            "auto_selected": auto_selected,
+        }
+
+
     def select_certificate(self, connection_id: str, thumbprint: str, *, user_id: int) -> dict[str, Any]:
         row = self._get("true-api", connection_id, lock=True)
         normalized = re.sub(r"[^0-9A-F]", "", thumbprint.upper())
         if len(normalized) < 32 or len(normalized) > 160:
             raise ValueError("certificate thumbprint is invalid")
+        binding = AgentBindingService(self.db).primary_for_active_scope()
+        if binding is None:
+            raise ValueError("active Windows agent is required")
+        candidate = self.db.scalar(select(AgentCertificateObservationRecord).where(
+            AgentCertificateObservationRecord.organisation_id == self.scope.organisation_id,
+            AgentCertificateObservationRecord.participant_id == self.scope.participant_id,
+            AgentCertificateObservationRecord.agent_binding_id == binding.id,
+            AgentCertificateObservationRecord.thumbprint == normalized,
+        ).order_by(AgentCertificateObservationRecord.observed_at.desc()).limit(1))
+        if candidate is None or candidate.readiness_state != "READY":
+            raise ValueError("certificate is not a current ready participant-matching candidate")
         row.desired_certificate_ref = normalized
         row.certificate_selection_state = "PENDING_LOCAL_APPLY"
         self.db.flush()
@@ -1139,26 +1375,75 @@ class IntegrationSettingsService:
     def certificate_status(self) -> dict[str, Any]:
         binding = AgentBindingService(self.db).primary_for_active_scope()
         if binding is None:
-            return {"status":"UNKNOWN","reason_code":"AGENT_OFFLINE","observation":None}
-        obs = self.db.scalar(select(AgentCertificateObservationRecord).where(
+            return {
+                "status": "UNKNOWN",
+                "reason_code": "AGENT_OFFLINE",
+                "observation": None,
+                "candidates": [],
+                "selection_state": "NONE",
+                "desired_certificate_thumbprint": None,
+            }
+        rows = list(self.db.scalars(select(AgentCertificateObservationRecord).where(
             AgentCertificateObservationRecord.organisation_id == self.scope.organisation_id,
             AgentCertificateObservationRecord.participant_id == self.scope.participant_id,
             AgentCertificateObservationRecord.agent_binding_id == binding.id,
-        ).order_by(AgentCertificateObservationRecord.observed_at.desc()).limit(1))
-        if obs is None:
-            return {"status":"UNKNOWN","reason_code":"CERTIFICATE_NOT_FOUND","observation":None}
+        ).order_by(AgentCertificateObservationRecord.observed_at.desc())))
+        latest: list[AgentCertificateObservationRecord] = []
+        seen: set[str] = set()
+        for row in rows:
+            if row.thumbprint in seen:
+                continue
+            seen.add(row.thumbprint)
+            latest.append(row)
+        conn = self.db.scalar(select(TrueApiConnectionRecord).where(
+            TrueApiConnectionRecord.organisation_id == self.scope.organisation_id,
+            TrueApiConnectionRecord.participant_id == self.scope.participant_id,
+            TrueApiConnectionRecord.state != "ARCHIVED",
+        ))
+        desired = conn.desired_certificate_ref if conn else None
+        selected = next((row for row in latest if desired and row.thumbprint == desired), None)
+        if selected is None and len(latest) == 1:
+            selected = latest[0]
+
+        def public(row: AgentCertificateObservationRecord) -> dict[str, Any]:
+            return {
+                "id": row.id,
+                "thumbprint": row.thumbprint,
+                "subject": row.subject,
+                "issuer": row.issuer,
+                "certificate_inn": row.certificate_inn,
+                "valid_from": _iso(row.valid_from),
+                "valid_to": _iso(row.valid_to),
+                "algorithm": row.algorithm,
+                "has_private_key": row.has_private_key,
+                "crypto_provider": row.crypto_provider,
+                "compatibility": row.compatibility,
+                "match_state": row.match_state,
+                "expiry_state": row.expiry_state,
+                "readiness_state": row.readiness_state,
+                "reason_code": row.reason_code,
+                "observed_at": _iso(row.observed_at),
+            }
+
+        selection_state = conn.certificate_selection_state if conn else "NONE"
+        if not latest:
+            status, reason = "UNKNOWN", "CERTIFICATE_NOT_FOUND"
+        elif len(latest) > 1 and not desired:
+            status, reason = "SELECTION_REQUIRED", "CERTIFICATE_SELECTION_REQUIRED"
+        elif selected is None:
+            status, reason = "NOT_READY", "CERTIFICATE_NOT_FOUND"
+        else:
+            status, reason = selected.readiness_state, selected.reason_code
         return {
-            "status":obs.readiness_state,
-            "reason_code":obs.reason_code,
-            "observation":{
-                "id":obs.id,"thumbprint":obs.thumbprint,"subject":obs.subject,"issuer":obs.issuer,
-                "certificate_inn":obs.certificate_inn,"valid_from":_iso(obs.valid_from),
-                "valid_to":_iso(obs.valid_to),"algorithm":obs.algorithm,
-                "has_private_key":obs.has_private_key,"crypto_provider":obs.crypto_provider,
-                "compatibility":obs.compatibility,"match_state":obs.match_state,
-                "expiry_state":obs.expiry_state,"observed_at":_iso(obs.observed_at),
-            },
+            "status": status,
+            "reason_code": reason,
+            "observation": public(selected) if selected else None,
+            "candidates": [public(row) for row in latest],
+            "selection_state": selection_state,
+            "desired_certificate_thumbprint": desired,
+            "cryptopro_available": bool((binding.capabilities_sanitized or {}).get("cryptopro_available")),
         }
+
 
     def health_dto(self, check: IntegrationHealthCheckRecord) -> dict[str, Any]:
         if check.organisation_id != self.scope.organisation_id or check.participant_id != self.scope.participant_id:
@@ -1200,6 +1485,7 @@ class IntegrationSettingsService:
             "environment": self.config.environment,
             "agent_protocol": {"supported":"m14-v1","enabled":bool(self.config.agent_enabled)},
             "true_api_write_gate": bool(self.config.true_api_write_enabled),
+            "true_api_real_read_gate": bool(self.config.true_api_real_read_enabled),
             "true_api_reports_gate": bool(self.config.true_api_reports_enabled),
             "secret_provider": {
                 "read": bool(provider_caps & SecretCapability.READ),
