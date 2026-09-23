@@ -9,6 +9,7 @@ import threading
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import quote
 
+from wbcz.models import KiState
 from wbcz.true_api import normalize_cis, normalize_cises
 
 
@@ -257,6 +258,38 @@ class SharedRateLimiter:
                 self._sleeper(wait)
                 now = self._clock()
             self._next_allowed = max(self._next_allowed, now) + self._interval
+
+
+def decision_state_from_cis_info(value: Mapping[str, Any]) -> KiState:
+    """Map an official cises/info object to the conservative P0 decision state."""
+    raw_status = value.get("status")
+    status = {
+        "INTRODUCED": "IN_CIRCULATION",
+        "RETIRED": "WITHDRAWN",
+    }.get(str(raw_status).upper(), f"UNKNOWN:{raw_status}")
+
+    raw_status_ex = value.get("statusEx", value.get("status_ex"))
+    if raw_status_ex is None or str(raw_status_ex).upper() in {"", "EMPTY"}:
+        status_ex = None
+    else:
+        status_ex = f"UNKNOWN:{raw_status_ex}"
+
+    product_group = value.get("productGroup", value.get("product_group"))
+    return KiState(
+        status=status,
+        statusEx=status_ex,
+        withdrawReason=(
+            value.get("withdrawReason", value.get("withdraw_reason"))
+            if isinstance(value.get("withdrawReason", value.get("withdraw_reason")), str)
+            else None
+        ),
+        ownerInn=(
+            value.get("ownerInn", value.get("owner_inn"))
+            if isinstance(value.get("ownerInn", value.get("owner_inn")), str)
+            else None
+        ),
+        productGroup=product_group if isinstance(product_group, str) and product_group else "lp",
+    )
 
 
 def _expect_object(value: Any, label: str) -> dict[str, Any]:
