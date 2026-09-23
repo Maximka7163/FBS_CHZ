@@ -7,6 +7,7 @@ import os
 import shutil
 from pathlib import Path
 import tempfile
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from wbcz.agent_http import VpsAgentHttpBoundary
@@ -14,7 +15,10 @@ from wbcz.printing_sensitive import b64d
 from wbcz.windows_agent import AgentAuthError, AgentSecurityError
 from wbcz.write_pipeline import InvalidWriteOperation
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
+from wbcz_web.models import TrueApiConnectionRecord
 from wbcz_web.services.agent_bindings import AgentBindingService
+from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
+from wbcz_web.services.integration_settings import IntegrationSettingsService
 from wbcz_web.services.printing_sensitive_delivery import (
     SensitiveDeliveryRejected,
     SensitivePrintingDeliveryService,
@@ -26,6 +30,7 @@ from .dependencies import get_db
 
 
 agent_router = APIRouter(prefix="/api/agent/v1", tags=["agent"])
+agent_v2_control_router = APIRouter(prefix="/api/agent/v2", tags=["agent-control-v2"])
 agent_v2_printing_router = APIRouter(prefix="/api/agent/v2/printing", tags=["agent-printing-v2"])
 
 
@@ -70,6 +75,27 @@ class PrinterDiscoveryResult(_ClosedModel):
     status: str = Field(pattern="^(COMPLETED|FAILED)$")
     observations: list[PrinterObservationPayload] = Field(default_factory=list, max_length=64)
     safe_error_code: str | None = Field(default=None, max_length=80)
+
+
+class CertificateCandidateReport(_ClosedModel):
+    thumbprint: str = Field(min_length=32, max_length=160)
+    subject: str | None = Field(default=None, max_length=2000)
+    issuer: str | None = Field(default=None, max_length=2000)
+    serial: str | None = Field(default=None, max_length=160)
+    certificate_inn: str | None = Field(default=None, pattern=r"^(\d{10}|\d{12})$")
+    valid_from: str | None = Field(default=None, max_length=64)
+    valid_to: str | None = Field(default=None, max_length=64)
+    has_private_key: bool = False
+    public_key_oid: str | None = Field(default=None, max_length=128)
+    signature_oid: str | None = Field(default=None, max_length=128)
+    crypto_provider: str | None = Field(default=None, max_length=160)
+    compatibility: str = Field(pattern="^(GOST_CRYPTOPRO|UNSUPPORTED)$")
+
+
+class CertificateInventoryReport(_ClosedModel):
+    cryptopro_available: bool
+    selected_thumbprint: str | None = Field(default=None, min_length=32, max_length=160)
+    candidates: list[CertificateCandidateReport] = Field(default_factory=list, max_length=64)
 
 
 class PhysicalRenderVerifiedRequest(_ClosedModel):
@@ -138,6 +164,46 @@ def _response(value) -> Response:
         headers=dict(value.headers or {}),
         media_type=None,
     )
+
+
+@agent_v2_control_router.get("/runtime-config")
+def agent_runtime_config(request: Request, db: Session = Depends(get_db)) -> JSONResponse:
+    principal = _machine_principal(request, db)
+    conn = db.scalar(select(TrueApiConnectionRecord).where(
+        TrueApiConnectionRecord.organisation_id == principal.organisation_id,
+        TrueApiConnectionRecord.participant_id == principal.participant_id,
+        TrueApiConnectionRecord.state != "ARCHIVED",
+    ))
+    config = request.app.state.config
+    return _v2_json({
+        "participant_inn": principal.participant_inn,
+        "desired_certificate_thumbprint": conn.desired_certificate_ref if conn else None,
+        "certificate_selection_state": conn.certificate_selection_state if conn else "NONE",
+        "true_api_real_read_enabled": bool(config.true_api_real_read_enabled),
+        "true_api_write_enabled": bool(config.true_api_write_enabled),
+        "fbs_dry_run_only": bool(config.fbs_dry_run_only),
+    })
+
+
+@agent_v2_control_router.post("/certificates")
+def agent_certificate_inventory(
+    payload: CertificateInventoryReport,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    principal = _machine_principal(request, db)
+    service = IntegrationSettingsService(
+        db,
+        request.app.state.config,
+        secret_provider=ReadOnlySecretProvider(),
+    )
+    value = service.record_certificate_inventory(
+        principal.binding_id or "",
+        candidates=[item.model_dump() for item in payload.candidates],
+        selected_thumbprint=payload.selected_thumbprint,
+        cryptopro_available=payload.cryptopro_available,
+    )
+    return _v2_json(value)
 
 
 @agent_router.head("/jobs/next")
