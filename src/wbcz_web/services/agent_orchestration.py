@@ -10,6 +10,7 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from wbcz.cis_inventory import MAX_BATCH, decision_state_from_cis_info
 from wbcz.control_engine import decide
 from wbcz.models import Decision, Event, KiState, Outcome, canonical_json
 from wbcz.windows_agent import (
@@ -47,6 +48,7 @@ from wbcz_web.services.reports import (
 
 
 CONTROL_CIS = "CONTROL_CIS"
+CONTROL_CIS_BATCH = "CONTROL_CIS_BATCH"
 WRITE = "WRITE"
 POLL = "POLL"
 RECONCILIATION_CIS = "RECONCILIATION_CIS"
@@ -116,6 +118,8 @@ class AgentControlService:
             raise PermissionError("active tenant scope required")
 
     def run(self, import_id: str, user_id: int, mode: str, event_ids: list[str] | None = None) -> dict:
+        if self.config.environment == "production" and not self.config.true_api_real_read_enabled:
+            raise InvalidWriteOperation("REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED")
         selected = _select_event_ids(self.imports, import_id, event_ids)
         run = ControlRun(
             organisation_id=self.scope.organisation_id if self.scope else None,
@@ -127,8 +131,8 @@ class AgentControlService:
         )
         self.db.add(run)
         self.db.flush()
-        queued = 0
         immediate: list[Outcome] = []
+        effective: list[tuple[str, Event]] = []
         for event_id in selected:
             row = self.imports.event(event_id)
             if row is None:
@@ -149,23 +153,50 @@ class AgentControlService:
                 )
                 immediate.append(policy_outcome)
                 continue
-            seed = hashlib.sha256(event.kiz.encode("utf-8")).hexdigest()
-            operation_id = f"cis:{run.id}:{event_id}"
-            job = AgentJob(
-                job_id=_stable_job_id(CONTROL_CIS, operation_id, seed),
-                job_type=AgentJobType.CIS_CHECK,
-                operation_id=operation_id,
-                pg=P0_PG,
-                expected_inn=self.scope.participant_inn if self.scope else self.config.own_inn,
-                cises=(event.kiz,),
-            )
-            self.jobs.enqueue(
-                job,
-                purpose=CONTROL_CIS,
-                event_id=event_id,
-                control_run_id=run.id,
-            )
-            queued += 1
+            effective.append((event_id, event))
+
+        api_requests_queued = 0
+        if event_ids is None:
+            unique_cises = list(dict.fromkeys(event.kiz for _, event in effective))
+            for batch_index, offset in enumerate(range(0, len(unique_cises), MAX_BATCH)):
+                batch = unique_cises[offset : offset + MAX_BATCH]
+                operation_id = f"cis-batch:{run.id}:{batch_index}"
+                seed = hashlib.sha256(canonical_json(batch).encode("utf-8")).hexdigest()
+                job = AgentJob(
+                    job_id=_stable_job_id(CONTROL_CIS_BATCH, operation_id, seed),
+                    job_type=AgentJobType.CIS_INFO,
+                    operation_id=operation_id,
+                    pg=P0_PG,
+                    expected_inn=self.scope.participant_inn if self.scope else self.config.own_inn,
+                    read_payload={"cises": batch},
+                )
+                self.jobs.enqueue(
+                    job,
+                    purpose=CONTROL_CIS_BATCH,
+                    control_run_id=run.id,
+                )
+                api_requests_queued += 1
+        else:
+            for event_id, event in effective:
+                seed = hashlib.sha256(event.kiz.encode("utf-8")).hexdigest()
+                operation_id = f"cis:{run.id}:{event_id}"
+                job = AgentJob(
+                    job_id=_stable_job_id(CONTROL_CIS, operation_id, seed),
+                    job_type=AgentJobType.CIS_CHECK,
+                    operation_id=operation_id,
+                    pg=P0_PG,
+                    expected_inn=self.scope.participant_inn if self.scope else self.config.own_inn,
+                    cises=(event.kiz,),
+                )
+                self.jobs.enqueue(
+                    job,
+                    purpose=CONTROL_CIS,
+                    event_id=event_id,
+                    control_run_id=run.id,
+                )
+                api_requests_queued += 1
+
+        queued = len(effective)
         self.db.flush()
         counts = Counter(item.decision.value for item in immediate)
         if queued:
@@ -177,6 +208,8 @@ class AgentControlService:
             "mode": getattr(mode, "value", str(mode)),
             "checked": len(immediate),
             "pending": queued,
+            "unique_ki_pending": len({event.kiz for _, event in effective}),
+            "api_requests_queued": api_requests_queued,
             "counts": dict(counts),
             "reasons": dict(reasons),
             "production_submission_available": False,
@@ -439,6 +472,8 @@ class AgentOrchestrationBroker:
         tenant_core.submit_result(machine_token, result)
         if metadata.purpose == CONTROL_CIS:
             self._apply_control_cis(metadata.event_id, metadata.control_run_id, result)
+        elif metadata.purpose == CONTROL_CIS_BATCH:
+            self._apply_control_cis_batch(metadata.control_run_id, metadata.job, result)
         elif metadata.purpose == WRITE:
             self._after_write(result)
         elif metadata.purpose == POLL:
@@ -458,6 +493,72 @@ class AgentOrchestrationBroker:
         else:
             raise AgentReplayConflict("unknown agent job purpose")
         self.db.flush()
+
+    def _apply_control_cis_batch(
+        self,
+        run_id: str | None,
+        job: AgentJob,
+        result: AgentResult,
+    ) -> None:
+        if not run_id or job.job_type is not AgentJobType.CIS_INFO or not job.read_payload:
+            raise AgentReplayConflict("batch control job misses orchestration metadata")
+        run = self.db.get(ControlRun, run_id)
+        if run is None:
+            raise AgentReplayConflict("batch control run not found")
+        requested = tuple(job.read_payload.get("cises") or ())
+        requested_set = set(requested)
+        states: dict[str, KiState] = {}
+        failures: set[str] = set(requested)
+        read_result = result.read_result if isinstance(result.read_result, dict) else {}
+        if result.outcome == "READ_COMPLETED" and read_result.get("type") == "CIS_INFO":
+            for item in read_result.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                wire = item.get("wire") if isinstance(item.get("wire"), dict) else {}
+                cis = str(wire.get("requested_cis") or "")
+                normalized = item.get("normalized")
+                if cis in requested_set and isinstance(normalized, dict) and not item.get("item_error"):
+                    try:
+                        states[cis] = decision_state_from_cis_info(normalized)
+                        failures.discard(cis)
+                    except Exception:
+                        pass
+
+        existing = set(self.db.scalars(
+            select(CheckRecord.event_id).where(CheckRecord.run_id == run_id)
+        ))
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        for row in self.imports.ordered_event_records(run.import_id):
+            if row.event_id in existing:
+                continue
+            event = record_to_event(row)
+            if event.kiz not in requested_set:
+                continue
+            outcome = sequence_outcome_for_event(self.imports, row.event_id)
+            snapshot = states.get(event.kiz)
+            if outcome is None:
+                if snapshot is None or event.kiz in failures:
+                    outcome = Outcome(
+                        Decision.MANUAL_REVIEW,
+                        "STATE_LOOKUP_OR_NORMALIZATION_FAILED",
+                        result.error_code or "TRUE_API_ITEM_ERROR",
+                    )
+                else:
+                    outcome = decide(event, snapshot, _tenant_or_legacy_inn(self.db, self.config))
+            snapshot_json = asdict(snapshot) if snapshot else None
+            if snapshot_json is not None:
+                snapshot_json["fetched_at"] = fetched_at
+            self.db.add(CheckRecord(
+                run_id=run_id,
+                event_id=row.event_id,
+                source="windows-agent-true-api",
+                snapshot=snapshot_json,
+                decision=outcome.decision.value,
+                reason=outcome.reason,
+                error=outcome.error,
+            ))
+        self.db.flush()
+
 
     def _single_state(self, event: Event, result: AgentResult) -> KiState:
         if result.outcome != "CIS_CHECKED" or len(result.cises) != 1:
@@ -487,13 +588,16 @@ class AgentOrchestrationBroker:
                 snapshot = self._single_state(event, result)
                 outcome = decide(event, snapshot, _tenant_or_legacy_inn(self.db, self.config))
             except Exception as exc:
-                outcome = Outcome(Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED", type(exc).__name__)
+                outcome = Outcome(Decision.MANUAL_REVIEW, "STATE_LOOKUP_OR_NORMALIZATION_FAILED", type(exc).__name__)
         self.db.add(
             CheckRecord(
                 run_id=run_id,
                 event_id=event_id,
                 source="windows-agent-true-api",
-                snapshot=asdict(snapshot) if snapshot else None,
+                snapshot=(
+                    {**asdict(snapshot), "fetched_at": datetime.now(timezone.utc).isoformat()}
+                    if snapshot else None
+                ),
                 decision=outcome.decision.value,
                 reason=outcome.reason,
                 error=outcome.error,
