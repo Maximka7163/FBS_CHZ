@@ -6,6 +6,11 @@ import type {
   UserInfo,
   WorkspaceHome,
   WorkspaceView,
+  AgentBindingStatus,
+  CertificateStatus,
+  CisInventoryRequest,
+  EnrollmentIntent,
+  IntegrationItem,
 } from "./types";
 
 let csrfToken = "";
@@ -89,3 +94,90 @@ export async function executeBulk(importId: string): Promise<BulkResult> {
     body: JSON.stringify({ confirm: true }),
   });
 }
+
+
+export const integrations = () => request<{ items: IntegrationItem[] }>("/api/integrations");
+export const agentStatus = () => request<{ bindings: AgentBindingStatus[] }>("/api/agent/status");
+export const certificateStatus = () => request<CertificateStatus>("/api/certificate/status");
+
+export const createEnrollment = (displayName = "Windows Agent") =>
+  request<EnrollmentIntent>("/api/agent-enrollment", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: displayName }),
+  });
+
+export const createTrueApi = () =>
+  request<IntegrationItem>("/api/integrations/true-api", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ environment: "PRODUCTION", primary_agent_binding_id: null }),
+  });
+
+export const createWb = () =>
+  request<IntegrationItem>("/api/integrations/wb", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      display_name: "Wildberries",
+      environment: "PRODUCTION",
+      token_type: "PERSONAL",
+      token_categories: ["ANY"],
+      token_scopes: [],
+      rate_profile: null,
+    }),
+  });
+
+export const createOzon = (clientId: string) =>
+  request<IntegrationItem>("/api/integrations/ozon", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: "Ozon", environment: "PRODUCTION", client_id: clientId }),
+  });
+
+export const createSuz = (omsId: string, omsConnection: string) =>
+  request<IntegrationItem>("/api/integrations/suz", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      display_name: "SUZ",
+      environment: "PRODUCTION",
+      oms_id: omsId,
+      oms_connection: omsConnection,
+      installation_name: "Windows Agent",
+    }),
+  });
+
+export const setIntegrationSecret = (type: "wb" | "ozon", id: string, value: string) =>
+  request<IntegrationItem>(`/api/integrations/${type}/${encodeURIComponent(id)}/secret`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  });
+
+export const revokeIntegrationSecret = (type: "wb" | "ozon", id: string) =>
+  request<IntegrationItem>(`/api/integrations/${type}/${encodeURIComponent(id)}/secret/revoke`, {
+    method: "POST",
+  });
+
+export const checkIntegration = (type: string, id: string) =>
+  request<unknown>(`/api/integrations/${encodeURIComponent(type)}/${encodeURIComponent(id)}/check`, {
+    method: "POST",
+  });
+
+export const selectCertificate = (connectionId: string, thumbprint: string) =>
+  request<IntegrationItem>(`/api/integrations/true-api/${encodeURIComponent(connectionId)}/certificate-selection`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ thumbprint }),
+  });
+
+export const queueKiInfo = (cises: string[]) =>
+  request<{ request_id: string; status: string }>("/api/cis-inventory/info", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cises }),
+  });
+
+export const kiRequest = (requestId: string) =>
+  request<CisInventoryRequest>(`/api/cis-inventory/requests/${encodeURIComponent(requestId)}`);
