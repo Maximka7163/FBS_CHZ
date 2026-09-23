@@ -297,6 +297,8 @@ class IntegrationSettingsService:
             blockers.append("OFFICIAL_SUZ_PROGRAMMER_MANUAL_NOT_PINNED")
         if kind == "true-api" and not self.config.true_api_write_enabled:
             blockers.append("TRUE_API_PRODUCTION_WRITE_DISABLED")
+        if kind == "true-api" and not self.config.true_api_real_read_enabled:
+            blockers.append("REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED")
         result = {
             "id": str(row.id),
             "type": kind,
@@ -831,7 +833,11 @@ class IntegrationSettingsService:
                 return {**self.health_dto(check), "reused": True}
             status = self.certificate_status()
             observation = status.get("observation") if isinstance(status, dict) else None
-            cert_ready = bool(observation and observation.get("readiness_state") == "READY")
+            cert_ready = bool(
+                observation
+                and observation.get("readiness_state") == "READY"
+                and status.get("selection_state") == "READY"
+            )
             reason = (
                 "REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED"
                 if cert_ready
