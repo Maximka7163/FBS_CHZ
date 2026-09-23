@@ -448,3 +448,44 @@ def test_readiness_exact_revision_is_independent_of_agent_and_remote_availabilit
         assert snapshot["blocked_contracts"]["M8"] == "M8_FULL_SUZ_WIRE_BLOCKED_ON_OFFICIAL_CORE_SUZ_ARTIFACTS"
         assert snapshot["blocked_contracts"]["M10"] == "M10_EXECUTABLE_READ_CAPABILITIES_NONE"
         assert any(item["code"] == "WORKER_STALLED" for item in snapshot["alerts"])
+
+
+def test_p0_agent_enrollment_rejects_wrong_and_expired_tokens(factory):
+    cfg = replace(
+        WebConfig.from_env(),
+        environment="test",
+        agent_enabled=True,
+        agent_legacy_bootstrap_enabled=False,
+        agent_machine_token="",
+        agent_enrollment_ttl_seconds=600,
+    ).validate_for_startup()
+    with factory() as db:
+        user, org, participant = _tenant(db, "enroll-negative", "7800000000")
+        _scope(db, user, org, participant)
+        service = AgentEnrollmentService(db, config=cfg)
+        intent, raw = service.create_intent(display_name="Negative Agent", user_id=user.id)
+
+        with pytest.raises(PermissionError, match="invalid enrollment token"):
+            service.exchange(
+                "x" * 64,
+                installation_id=str(uuid4()),
+                participant_inn=participant.inn,
+                protocol_version="m15-v1",
+                agent_version="0.5.1",
+                supported_job_types=("CIS_INFO",),
+                supported_capabilities=("TYPED_JOBS",),
+            )
+
+        intent.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.flush()
+        with pytest.raises(PermissionError, match="expired"):
+            service.exchange(
+                raw,
+                installation_id=str(uuid4()),
+                participant_inn=participant.inn,
+                protocol_version="m15-v1",
+                agent_version="0.5.1",
+                supported_job_types=("CIS_INFO",),
+                supported_capabilities=("TYPED_JOBS",),
+            )
+        assert intent.state == "EXPIRED"
