@@ -25,6 +25,8 @@ _RESULT_PATH_RE = re.compile(r"^/api/agent/v1/jobs/([A-Za-z0-9._:-]{1,128})/resu
 _REPORT_ARTIFACT_PATH_RE = re.compile(r"^/api/agent/v1/report-artifacts/(upl_[A-Fa-f0-9]{32})$")
 REPORT_ARTIFACT_INGRESS_PATH = "/api/agent/v1/report-artifacts/{artifact_upload_id}"
 AGENT_ENROLL_PATH = "/api/agent/v2/enroll"
+AGENT_RUNTIME_CONFIG_PATH = "/api/agent/v2/runtime-config"
+AGENT_CERTIFICATES_PATH = "/api/agent/v2/certificates"
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +129,12 @@ class StdlibHttpsAgentSender:
     def _allowed(method: str, path: str) -> bool:
         if method in {"HEAD", "GET"} and path == AGENT_FETCH_PATH:
             return True
-        if method == "POST" and (_RESULT_PATH_RE.fullmatch(path) is not None or path == AGENT_ENROLL_PATH):
+        if method == "GET" and path == AGENT_RUNTIME_CONFIG_PATH:
+            return True
+        if method == "POST" and (
+            _RESULT_PATH_RE.fullmatch(path) is not None
+            or path in {AGENT_ENROLL_PATH, AGENT_CERTIFICATES_PATH}
+        ):
             return True
         return method == "PUT" and _REPORT_ARTIFACT_PATH_RE.fullmatch(path) is not None
 
@@ -204,6 +211,59 @@ class OutboundAgentHttpClient(AgentBackendChannel):
         if json_body:
             headers["Content-Type"] = "application/json"
         return headers
+
+    @staticmethod
+    def _json_object(response: AgentProtocolResponse, label: str) -> dict[str, Any]:
+        try:
+            value = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentSecurityError(f"invalid {label} response") from exc
+        if not isinstance(value, dict):
+            raise AgentSecurityError(f"invalid {label} response")
+        return value
+
+    def runtime_config(self, machine_token: str) -> dict[str, Any]:
+        response = self.sender.request(
+            "GET", AGENT_RUNTIME_CONFIG_PATH, headers=self._headers(machine_token)
+        )
+        if response.status != 200:
+            raise AgentAuthError(
+                "agent backend rejected runtime config"
+                if response.status in (401, 403)
+                else f"agent backend runtime config HTTP {response.status}"
+            )
+        return self._json_object(response, "runtime config")
+
+    def report_certificates(
+        self,
+        machine_token: str,
+        *,
+        cryptopro_available: bool,
+        selected_thumbprint: str | None,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        payload = {
+            "cryptopro_available": bool(cryptopro_available),
+            "selected_thumbprint": selected_thumbprint,
+            "candidates": candidates,
+        }
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        response = self.sender.request(
+            "POST",
+            AGENT_CERTIFICATES_PATH,
+            headers={
+                **self._headers(machine_token, json_body=True),
+                "Content-Length": str(len(body)),
+            },
+            body=body,
+        )
+        if response.status != 200:
+            raise AgentAuthError(
+                "agent backend rejected certificate inventory"
+                if response.status in (401, 403)
+                else f"agent backend certificate inventory HTTP {response.status}"
+            )
+        return self._json_object(response, "certificate inventory")
 
     def check_auth(self, machine_token: str) -> None:
         response = self.sender.request(
