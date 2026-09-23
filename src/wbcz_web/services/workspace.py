@@ -10,9 +10,9 @@ from wbcz.document_assembler import DocumentAssemblyManualReview
 from wbcz.models import Decision
 from wbcz.write_pipeline import InvalidWriteOperation, WriteState
 from wbcz_web.config import WebConfig
-from wbcz_web.models import AgentJobRecord, BootstrapRecord, CheckRecord, WriteOperationRecord
+from wbcz_web.models import AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun, WriteOperationRecord
 from wbcz_web.repositories import AuditRepository, ImportRepository
-from wbcz_web.services.agent_orchestration import CONTROL_CIS, POLL, RECONCILIATION_CIS, WRITE
+from wbcz_web.services.agent_orchestration import CONTROL_CIS, CONTROL_CIS_BATCH, POLL, RECONCILIATION_CIS, WRITE
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.imports import import_view, record_to_event
 from wbcz_web.services.tenant import active_tenant, optional_tenant
@@ -250,8 +250,27 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
     imports = ImportRepository(db)
     if imports.get(import_id) is None:
         raise KeyError("Импорт не найден")
+    import_row = imports.get(import_id)
+    assert import_row is not None
     records = imports.ordered_event_records(import_id)
+    source_rows = imports.event_row_numbers(import_id)
     event_ids = [row.event_id for row in records]
+    latest_batch_run = db.scalar(
+        select(ControlRun)
+        .where(ControlRun.import_id == import_id)
+        .order_by(ControlRun.created_at.desc(), ControlRun.id.desc())
+        .limit(1)
+    )
+    batch_pending = bool(
+        latest_batch_run
+        and db.scalar(
+            select(AgentJobRecord.job_id).where(
+                AgentJobRecord.control_run_id == latest_batch_run.id,
+                AgentJobRecord.purpose == CONTROL_CIS_BATCH,
+                AgentJobRecord.state.in_(("PENDING", "LEASED")),
+            ).limit(1)
+        )
+    )
     checks, writes, jobs = _batch_state(db, event_ids)
     result: list[dict[str, Any]] = []
     scope = optional_tenant(db)
@@ -267,6 +286,8 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
             if (row.event_id, purpose) in jobs
         }
         ui_state, state_label, filter_group, result_label = _pipeline_state(check, write, event_jobs)
+        if check is None and batch_pending:
+            ui_state, state_label, filter_group, result_label = "CHECKING", "Проверяем КИЗ", "PROCESSING", "Проверка"
         reason = check.reason if check else None
         error = check.error if check else None
         attention_title, attention_detail, user_action = _guidance(reason, error)
@@ -330,6 +351,8 @@ def workspace_items(db: Session, import_id: str) -> list[dict[str, Any]]:
                     "amount": str(event.amount),
                     "currency": event.currency,
                     "reason_code": reason,
+                    "source_row_number": source_rows.get(row.event_id),
+                    "source_file": import_row.filename,
                 },
             }
         )
