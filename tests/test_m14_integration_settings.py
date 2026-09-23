@@ -7,7 +7,7 @@ import os
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from wbcz.models import canonical_json
