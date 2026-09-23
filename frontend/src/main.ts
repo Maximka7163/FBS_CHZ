@@ -636,7 +636,7 @@ function renderIntegrations(
       ${primaryAgent ? "" : '<button id="create-enrollment" class="secondary-button">Создать код подключения</button>'}
       ${enrollmentIntent ? `<div class="enrollment-code"><span>Одноразовый код, действует 10 минут</span><code>${esc(enrollmentIntent.enrollment_token)}</code><button id="copy-enrollment" class="quiet-button">Копировать</button></div>` : ""}
     </div>
-    <div class="integration-subsection"><strong>CryptoPro / УКЭП</strong>${candidateMarkup}</div>
+    <div class="integration-subsection"><strong>CryptoPro / УКЭП</strong><p>CryptoPro: ${cert.cryptopro_available ? "доступен" : "не подтверждён"}</p>${candidateMarkup}</div>
     ${trueApi ? '<button id="check-true-api" class="secondary-button">Проверить готовность</button>' : ""}
     <p class="integration-note">${trueApi?.real_read_authorized ? "Read-only production auth разрешён." : "Первый реальный /auth/key → УКЭП → /simpleSignIn → /cises/info ожидает отдельного разрешения."}</p>`;
 
@@ -647,7 +647,7 @@ function renderIntegrations(
     : `<div class="inline-form"><input id="wb-token" type="password" placeholder="WB API token"><button id="save-wb-token" class="secondary-button">Сохранить</button></div><p class="integration-note">После сохранения статус будет «Токен сохранён», а не «Подключено».</p>`;
 
   const ozonBody = ozon
-    ? `<p class="integration-note">Данные доступа сохранены</p><p class="integration-limit">Чтение данных Ozon сейчас недоступно</p>
+    ? `<p class="integration-note">${ozon.secret_configured ? "Данные доступа сохранены" : "API Key не сохранён"}</p><p class="integration-limit">Чтение данных Ozon сейчас недоступно</p>
        <div class="inline-form"><input id="ozon-key" type="password" placeholder="Новый API Key"><button id="save-ozon-key" class="secondary-button">Заменить</button></div><button id="revoke-ozon" class="quiet-button">Отозвать</button>`
     : `<div class="stack-form"><input id="ozon-client" placeholder="Client-Id"><input id="ozon-key" type="password" placeholder="API Key"><button id="save-ozon" class="secondary-button">Сохранить</button></div><p class="integration-limit">Чтение данных Ozon сейчас недоступно</p>`;
 
