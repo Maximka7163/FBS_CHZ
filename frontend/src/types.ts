@@ -140,3 +140,100 @@ export interface EventDetail {
   }>;
   history_order_ambiguous: boolean;
 }
+
+
+export interface IntegrationItem {
+  id: string;
+  type: "true-api" | "wb" | "ozon" | "suz";
+  display_name: string;
+  configuration_status: string;
+  runtime_status: string;
+  contract_status: string;
+  feature_gate_status: string;
+  enabled: boolean;
+  secret_configured: boolean | null;
+  last_check_at: string | null;
+  last_check_status: string | null;
+  error_code: string | null;
+  blockers: string[];
+  read_only?: boolean | null;
+  real_read_authorized?: boolean | null;
+  certificate?: {
+    thumbprint: string | null;
+    valid_to: string | null;
+    status: string;
+    expiry_state: string;
+    selection_state: string;
+  };
+  local_config_state?: string;
+  wire_readiness?: string;
+}
+
+export interface AgentBindingStatus {
+  id: string;
+  display_name: string;
+  runtime_status: "ONLINE" | "STALE" | "OFFLINE" | string;
+  last_seen_at: string | null;
+  last_poll_at: string | null;
+  agent_version: string | null;
+  capabilities: Record<string, unknown>;
+}
+
+export interface CertificateCandidate {
+  id: string;
+  thumbprint: string;
+  subject: string | null;
+  certificate_inn: string | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  has_private_key: boolean;
+  crypto_provider: string | null;
+  compatibility: string;
+  match_state: string;
+  expiry_state: string;
+  readiness_state: string;
+  reason_code: string | null;
+}
+
+export interface CertificateStatus {
+  status: string;
+  reason_code: string | null;
+  observation: CertificateCandidate | null;
+  candidates: CertificateCandidate[];
+  selection_state: string;
+  desired_certificate_thumbprint: string | null;
+  cryptopro_available?: boolean;
+}
+
+export interface EnrollmentIntent {
+  enrollment_id: string;
+  enrollment_token: string;
+  expires_at: string;
+  requested_protocol_version: string;
+}
+
+export interface CisInventoryRequest {
+  request_id: string;
+  job_type: string;
+  status: "pending" | "running" | "completed" | "failed";
+  source: string;
+  result?: {
+    type?: string;
+    items?: Array<{
+      normalized?: {
+        requested_cis?: string;
+        cis?: string | null;
+        gtin?: string | null;
+        product_name?: string | null;
+        product_group?: string | null;
+        owner_inn?: string | null;
+        owner_name?: string | null;
+        status?: string | null;
+        status_ex?: string | null;
+        withdraw_reason?: string | null;
+      } | null;
+      item_error?: { code?: string | null; message?: string | null } | null;
+    }>;
+  } | null;
+  fetched_at?: string | null;
+}
