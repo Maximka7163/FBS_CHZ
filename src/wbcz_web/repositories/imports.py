@@ -21,6 +21,13 @@ class ImportRepository(Repository):
   if self.get(import_id) is None:return []
   q=select(EventRecord).join(ImportRow,ImportRow.event_id==EventRecord.event_id).where(ImportRow.import_id==import_id,ImportRow.event_id.is_not(None))
   return list(self.db.scalars(self._events(q).order_by(ImportRow.row_number)))
+ def event_row_numbers(self,import_id:str):
+  if self.get(import_id) is None:return {}
+  rows=self.db.execute(select(ImportRow.event_id,ImportRow.row_number).where(ImportRow.import_id==import_id,ImportRow.event_id.is_not(None)).order_by(ImportRow.row_number)).all()
+  result={}
+  for event_id,row_number in rows:
+   if event_id not in result:result[event_id]=row_number
+  return result
  def import_event_ids(self,import_id:str):
   if self.get(import_id) is None:return []
   values=list(self.db.scalars(select(ImportRow.event_id).where(ImportRow.import_id==import_id,ImportRow.event_id.is_not(None)).order_by(ImportRow.row_number)))
