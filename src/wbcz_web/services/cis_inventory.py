@@ -29,6 +29,8 @@ class CisInventoryService:
     def __init__(self, db: Session, config: WebConfig) -> None:
         if not config.agent_enabled:
             raise CisInventoryUnavailable("Windows agent is disabled")
+        if config.environment == "production" and not config.true_api_real_read_enabled:
+            raise CisInventoryUnavailable("REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED")
         self.db = db
         self.config = config
         self.jobs = SqlAlchemyAgentJobStore(db, lease_seconds=config.agent_job_lease_seconds)
