@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Any, Callable, Iterable, Protocol
 
-from wbcz.cis_inventory import safe_transport_error
+from wbcz.cis_inventory import decision_state_from_cis_info, safe_transport_error
 from wbcz.models import KiState
 from wbcz.true_api import TrueApiError
 
@@ -567,6 +567,138 @@ class ReadOnlyTrueApiTransport:
         return None
 
 
+class WindowsCryptoProCertificateDiscovery:
+    """Enumerate safe CurrentUser\\My certificate metadata without signing or exporting keys."""
+
+    def __init__(
+        self,
+        cryptcp_path: str | Path | None = None,
+        *,
+        powershell: str = "powershell.exe",
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
+        self._explicit_cryptcp = Path(cryptcp_path) if cryptcp_path else None
+        self.powershell = powershell
+        self._runner = runner
+
+    def _cryptcp_available(self) -> bool:
+        try:
+            _find_cryptopro_binary(self._explicit_cryptcp, "cryptcp.exe")
+            return True
+        except Exception:
+            return False
+
+    def discover(self) -> dict[str, Any]:
+        if os.name != "nt" and self._runner is subprocess.run:
+            raise TrueApiError("Certificate discovery requires Windows")
+        script = r'''
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class WbczCertDiscoveryNative {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct CRYPT_KEY_PROV_INFO {
+    public IntPtr pwszContainerName;
+    public IntPtr pwszProvName;
+    public UInt32 dwProvType;
+    public UInt32 dwFlags;
+    public UInt32 cProvParam;
+    public IntPtr rgProvParam;
+    public UInt32 dwKeySpec;
+  }
+  [DllImport("crypt32.dll", SetLastError=true)]
+  public static extern bool CertGetCertificateContextProperty(
+    IntPtr pCertContext, UInt32 dwPropId, IntPtr pvData, ref UInt32 pcbData);
+}
+"@
+$store=New-Object System.Security.Cryptography.X509Certificates.X509Store('My','CurrentUser')
+$items=@()
+try {
+  $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+  foreach ($cert in $store.Certificates) {
+    $provider=$null
+    $size=[uint32]0
+    if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,[IntPtr]::Zero,[ref]$size) -and $size -gt 0) {
+      $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal([int]$size)
+      try {
+        if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,$ptr,[ref]$size)) {
+          $info=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[type][WbczCertDiscoveryNative+CRYPT_KEY_PROV_INFO])
+          $provider=[Runtime.InteropServices.Marshal]::PtrToStringUni($info.pwszProvName)
+        }
+      } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }
+    }
+    $items += [pscustomobject]@{
+      thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
+      subject=$cert.Subject
+      issuer=$cert.Issuer
+      serial=$cert.GetSerialNumberString()
+      hasPrivateKey=$cert.HasPrivateKey
+      notBefore=$cert.NotBefore.ToUniversalTime().ToString('o')
+      notAfter=$cert.NotAfter.ToUniversalTime().ToString('o')
+      publicKeyOid=$cert.PublicKey.Oid.Value
+      signatureOid=$cert.SignatureAlgorithm.Value
+      providerName=$provider
+    }
+  }
+} finally { $store.Close() }
+[pscustomobject]@{certificates=@($items)} | ConvertTo-Json -Compress -Depth 4
+'''
+        completed = self._runner(
+            [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise TrueApiError((completed.stderr.strip() or "Certificate discovery failed")[:1000])
+        try:
+            root = json.loads(completed.stdout.strip())
+        except json.JSONDecodeError as exc:
+            raise TrueApiError("Certificate discovery returned invalid data") from exc
+        rows = root.get("certificates") if isinstance(root, dict) else None
+        if not isinstance(rows, list):
+            raise TrueApiError("Certificate discovery response misses certificates")
+        cryptcp_available = self._cryptcp_available()
+        candidates: list[dict[str, Any]] = []
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            thumbprint = re.sub(r"[^0-9A-F]", "", str(raw.get("thumbprint") or "").upper())
+            if not thumbprint:
+                continue
+            subject = str(raw.get("subject") or "")[:2000]
+            provider = str(raw.get("providerName") or "")[:160]
+            provider_key = provider.casefold().replace("-", " ")
+            public_key_oid = str(raw.get("publicKeyOid") or "")[:128]
+            compatible = (
+                cryptcp_available
+                and public_key_oid in _GOST_PUBLIC_KEY_OIDS
+                and ("crypto pro" in provider_key or "cryptopro" in provider_key)
+            )
+            match = re.search(
+                r"(?:OID\.1\.2\.643\.100\.4|INN|ИНН)\s*[=:]\s*(\d{10}|\d{12})",
+                subject,
+                re.IGNORECASE,
+            )
+            candidates.append({
+                "thumbprint": thumbprint[:160],
+                "subject": subject or None,
+                "issuer": str(raw.get("issuer") or "")[:2000] or None,
+                "serial": str(raw.get("serial") or "")[:160] or None,
+                "certificate_inn": match.group(1) if match else None,
+                "valid_from": str(raw.get("notBefore") or "")[:64] or None,
+                "valid_to": str(raw.get("notAfter") or "")[:64] or None,
+                "has_private_key": bool(raw.get("hasPrivateKey")),
+                "public_key_oid": public_key_oid or None,
+                "signature_oid": str(raw.get("signatureOid") or "")[:128] or None,
+                "crypto_provider": provider or None,
+                "compatibility": "GOST_CRYPTOPRO" if compatible else "UNSUPPORTED",
+            })
+        return {"cryptopro_available": cryptcp_available, "candidates": candidates}
+
+
 class WindowsCryptoProCertificateInspector:
     """Safe local diagnostics for the selected CurrentUser\\My UKEP cert."""
 
@@ -899,33 +1031,7 @@ class TrueApiCisesInfoAdapter:
         if isinstance(echoed, str) and echoed != requested_cis:
             raise TrueApiProtocolError("cises/info returned a mismatched KI")
 
-        raw_status = info.get("status")
-        status = self._STATUS.get(
-            str(raw_status).upper(), f"UNKNOWN:{raw_status}"
-        )
-        raw_status_ex = info.get("statusEx")
-        if raw_status_ex is None or str(raw_status_ex).upper() in {"", "EMPTY"}:
-            status_ex = None
-        else:
-            status_ex = f"UNKNOWN:{raw_status_ex}"
-
-        raw_pg = info.get("productGroup")
-        product_group = raw_pg if isinstance(raw_pg, str) and raw_pg else "lp"
-        return KiState(
-            status=status,
-            statusEx=status_ex,
-            withdrawReason=(
-                info.get("withdrawReason")
-                if isinstance(info.get("withdrawReason"), str)
-                else None
-            ),
-            ownerInn=(
-                info.get("ownerInn")
-                if isinstance(info.get("ownerInn"), str)
-                else None
-            ),
-            productGroup=product_group,
-        )
+        return decision_state_from_cis_info(info)
 
 
 class LiveTrueApiClient:
