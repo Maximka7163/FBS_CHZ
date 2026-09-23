@@ -65,6 +65,7 @@ class WebConfig:
     certificate_expiry_critical_days: int = 7
     certificate_expiry_soon_days: int = 30
     true_api_write_enabled: bool = False
+    true_api_real_read_enabled: bool = False
     fbs_dry_run_only: bool = False
     true_api_reports_enabled: bool = False
     report_artifact_root: str | None = None
@@ -442,6 +443,7 @@ class WebConfig:
             certificate_expiry_critical_days=int(os.getenv("WBCZ_CERTIFICATE_EXPIRY_CRITICAL_DAYS", "7")),
             certificate_expiry_soon_days=int(os.getenv("WBCZ_CERTIFICATE_EXPIRY_SOON_DAYS", "30")),
             true_api_write_enabled=_env_bool("WBCZ_TRUE_API_WRITE_ENABLED", False),
+            true_api_real_read_enabled=_env_bool("WBCZ_TRUE_API_REAL_READ_ENABLED", False),
             fbs_dry_run_only=_env_bool("WBCZ_FBS_DRY_RUN_ONLY", False),
             true_api_reports_enabled=_env_bool("WBCZ_TRUE_API_REPORTS_ENABLED", False),
             report_artifact_root=os.getenv("WBCZ_REPORT_ARTIFACT_ROOT", "").strip() or None,
