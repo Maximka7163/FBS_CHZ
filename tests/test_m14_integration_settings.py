@@ -490,10 +490,24 @@ def test_certificate_selection_is_pending_until_matching_local_observation(db: S
     conn = service.create_true_api(
         environment="PRODUCTION", primary_agent_binding_id=binding.id, user_id=user.id
     )
-    desired = "B" * 40
+    other, desired = "A" * 40, "B" * 40
+    service.record_certificate_inventory(
+        binding.id,
+        candidates=[_p0_candidate(participant.inn, other), _p0_candidate(participant.inn, desired)],
+        selected_thumbprint=None,
+        cryptopro_available=True,
+    )
     selected = service.select_certificate(conn["id"], desired, user_id=user.id)
     assert selected["requires_local_action"] is True
     assert selected["certificate"]["selection_state"] == "PENDING_LOCAL_APPLY"
+    assert service.certificate_status()["status"] == "SELECTED_PENDING_APPLY"
+    service.record_certificate_inventory(
+        binding.id,
+        candidates=[_p0_candidate(participant.inn, other), _p0_candidate(participant.inn, desired)],
+        selected_thumbprint=desired,
+        cryptopro_available=True,
+    )
+    assert service.certificate_status()["status"] == "ACTIVE_READY"
     assert not hasattr(db.get(TrueApiConnectionRecord, conn["id"]), "pin")
     assert not hasattr(db.get(TrueApiConnectionRecord, conn["id"]), "private_key")
 
@@ -683,7 +697,7 @@ def test_p0_certificate_inventory_auto_select_multiple_and_invalid_candidates(db
         cryptopro_available=True,
     )
     assert applied["selection_state"] == "READY"
-    assert service.certificate_status()["status"] == "READY"
+    assert service.certificate_status()["status"] == "ACTIVE_READY"
 
     user2, org2, participant2 = _tenant(db, "cert-multiple", "500100732259")
     _scope(db, user2, org2, participant2)
@@ -733,6 +747,141 @@ def test_p0_certificate_inventory_auto_select_multiple_and_invalid_candidates(db
     reasons = {item["reason_code"] for item in bad["candidates"]}
     assert {"CERTIFICATE_NO_PRIVATE_KEY", "CERTIFICATE_EXPIRED", "CERTIFICATE_PARTICIPANT_MISMATCH"} <= reasons
     assert not any(item["readiness_state"] == "READY" for item in bad["candidates"])
+
+
+def test_certificate_selection_uses_only_current_eligible_generation(db: Session):
+    user, org, participant = _tenant(db, "cert-generation", "7707083893")
+    _scope(db, user, org, participant)
+    binding, _ = AgentBindingService(db).create(
+        installation_id=str(uuid4()), display_name="Generation Agent", user_id=user.id
+    )
+    service = IntegrationSettingsService(db, _config(), secret_provider=ReadOnlySecretProvider())
+    conn = service.create_true_api(
+        environment="PRODUCTION", primary_agent_binding_id=binding.id, user_id=user.id
+    )
+
+    eligible = "1" * 40
+    invalid = "2" * 40
+    first = service.record_certificate_inventory(
+        binding.id,
+        candidates=[
+            _p0_candidate(participant.inn, eligible),
+            _p0_candidate(participant.inn, invalid, has_private_key=False),
+        ],
+        selected_thumbprint=None,
+        cryptopro_available=True,
+    )
+    assert first["auto_selected"] is True
+    assert first["desired_certificate_thumbprint"] == eligible
+    status = service.certificate_status()
+    assert status["eligible_count"] == 1
+    assert status["status"] == "SELECTED_PENDING_APPLY"
+    assert {item["thumbprint"] for item in status["candidates"]} == {eligible, invalid}
+
+    newer_a, newer_b = "3" * 40, "4" * 40
+    service.record_certificate_inventory(
+        binding.id,
+        candidates=[
+            _p0_candidate(participant.inn, newer_a),
+            _p0_candidate(participant.inn, newer_b),
+        ],
+        selected_thumbprint=None,
+        cryptopro_available=True,
+    )
+    status = service.certificate_status()
+    assert {item["thumbprint"] for item in status["candidates"]} == {newer_a, newer_b}
+    assert eligible not in {item["thumbprint"] for item in status["candidates"]}
+    assert status["selection_state"] == "MISMATCH"
+    with pytest.raises(ValueError, match="current ready"):
+        service.select_certificate(conn["id"], eligible, user_id=user.id)
+
+
+def test_disappeared_active_certificate_is_not_selectable(db: Session):
+    user, org, participant = _tenant(db, "cert-disappeared", "500100732259")
+    _scope(db, user, org, participant)
+    binding, _ = AgentBindingService(db).create(
+        installation_id=str(uuid4()), display_name="Disappearing Agent", user_id=user.id
+    )
+    service = IntegrationSettingsService(db, _config(), secret_provider=ReadOnlySecretProvider())
+    conn = service.create_true_api(
+        environment="PRODUCTION", primary_agent_binding_id=binding.id, user_id=user.id
+    )
+    thumb = "5" * 40
+    service.record_certificate_inventory(
+        binding.id,
+        candidates=[_p0_candidate(participant.inn, thumb)],
+        selected_thumbprint=thumb,
+        cryptopro_available=True,
+    )
+    assert service.certificate_status()["status"] == "ACTIVE_READY"
+
+    service.record_certificate_inventory(
+        binding.id, candidates=[], selected_thumbprint=None, cryptopro_available=True
+    )
+    status = service.certificate_status()
+    assert status["status"] == "NOT_READY"
+    assert status["eligible_count"] == 0
+    assert status["candidates"] == []
+    assert status["selection_state"] == "MISMATCH"
+    with pytest.raises(ValueError, match="current ready"):
+        service.select_certificate(conn["id"], thumb, user_id=user.id)
+
+
+def test_invalid_certificates_do_not_force_selection_required(db: Session):
+    user, org, participant = _tenant(db, "cert-invalid-only", "7811088331")
+    _scope(db, user, org, participant)
+    binding, _ = AgentBindingService(db).create(
+        installation_id=str(uuid4()), display_name="Invalid-only Agent", user_id=user.id
+    )
+    service = IntegrationSettingsService(db, _config(), secret_provider=ReadOnlySecretProvider())
+    service.create_true_api(
+        environment="PRODUCTION", primary_agent_binding_id=binding.id, user_id=user.id
+    )
+    service.record_certificate_inventory(
+        binding.id,
+        candidates=[
+            _p0_candidate(participant.inn, "6" * 40, has_private_key=False),
+            _p0_candidate(participant.inn, "7" * 40, valid_to=(NOW() - timedelta(days=1)).isoformat()),
+            _p0_candidate("7707083893", "8" * 40),
+        ],
+        selected_thumbprint=None,
+        cryptopro_available=True,
+    )
+    status = service.certificate_status()
+    assert status["eligible_count"] == 0
+    assert status["status"] == "NOT_READY"
+    assert status["reason_code"] != "CERTIFICATE_SELECTION_REQUIRED"
+
+
+def test_ozon_secret_truthfulness_across_save_revoke_and_failed_pending_state(db: Session):
+    user, org, participant = _tenant(db, "ozon-truth", "7707083893")
+    _scope(db, user, org, participant)
+    provider = InMemorySecretProvider()
+    service = IntegrationSettingsService(db, _config(), secret_provider=provider)
+    dto = service.create_ozon(
+        {"display_name": "Ozon truth", "client_id": "CID-TRUTH", "environment": "PRODUCTION"},
+        user_id=user.id,
+    )
+    row = db.get(OzonConnectionRecord, int(dto["id"]))
+    assert service.dto("ozon", row)["secret_configured"] is False
+    assert service.dto("ozon", row)["configuration_status"] == "INCOMPLETE"
+
+    saved = service.set_secret("ozon", dto["id"], "OZON-TRUTH-SECRET", user_id=user.id)
+    assert saved["secret_configured"] is True
+    assert saved["configuration_status"] == "CONFIGURED"
+
+    revoked = service.revoke_secret("ozon", dto["id"], user_id=user.id)
+    assert revoked["secret_configured"] is False
+    assert revoked["configuration_status"] == "INCOMPLETE"
+
+    row = db.get(OzonConnectionRecord, int(dto["id"]))
+    row.secret_rotation_state = "PENDING_FAILED"
+    row.pending_secret_ref = "pending-only-ref"
+    row.pending_secret_version = "pending-only-version"
+    db.flush()
+    incomplete = service.dto("ozon", row)
+    assert incomplete["secret_configured"] is False
+    assert incomplete["configuration_status"] == "INCOMPLETE"
 
 
 def test_p0_true_api_check_stops_before_real_auth_until_authorized(db: Session):

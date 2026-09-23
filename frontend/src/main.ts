@@ -620,8 +620,8 @@ function renderIntegrations(
   const candidateMarkup = cert.candidates.length
     ? cert.candidates.map((candidate) => `<div class="certificate-row">
         <div><b>${esc(candidate.subject || candidate.thumbprint)}</b><small>${esc(candidate.certificate_inn || "ИНН не извлечён")} · до ${esc(candidate.valid_to || "—")}</small></div>
-        <span class="mini-state">${esc(candidate.readiness_state === "READY" ? "Готов" : candidate.reason_code || "Не готов")}</span>
-        ${trueApi && candidate.readiness_state === "READY" && cert.candidates.length > 1
+        <span class="mini-state">${esc(candidate.readiness_state === "READY" ? "Подходит" : candidate.reason_code || "Не готов")}</span>
+        ${trueApi && candidate.readiness_state === "READY" && cert.eligible_count > 1
           ? `<button class="quiet-button" data-select-cert="${esc(candidate.thumbprint)}">Выбрать</button>`
           : ""}
       </div>`).join("")
@@ -636,7 +636,7 @@ function renderIntegrations(
       ${primaryAgent ? "" : '<button id="create-enrollment" class="secondary-button">Создать код подключения</button>'}
       ${enrollmentIntent ? `<div class="enrollment-code"><span>Одноразовый код, действует 10 минут</span><code>${esc(enrollmentIntent.enrollment_token)}</code><button id="copy-enrollment" class="quiet-button">Копировать</button></div>` : ""}
     </div>
-    <div class="integration-subsection"><strong>CryptoPro / УКЭП</strong><p>CryptoPro: ${cert.cryptopro_available ? "доступен" : "не подтверждён"}</p>${candidateMarkup}</div>
+    <div class="integration-subsection"><strong>CryptoPro / УКЭП</strong><p>CryptoPro: ${cert.cryptopro_available ? "доступен" : "не подтверждён"}</p><p>${cert.status === "ACTIVE_READY" ? "Выбранный сертификат применён агентом." : cert.status === "SELECTED_PENDING_APPLY" ? "Сертификат выбран; ожидается подтверждение применения агентом." : cert.status === "SELECTION_REQUIRED" ? "Нужно выбрать один из подходящих сертификатов." : "Финальная готовность сертификата не подтверждена."}</p>${candidateMarkup}</div>
     ${trueApi ? '<button id="check-true-api" class="secondary-button">Проверить готовность</button>' : ""}
     <p class="integration-note">${trueApi?.real_read_authorized ? "Read-only production auth разрешён." : "Первый реальный /auth/key → УКЭП → /simpleSignIn → /cises/info ожидает отдельного разрешения."}</p>`;
 

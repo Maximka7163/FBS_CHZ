@@ -836,7 +836,7 @@ class IntegrationSettingsService:
             cert_ready = bool(
                 observation
                 and observation.get("readiness_state") == "READY"
-                and status.get("selection_state") == "READY"
+                and status.get("status") == "ACTIVE_READY"
             )
             reason = (
                 "REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED"
@@ -1286,6 +1286,7 @@ class IntegrationSettingsService:
             re.sub(r"[^0-9A-F]", "", selected_thumbprint.upper())[:160]
             if selected_thumbprint else None
         )
+        eligible = [row for row in observed if row.readiness_state == "READY"]
         conn = self.db.scalar(select(TrueApiConnectionRecord).where(
             TrueApiConnectionRecord.organisation_id == self.scope.organisation_id,
             TrueApiConnectionRecord.participant_id == self.scope.participant_id,
@@ -1294,8 +1295,8 @@ class IntegrationSettingsService:
         auto_selected = False
         if conn is not None:
             by_thumb = {row.thumbprint: row for row in observed}
-            if not conn.desired_certificate_ref and len(observed) == 1 and observed[0].readiness_state == "READY":
-                conn.desired_certificate_ref = observed[0].thumbprint
+            if not conn.desired_certificate_ref and len(eligible) == 1:
+                conn.desired_certificate_ref = eligible[0].thumbprint
                 conn.certificate_selection_state = "PENDING_LOCAL_APPLY"
                 auto_selected = True
             if conn.desired_certificate_ref:
@@ -1310,16 +1311,23 @@ class IntegrationSettingsService:
                         conn.observed_certificate_observation_id = desired.id
                     else:
                         conn.certificate_selection_state = "MISMATCH"
+                        conn.observed_certificate_observation_id = None
                 elif desired is None or desired.readiness_state != "READY":
                     conn.certificate_selection_state = "MISMATCH"
+                    conn.observed_certificate_observation_id = None
                 else:
                     conn.certificate_selection_state = "PENDING_LOCAL_APPLY"
+                    conn.observed_certificate_observation_id = None
 
         binding.capabilities_sanitized = {
             **dict(binding.capabilities_sanitized or {}),
             "cryptopro_available": bool(cryptopro_available),
             "certificate_candidate_count": len(observed),
+            "certificate_eligible_count": len(eligible),
             "certificate_discovery": True,
+            "certificate_discovery_observed_at": _iso(now),
+            "certificate_current_thumbprints": [row.thumbprint for row in observed],
+            "certificate_eligible_thumbprints": [row.thumbprint for row in eligible],
         }
         self.db.flush()
 
@@ -1360,6 +1368,13 @@ class IntegrationSettingsService:
         binding = AgentBindingService(self.db).primary_for_active_scope()
         if binding is None:
             raise ValueError("active Windows agent is required")
+        current_thumbprints = {
+            str(value)
+            for value in (binding.capabilities_sanitized or {}).get("certificate_current_thumbprints", [])
+            if isinstance(value, str)
+        }
+        if normalized not in current_thumbprints:
+            raise ValueError("certificate is not a current ready participant-matching candidate")
         candidate = self.db.scalar(select(AgentCertificateObservationRecord).where(
             AgentCertificateObservationRecord.organisation_id == self.scope.organisation_id,
             AgentCertificateObservationRecord.participant_id == self.scope.participant_id,
@@ -1382,34 +1397,45 @@ class IntegrationSettingsService:
         binding = AgentBindingService(self.db).primary_for_active_scope()
         if binding is None:
             return {
-                "status": "UNKNOWN",
+                "status": "NOT_READY",
                 "reason_code": "AGENT_OFFLINE",
                 "observation": None,
                 "candidates": [],
+                "eligible_count": 0,
                 "selection_state": "NONE",
                 "desired_certificate_thumbprint": None,
+                "cryptopro_available": False,
+                "discovery_observed_at": None,
             }
-        rows = list(self.db.scalars(select(AgentCertificateObservationRecord).where(
-            AgentCertificateObservationRecord.organisation_id == self.scope.organisation_id,
-            AgentCertificateObservationRecord.participant_id == self.scope.participant_id,
-            AgentCertificateObservationRecord.agent_binding_id == binding.id,
-        ).order_by(AgentCertificateObservationRecord.observed_at.desc())))
-        latest: list[AgentCertificateObservationRecord] = []
-        seen: set[str] = set()
-        for row in rows:
-            if row.thumbprint in seen:
-                continue
-            seen.add(row.thumbprint)
-            latest.append(row)
+        capabilities = dict(binding.capabilities_sanitized or {})
+        current_thumbprints = [
+            str(value)
+            for value in capabilities.get("certificate_current_thumbprints", [])
+            if isinstance(value, str)
+        ]
+        current_set = set(current_thumbprints)
+        rows = (
+            list(self.db.scalars(select(AgentCertificateObservationRecord).where(
+                AgentCertificateObservationRecord.organisation_id == self.scope.organisation_id,
+                AgentCertificateObservationRecord.participant_id == self.scope.participant_id,
+                AgentCertificateObservationRecord.agent_binding_id == binding.id,
+                AgentCertificateObservationRecord.thumbprint.in_(current_set),
+            ).order_by(AgentCertificateObservationRecord.observed_at.desc())))
+            if current_set else []
+        )
+        by_thumb = {row.thumbprint: row for row in rows}
+        current = [by_thumb[thumb] for thumb in current_thumbprints if thumb in by_thumb]
+        eligible = [row for row in current if row.readiness_state == "READY"]
         conn = self.db.scalar(select(TrueApiConnectionRecord).where(
             TrueApiConnectionRecord.organisation_id == self.scope.organisation_id,
             TrueApiConnectionRecord.participant_id == self.scope.participant_id,
             TrueApiConnectionRecord.state != "ARCHIVED",
         ))
         desired = conn.desired_certificate_ref if conn else None
-        selected = next((row for row in latest if desired and row.thumbprint == desired), None)
-        if selected is None and len(latest) == 1:
-            selected = latest[0]
+        desired_current = next((row for row in current if desired and row.thumbprint == desired), None)
+        selected = desired_current if desired_current and desired_current.readiness_state == "READY" else None
+        if selected is None and not desired and len(eligible) == 1:
+            selected = eligible[0]
 
         def public(row: AgentCertificateObservationRecord) -> dict[str, Any]:
             return {
@@ -1432,24 +1458,36 @@ class IntegrationSettingsService:
             }
 
         selection_state = conn.certificate_selection_state if conn else "NONE"
-        if not latest:
-            status, reason = "UNKNOWN", "CERTIFICATE_NOT_FOUND"
-        elif len(latest) > 1 and not desired:
-            status, reason = "SELECTION_REQUIRED", "CERTIFICATE_SELECTION_REQUIRED"
-        elif selected is None:
+        if not current:
             status, reason = "NOT_READY", "CERTIFICATE_NOT_FOUND"
+        elif not eligible:
+            status = "NOT_READY"
+            reason = next((row.reason_code for row in current if row.reason_code), "CERTIFICATE_NOT_FOUND")
+        elif desired:
+            if selected is None:
+                status = "NOT_READY"
+                reason = desired_current.reason_code if desired_current and desired_current.reason_code else "CERTIFICATE_NOT_FOUND"
+            elif selection_state == "READY":
+                status, reason = "ACTIVE_READY", None
+            elif selection_state == "PENDING_LOCAL_APPLY":
+                status, reason = "SELECTED_PENDING_APPLY", None
+            else:
+                status, reason = "NOT_READY", "CERTIFICATE_NOT_FOUND"
+        elif len(eligible) > 1:
+            status, reason = "SELECTION_REQUIRED", "CERTIFICATE_SELECTION_REQUIRED"
         else:
-            status, reason = selected.readiness_state, selected.reason_code
+            status, reason = "DISCOVERED_READY", None
         return {
             "status": status,
             "reason_code": reason,
-            "observation": public(selected) if selected else None,
-            "candidates": [public(row) for row in latest],
+            "observation": public(selected or desired_current) if (selected or desired_current) else None,
+            "candidates": [public(row) for row in current],
+            "eligible_count": len(eligible),
             "selection_state": selection_state,
             "desired_certificate_thumbprint": desired,
-            "cryptopro_available": bool((binding.capabilities_sanitized or {}).get("cryptopro_available")),
+            "cryptopro_available": bool(capabilities.get("cryptopro_available")),
+            "discovery_observed_at": capabilities.get("certificate_discovery_observed_at"),
         }
-
 
     def health_dto(self, check: IntegrationHealthCheckRecord) -> dict[str, Any]:
         if check.organisation_id != self.scope.organisation_id or check.participant_id != self.scope.participant_id:

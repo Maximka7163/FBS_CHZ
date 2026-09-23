@@ -202,6 +202,7 @@ export interface CertificateStatus {
   reason_code: string | null;
   observation: CertificateCandidate | null;
   candidates: CertificateCandidate[];
+  eligible_count: number;
   selection_state: string;
   desired_certificate_thumbprint: string | null;
   cryptopro_available?: boolean;
