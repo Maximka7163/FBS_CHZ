@@ -99,6 +99,13 @@ def test_p0_agent_control_plane_is_certificate_only_until_read_gate() -> None:
     assert "CERTIFICATE_SELECTION_V1" in cli
 
 
+def test_p0_ignored_wb_rows_keep_import_row_provenance_without_becoming_errors() -> None:
+    imports = source("src/wbcz_web/services/imports.py")
+    assert "for row_number in parsed.ignored_rows:" in imports
+    assert "ImportRow(import_id=record.id,row_number=row_number,event_id=None,error=None)" in imports
+    assert "record.rejected_rows=len(parsed.issues)" in imports
+
+
 def test_p0_frontend_exposes_truthful_integration_and_wb_count_semantics() -> None:
     main = source("frontend/src/main.ts")
     api = source("frontend/src/api.ts")

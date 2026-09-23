@@ -590,3 +590,4 @@ def test_p0_reference_shape_423_rows_302_events_299_unique_ki(make_xlsx):
     assert sum(event.operation is Operation.SALE for event in events) == 108
     assert sum(event.operation is Operation.RETURN for event in events) == 194
     assert len({event.kiz for event in events}) == 299
+    assert len(events) - len({event.kiz for event in events}) == 3
