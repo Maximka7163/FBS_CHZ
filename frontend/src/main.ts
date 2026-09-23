@@ -8,6 +8,10 @@ import type {
   UserInfo,
   WorkspaceItem,
   WorkspaceView,
+  AgentBindingStatus,
+  CertificateStatus,
+  EnrollmentIntent,
+  IntegrationItem,
 } from "./types";
 import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
 
@@ -24,6 +28,8 @@ let uploading = false;
 let checking = false;
 let bulkBusy = false;
 let pollTimer: number | null = null;
+let enrollmentIntent: EnrollmentIntent | null = null;
+let kiLookupMessage = "";
 let viewToken = 0;
 
 const icons = {
@@ -51,6 +57,21 @@ function importFromUrl(): string | null {
   return new URL(window.location.href).searchParams.get("import");
 }
 
+function viewFromUrl(): string | null {
+  return new URL(window.location.href).searchParams.get("view");
+}
+
+function setViewUrl(view: string | null): void {
+  const url = new URL(window.location.href);
+  if (view) {
+    url.searchParams.set("view", view);
+    url.searchParams.delete("import");
+  } else {
+    url.searchParams.delete("view");
+  }
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 function setImportUrl(importId: string | null): void {
   const url = new URL(window.location.href);
   if (importId) url.searchParams.set("import", importId);
@@ -72,16 +93,29 @@ function shell(content: string): void {
   const initials = (user?.username || "").slice(0, 2).toUpperCase();
   app.innerHTML = `
     <header class="topbar">
-      <div class="brand">markflow</div>
+      <button id="nav-workspace" class="brand-button">markflow</button>
       <div class="topbar-right">
+        <button id="nav-settings" class="quiet-button">Настройки</button>
+        <span class="safety-indicator"><i></i>DRY RUN</span>
         <span class="safety-indicator"><i></i>Отправка в ЧЗ отключена</span>
         <span class="profile" title="${esc(user?.username || "")}">${esc(initials)}</span>
         <button id="logout" class="quiet-button">Выйти</button>
       </div>
     </header>
-    <aside class="rail" aria-label="Навигация"><div class="rail-mark">${icons.mark}</div></aside>
+    <aside class="rail" aria-label="Навигация"><button id="rail-workspace" class="rail-mark" title="WB FBS">${icons.mark}</button></aside>
     <main class="main">${content}</main>
     <div id="toast-root" class="toast-root" aria-live="polite"></div>`;
+  document.querySelector<HTMLButtonElement>("#nav-workspace")?.addEventListener("click", () => {
+    setViewUrl(null);
+    void restoreInitialView();
+  });
+  document.querySelector<HTMLButtonElement>("#rail-workspace")?.addEventListener("click", () => {
+    setViewUrl(null);
+    void restoreInitialView();
+  });
+  document.querySelector<HTMLButtonElement>("#nav-settings")?.addEventListener("click", () => {
+    void openIntegrations();
+  });
   document.querySelector<HTMLButtonElement>("#logout")?.addEventListener("click", async () => {
     stopPolling();
     await api.logout();
@@ -128,6 +162,53 @@ function uploadBlock(): string {
     <span>${uploading ? "Проверяем структуру на backend" : "или нажмите, чтобы выбрать файл"}</span>
   </section>
   <details class="wb-hint"><summary>Как получить файл WB</summary><p>В кабинете Wildberries выгрузите XLSX-архив FBS с КИЗ и данными операций. Загружайте исходный файл без ручного редактирования.</p></details>`;
+}
+
+function kiLookupBlock(): string {
+  return `<section class="ki-lookup-card">
+    <div><strong>Поиск КИ в Честном знаке</strong><span>Только чтение · свежий /cises/info</span></div>
+    <form id="ki-lookup-form">
+      <input id="ki-lookup-value" autocomplete="off" placeholder="Введите КИ">
+      <button class="secondary-button" type="submit">Проверить</button>
+    </form>
+    ${kiLookupMessage ? `<p class="ki-lookup-result">${esc(kiLookupMessage)}</p>` : ""}
+  </section>`;
+}
+
+async function runKiLookup(): Promise<void> {
+  const input = document.querySelector<HTMLInputElement>("#ki-lookup-value");
+  const value = input?.value.trim() || "";
+  if (!value) return;
+  kiLookupMessage = "Ставим безопасный read-only запрос…";
+  renderHome();
+  try {
+    const queued = await api.queueKiInfo([value]);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+      const status = await api.kiRequest(queued.request_id);
+      if (status.status === "completed") {
+        const item = status.result?.items?.[0];
+        const state = item?.normalized;
+        kiLookupMessage = state
+          ? `${state.status || "—"} · владелец ${state.owner_inn || "—"} · ${state.product_name || state.gtin || "товар"} · ${status.fetched_at || "сейчас"}`
+          : `ЧЗ не вернул состояние КИ${item?.item_error?.code ? ` · ${item.item_error.code}` : ""}`;
+        renderHome();
+        return;
+      }
+      if (status.status === "failed") {
+        kiLookupMessage = "Read-only запрос завершился ошибкой. Production writes не выполнялись.";
+        renderHome();
+        return;
+      }
+    }
+    kiLookupMessage = "Ответ ещё не получен. Повторите проверку позже.";
+  } catch (error) {
+    const raw = readError(error);
+    kiLookupMessage = raw.includes("REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED")
+      ? "Реальный read-only вход в ЧЗ подготовлен, но ещё не разрешён."
+      : raw;
+  }
+  renderHome();
 }
 
 function historySection(items: FileItem[], currentId: string | null): string {
@@ -267,6 +348,8 @@ function detailMarkup(item: WorkspaceItem, detail?: EventDetail): string {
       <div><span>Дата операции</span><b>${fmtDate(item.details.occurred_at)}</b></div>
       <div><span>Чек</span><b>${esc(item.details.receipt_number || "—")}</b></div>
       <div><span>Сумма</span><b>${esc(item.details.amount)} ${esc(item.details.currency)}</b></div>
+      <div><span>Источник WB</span><b>${esc(item.details.source_file || "—")} · строка ${esc(item.details.source_row_number || "—")}</b></div>
+      <div><span>Свежесть ЧЗ</span><b>${esc(item.fetched_at || "—")}</b></div>
       <div><span>status</span><b>${esc(item.status || "—")}</b></div>
       <div><span>statusEx</span><b>${esc(item.statusEx || "—")}</b></div>
       <div><span>Причина выбытия</span><b>${esc(item.withdrawReason || "—")}</b></div>
@@ -304,7 +387,7 @@ function workspaceMarkup(view: WorkspaceView): string {
   return `${pageHeading()}
   <section class="workspace-card">
     <div class="active-file-row">
-      <div class="active-file"><span class="file-icon">${icons.file}</span><div><strong>${esc(view.file.filename)}</strong><span>${view.file.unique_kiz} КИЗ</span></div></div>
+      <div class="active-file"><span class="file-icon">${icons.file}</span><div><strong>${esc(view.file.filename)}</strong><span>${view.file.unique_kiz} КИ · Все ${view.items.length}</span></div></div>
       <div class="file-actions"><button id="check" class="secondary-button" ${checking ? "disabled" : ""}>${checking ? '<span class="spinner"></span>Проверяем…' : "Проверить КИЗ"}</button><button id="replace" class="quiet-button">Другой файл</button></div>
     </div>
     ${statusBanner(view)}
@@ -482,6 +565,165 @@ function renderBulkModal(preview: BulkPreview): void {
   });
 }
 
+function integrationSemanticStatus(item: IntegrationItem | undefined): string {
+  if (!item) return "Не настроено";
+  if (item.error_code || item.runtime_status === "ERROR") return "Ошибка";
+  if (item.type === "suz" || item.type === "ozon" || item.contract_status === "BLOCKED") return "Ограничено";
+  if (item.runtime_status === "READY") return "Настроено";
+  if (item.configuration_status === "INCOMPLETE") return "Настройка";
+  return "Требуется проверка";
+}
+
+function integrationCard(
+  type: string,
+  title: string,
+  item: IntegrationItem | undefined,
+  body: string,
+): string {
+  return `<section class="integration-card" data-integration="${esc(type)}">
+    <div class="integration-card-head">
+      <div><h2>${esc(title)}</h2><span>${esc(integrationSemanticStatus(item))}</span></div>
+      ${item?.last_check_at ? `<small>Проверка: ${esc(fmtHistoryDate(item.last_check_at))}</small>` : ""}
+    </div>
+    ${body}
+  </section>`;
+}
+
+async function openIntegrations(): Promise<void> {
+  stopPolling();
+  setViewUrl("integrations");
+  shell(`<div class="page-heading"><h1>Настройки → Интеграции</h1></div><div class="settings-loading">Загружаем состояние интеграций…</div>`);
+  try {
+    const [list, agent, cert] = await Promise.all([
+      api.integrations(),
+      api.agentStatus(),
+      api.certificateStatus(),
+    ]);
+    renderIntegrations(list.items, agent.bindings, cert);
+  } catch (error) {
+    shell(`<div class="page-heading"><h1>Настройки → Интеграции</h1></div><div class="login-error">${esc(readError(error))}</div>`);
+  }
+}
+
+function renderIntegrations(
+  items: IntegrationItem[],
+  agents: AgentBindingStatus[],
+  cert: CertificateStatus,
+): void {
+  const byType = new Map(items.map((item) => [item.type, item]));
+  const trueApi = byType.get("true-api");
+  const wb = byType.get("wb");
+  const ozon = byType.get("ozon");
+  const suz = byType.get("suz");
+  const primaryAgent = agents[0];
+
+  const candidateMarkup = cert.candidates.length
+    ? cert.candidates.map((candidate) => `<div class="certificate-row">
+        <div><b>${esc(candidate.subject || candidate.thumbprint)}</b><small>${esc(candidate.certificate_inn || "ИНН не извлечён")} · до ${esc(candidate.valid_to || "—")}</small></div>
+        <span class="mini-state">${esc(candidate.readiness_state === "READY" ? "Готов" : candidate.reason_code || "Не готов")}</span>
+        ${trueApi && candidate.readiness_state === "READY" && cert.candidates.length > 1
+          ? `<button class="quiet-button" data-select-cert="${esc(candidate.thumbprint)}">Выбрать</button>`
+          : ""}
+      </div>`).join("")
+    : '<p class="integration-note">Сертификаты УКЭП пока не обнаружены агентом.</p>';
+
+  const trueBody = `
+    <div class="integration-notices"><b>Только чтение</b><span>Отправка документов в ЧЗ отключена</span></div>
+    ${trueApi ? "" : '<button id="create-true-api" class="secondary-button">Настроить True API</button>'}
+    <div class="integration-subsection">
+      <strong>Windows Agent</strong>
+      <p>${primaryAgent ? `${esc(primaryAgent.runtime_status)} · последний heartbeat ${esc(primaryAgent.last_seen_at || "—")}` : "Агент не зарегистрирован"}</p>
+      ${primaryAgent ? "" : '<button id="create-enrollment" class="secondary-button">Создать код подключения</button>'}
+      ${enrollmentIntent ? `<div class="enrollment-code"><span>Одноразовый код, действует 10 минут</span><code>${esc(enrollmentIntent.enrollment_token)}</code><button id="copy-enrollment" class="quiet-button">Копировать</button></div>` : ""}
+    </div>
+    <div class="integration-subsection"><strong>CryptoPro / УКЭП</strong>${candidateMarkup}</div>
+    ${trueApi ? '<button id="check-true-api" class="secondary-button">Проверить готовность</button>' : ""}
+    <p class="integration-note">${trueApi?.real_read_authorized ? "Read-only production auth разрешён." : "Первый реальный /auth/key → УКЭП → /simpleSignIn → /cises/info ожидает отдельного разрешения."}</p>`;
+
+  const wbBody = wb
+    ? `<p class="integration-note">${wb.secret_configured ? "Токен сохранён" : "Токен не сохранён"}</p>
+       <div class="inline-form"><input id="wb-token" type="password" placeholder="Новый WB token"><button id="save-wb-token" class="secondary-button">Заменить</button></div>
+       <div class="card-actions"><button id="check-wb" class="quiet-button">Проверить</button><button id="revoke-wb" class="quiet-button">Отозвать</button></div>`
+    : `<div class="inline-form"><input id="wb-token" type="password" placeholder="WB API token"><button id="save-wb-token" class="secondary-button">Сохранить</button></div><p class="integration-note">После сохранения статус будет «Токен сохранён», а не «Подключено».</p>`;
+
+  const ozonBody = ozon
+    ? `<p class="integration-note">Данные доступа сохранены</p><p class="integration-limit">Чтение данных Ozon сейчас недоступно</p>
+       <div class="inline-form"><input id="ozon-key" type="password" placeholder="Новый API Key"><button id="save-ozon-key" class="secondary-button">Заменить</button></div><button id="revoke-ozon" class="quiet-button">Отозвать</button>`
+    : `<div class="stack-form"><input id="ozon-client" placeholder="Client-Id"><input id="ozon-key" type="password" placeholder="API Key"><button id="save-ozon" class="secondary-button">Сохранить</button></div><p class="integration-limit">Чтение данных Ozon сейчас недоступно</p>`;
+
+  const suzBody = suz
+    ? '<p class="integration-note">Параметры СУЗ сохранены</p><p class="integration-limit">API СУЗ ограничено: заказы КМ и production calls отключены.</p>'
+    : `<div class="stack-form"><input id="suz-oms-id" placeholder="omsId"><input id="suz-oms-connection" placeholder="omsConnection"><button id="save-suz" class="secondary-button">Сохранить параметры</button></div><p class="integration-limit">clientToken / registrationKey не запрашиваются.</p>`;
+
+  shell(`<div class="page-heading settings-heading"><div><h1>Настройки → Интеграции</h1><p>Все статусы показывают фактическую проверенность, а не факт сохранения полей.</p></div><button id="refresh-integrations" class="quiet-button">Обновить</button></div>
+    <div class="integration-grid">
+      ${integrationCard("true-api", "Честный знак / True API", trueApi, trueBody)}
+      ${integrationCard("suz", "СУЗ", suz, suzBody)}
+      ${integrationCard("wb", "Wildberries", wb, wbBody)}
+      ${integrationCard("ozon", "Ozon", ozon, ozonBody)}
+    </div>`);
+
+  document.querySelector<HTMLButtonElement>("#refresh-integrations")?.addEventListener("click", () => void openIntegrations());
+  document.querySelector<HTMLButtonElement>("#create-enrollment")?.addEventListener("click", async () => {
+    try { enrollmentIntent = await api.createEnrollment(); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  });
+  document.querySelector<HTMLButtonElement>("#copy-enrollment")?.addEventListener("click", async () => {
+    if (enrollmentIntent) await navigator.clipboard.writeText(enrollmentIntent.enrollment_token);
+  });
+  document.querySelector<HTMLButtonElement>("#create-true-api")?.addEventListener("click", async () => {
+    try { await api.createTrueApi(); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-select-cert]").forEach((button) => button.addEventListener("click", async () => {
+    if (!trueApi) return;
+    try { await api.selectCertificate(trueApi.id, button.dataset.selectCert || ""); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  }));
+  document.querySelector<HTMLButtonElement>("#check-true-api")?.addEventListener("click", async () => {
+    if (!trueApi) return;
+    try { await api.checkIntegration("true-api", trueApi.id); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  });
+
+  document.querySelector<HTMLButtonElement>("#save-wb-token")?.addEventListener("click", async () => {
+    const token = document.querySelector<HTMLInputElement>("#wb-token")?.value || "";
+    if (!token) return;
+    try {
+      const connection = wb || await api.createWb();
+      await api.setIntegrationSecret("wb", connection.id, token);
+      await openIntegrations();
+    } catch (e) { showToast(readError(e), "error"); }
+  });
+  document.querySelector<HTMLButtonElement>("#check-wb")?.addEventListener("click", async () => {
+    if (!wb) return;
+    try { await api.checkIntegration("wb", wb.id); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  });
+  document.querySelector<HTMLButtonElement>("#revoke-wb")?.addEventListener("click", async () => {
+    if (!wb) return;
+    try { await api.revokeIntegrationSecret("wb", wb.id); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  });
+
+  const saveOzon = async () => {
+    const key = document.querySelector<HTMLInputElement>("#ozon-key")?.value || "";
+    if (!key) return;
+    try {
+      const connection = ozon || await api.createOzon(document.querySelector<HTMLInputElement>("#ozon-client")?.value || "");
+      await api.setIntegrationSecret("ozon", connection.id, key);
+      await openIntegrations();
+    } catch (e) { showToast(readError(e), "error"); }
+  };
+  document.querySelector<HTMLButtonElement>("#save-ozon")?.addEventListener("click", saveOzon);
+  document.querySelector<HTMLButtonElement>("#save-ozon-key")?.addEventListener("click", saveOzon);
+  document.querySelector<HTMLButtonElement>("#revoke-ozon")?.addEventListener("click", async () => {
+    if (!ozon) return;
+    try { await api.revokeIntegrationSecret("ozon", ozon.id); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  });
+
+  document.querySelector<HTMLButtonElement>("#save-suz")?.addEventListener("click", async () => {
+    const omsId = document.querySelector<HTMLInputElement>("#suz-oms-id")?.value || "";
+    const omsConnection = document.querySelector<HTMLInputElement>("#suz-oms-connection")?.value || "";
+    if (!omsId || !omsConnection) return;
+    try { await api.createSuz(omsId, omsConnection); await openIntegrations(); } catch (e) { showToast(readError(e), "error"); }
+  });
+}
+
 function showToast(message: string, tone: "normal" | "warn" | "error" = "normal"): void {
   const root = document.querySelector<HTMLDivElement>("#toast-root");
   if (!root) return;
@@ -505,6 +747,10 @@ function readError(error: unknown): string {
 }
 
 async function restoreInitialView(): Promise<void> {
+  if (viewFromUrl() === "integrations") {
+    await openIntegrations();
+    return;
+  }
   const home = await api.workspaceHome();
   homeHistory = home.history;
   const requested = importFromUrl();
@@ -514,6 +760,10 @@ async function restoreInitialView(): Promise<void> {
 }
 
 window.addEventListener("popstate", () => {
+  if (viewFromUrl() === "integrations") {
+    void openIntegrations();
+    return;
+  }
   const importId = importFromUrl();
   if (importId) void openImport(importId, false);
   else renderHome();
