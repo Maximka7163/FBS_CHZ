@@ -18,7 +18,7 @@ def create_app(
     # Import routers only after create_app is called, avoiding partially initialized
     # router modules during auth/repository dependency cycles.
     from .api.routes import router
-    from .api.agent_routes import agent_router, agent_v2_printing_router
+    from .api.agent_routes import agent_router, agent_v2_control_router, agent_v2_printing_router
     from .api.security_routes import security_router
     from .api.report_routes import reports_router
     from .api.audit_routes import audit_router
@@ -44,6 +44,7 @@ def create_app(
         *manual_review_router.routes,
         *printing_router.routes,
         *agent_router.routes,
+        *agent_v2_control_router.routes,
         *agent_v2_printing_router.routes,
     ]
     app = FastAPI(
@@ -83,6 +84,8 @@ def create_app(
         "/api/agent/status",
         "/api/certificate/status",
         "/api/agent/v1/jobs/next",
+        "/api/agent/v2/runtime-config",
+        "/api/agent/v2/certificates",
         "/api/printing/templates",
         "/api/printing/printability/resolve",
         "/api/printing/jobs",
