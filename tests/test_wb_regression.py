@@ -532,3 +532,60 @@ def test_cli_history_reports_null_and_ambiguity(
     assert len(output) == 2
     assert all(item["occurred_at"] is None for item in output)
     assert all(item["history_order_ambiguous"] for item in output)
+
+def test_p0_reference_shape_423_rows_302_events_299_unique_ki(make_xlsx):
+    rows = []
+    for index in range(108):
+        rows.append({
+            "№ задания": f"SALE-{index:04d}",
+            "Стикер": f"ST-{index:04d}",
+            "КИЗ": f"0104600000000{index:04d}SERIALSALE{index:04d}",
+            "Номер чека": f"R-{index:04d}",
+            "Стоимость": 1500,
+            "Валюта": "RUB",
+            "Номер фискального накопителя": f"FN-{index:04d}",
+            "Дата": "12:00:00 20.08.2026",
+            "Тип операции": "Продажа",
+            "Признак продажи юрлицу": "Нет",
+        })
+    for index in range(191):
+        rows.append({
+            "№ задания": f"RETURN-{index:04d}",
+            "Стикер": f"RT-{index:04d}",
+            "КИЗ": f"0104700000000{index:04d}SERIALRETURN{index:04d}",
+            "Номер чека": f"RR-{index:04d}",
+            "Стоимость": 1500,
+            "Валюта": "RUB",
+            "Номер фискального накопителя": f"RFN-{index:04d}",
+            "Дата": "13:00:00 20.08.2026",
+            "Тип операции": "Возврат",
+            "Признак продажи юрлицу": "Нет",
+        })
+    for index in range(3):
+        duplicate = dict(rows[index])
+        duplicate["№ задания"] = f"DUP-{index:04d}"
+        duplicate["Стикер"] = f"DUP-ST-{index:04d}"
+        duplicate["Тип операции"] = "Возврат"
+        rows.append(duplicate)
+    for index in range(121):
+        rows.append({
+            "№ задания": f"IGNORED-{index:04d}",
+            "Стикер": f"IGN-{index:04d}",
+            "КИЗ": f"0104800000000{index:04d}IGNORED{index:04d}",
+            "Номер чека": "",
+            "Стоимость": 1500,
+            "Валюта": "RUB",
+            "Номер фискального накопителя": "",
+            "Дата": "",
+            "Тип операции": "-",
+            "Признак продажи юрлицу": "Нет",
+        })
+    assert len(rows) == 423
+    path = make_xlsx(rows, name="p0-reference-shape.xlsx")
+    parsed = parse_excel(path.read_bytes())
+    events = [row.event for row in parsed.rows]
+    assert len(parsed.rows) == 302
+    assert len(parsed.issues) == 121
+    assert sum(event.operation is Operation.SALE for event in events) == 108
+    assert sum(event.operation is Operation.RETURN for event in events) == 194
+    assert len({event.kiz for event in events}) == 299
