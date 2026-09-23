@@ -168,6 +168,7 @@ def _scan(bundle: Path) -> None:
         'WBCZ_AGENT_ENABLED: "true"',
         'WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED: "false"',
         'WBCZ_TRUE_API_WRITE_ENABLED: "false"',
+        'WBCZ_TRUE_API_REAL_READ_ENABLED: "false"',
         'WBCZ_PRINTING_ENABLED: "false"',
         'WBCZ_PRINT_EXECUTION_ENABLED: "false"',
         'WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED: "false"',
