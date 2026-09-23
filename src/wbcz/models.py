@@ -163,6 +163,7 @@ class RowIssue:
 class ParsedWorkbook:
     rows: tuple[ParsedRow, ...]
     issues: tuple[RowIssue, ...]
+    ignored_rows: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
