@@ -263,6 +263,7 @@ def parse_excel(data: bytes) -> ParsedWorkbook:
         positions = {name: names.index(name) for name in HEADERS}
         rows: list[ParsedRow] = []
         issues: list[RowIssue] = []
+        ignored_rows: list[int] = []
         for number, cells in enumerate(iterator, start=2):
             if number % 1000 == 0 and _time.monotonic() - started > MAX_PARSE_SECONDS:
                 raise WorkbookError("Превышен безопасный лимит времени разбора Excel")
@@ -274,6 +275,10 @@ def parse_excel(data: bytes) -> ParsedWorkbook:
             }
             if all(_blank(value) for value in values.values()):
                 continue
+            operation_value = values.get("Тип операции")
+            if isinstance(operation_value, str) and _text(operation_value) == "-":
+                ignored_rows.append(number)
+                continue
             try:
                 for name, index in positions.items():
                     if index < len(cells) and cells[index].data_type in {"f", "e"}:
@@ -284,7 +289,7 @@ def parse_excel(data: bytes) -> ParsedWorkbook:
                 rows.append(ParsedRow(number, _parse_row(values)))
             except (ValueError, TypeError, OverflowError) as exc:
                 issues.append(RowIssue(number, str(exc)))
-        return ParsedWorkbook(tuple(rows), tuple(issues))
+        return ParsedWorkbook(tuple(rows), tuple(issues), tuple(ignored_rows))
     except WorkbookError:
         raise
     except Exception as exc:
