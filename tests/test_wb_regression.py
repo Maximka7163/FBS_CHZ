@@ -585,7 +585,8 @@ def test_p0_reference_shape_423_rows_302_events_299_unique_ki(make_xlsx):
     parsed = parse_excel(path.read_bytes())
     events = [row.event for row in parsed.rows]
     assert len(parsed.rows) == 302
-    assert len(parsed.issues) == 121
+    assert len(parsed.issues) == 0
+    assert len(parsed.ignored_rows) == 121
     assert sum(event.operation is Operation.SALE for event in events) == 108
     assert sum(event.operation is Operation.RETURN for event in events) == 194
     assert len({event.kiz for event in events}) == 299
