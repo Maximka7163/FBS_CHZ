@@ -28,6 +28,7 @@ from wbcz_ui.live_true_api import (
     JsonlLiveAudit,
     TrueApiAuthenticator,
     WindowsCryptoProAuthSigner,
+    WindowsCryptoProCertificateDiscovery,
     WindowsCryptoProCertificateInspector,
 )
 
@@ -37,7 +38,7 @@ class WindowsAgentConfig:
     backend_url: str
     machine_token: str
     participant_inn: str
-    certificate_thumbprint: str
+    certificate_thumbprint: str | None
     replay_db_path: Path
     audit_log_path: Path
     stunnel_path: Path | None = None
@@ -73,8 +74,6 @@ class WindowsAgentConfig:
         if len(token) < 32:
             raise ValueError("participant-bound agent credential is missing; enrollment is required")
         validate_owner_inn(inn)
-        if not thumbprint:
-            raise ValueError("WBCZ_UKEP_THUMBPRINT is required")
         if os.getenv("WBCZ_AGENT_PRODUCTION_WRITE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
             raise ValueError("Production document write remains disabled pending runtime contract tests")
         replay = Path(os.getenv("WBCZ_AGENT_REPLAY_DB", str(data_dir / "replay.sqlite"))).expanduser()
@@ -95,7 +94,7 @@ class WindowsAgentConfig:
             backend_url=backend,
             machine_token=token,
             participant_inn=inn,
-            certificate_thumbprint=thumbprint,
+            certificate_thumbprint=thumbprint or None,
             replay_db_path=replay,
             audit_log_path=audit,
             stunnel_path=Path(stunnel_raw) if stunnel_raw else None,
@@ -172,6 +171,10 @@ class WindowsAgentPreflight:
 
 
 class WindowsAgentRuntime:
+    """Outbound agent that can enroll/discover certificates before True API is authorised."""
+
+    CONTROL_SYNC_SECONDS = 30.0
+
     def __init__(self, config: WindowsAgentConfig) -> None:
         self.config = config
         config.replay_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,49 +189,149 @@ class WindowsAgentRuntime:
             production_true_api_reports=config.production_true_api_reports,
             remote_download_byte_ceiling=config.report_remote_download_byte_ceiling,
         )
-        self.inspector = WindowsCryptoProCertificateInspector(
-            config.certificate_thumbprint,
-            cryptcp_path=config.cryptcp_path,
-        )
-        self.auth_signer = WindowsCryptoProAuthSigner(
-            config.certificate_thumbprint,
-            cryptcp_path=config.cryptcp_path,
-            inspector=self.inspector,
-        )
-        self.authenticator = TrueApiAuthenticator(
-            self.transport,
-            self.auth_signer,
-            config.participant_inn,
-        )
-        self.session_manager = AgentSessionManager(self.authenticator)
-        self.document_signer = WindowsCryptoProDocumentSigner(
-            certificate_thumbprint=config.certificate_thumbprint,
-            participant_inn=config.participant_inn,
-            cryptcp_path=config.cryptcp_path,
-            inspector=self.inspector,
-        )
         self.backend = OutboundAgentHttpClient(StdlibHttpsAgentSender(config.backend_url))
-        self.executor = DurableWindowsAgentExecutor(
-            participant_inn=config.participant_inn,
+        self.discovery = WindowsCryptoProCertificateDiscovery(
+            cryptcp_path=config.cryptcp_path,
+        )
+        self.inspector: WindowsCryptoProCertificateInspector | None = None
+        self.authenticator: TrueApiAuthenticator | None = None
+        self.session_manager: AgentSessionManager | None = None
+        self.document_signer: WindowsCryptoProDocumentSigner | None = None
+        self.executor: DurableWindowsAgentExecutor | None = None
+        self.agent: WindowsOutboundAgent | None = None
+        self.preflight: WindowsAgentPreflight | None = None
+        self._selected_thumbprint: str | None = None
+        self._real_read_enabled = False
+        self._last_control_sync = 0.0
+        if config.certificate_thumbprint:
+            self._activate_certificate(config.certificate_thumbprint)
+
+    def _activate_certificate(self, thumbprint: str) -> None:
+        normalized = thumbprint.replace(" ", "").upper()
+        if not normalized:
+            return
+        if normalized == self._selected_thumbprint and self.agent is not None:
+            return
+        inspector = WindowsCryptoProCertificateInspector(
+            normalized,
+            cryptcp_path=self.config.cryptcp_path,
+        )
+        # Local inspect proves validity/private-key/provider before any auth request.
+        inspector.inspect()
+        auth_signer = WindowsCryptoProAuthSigner(
+            normalized,
+            cryptcp_path=self.config.cryptcp_path,
+            inspector=inspector,
+        )
+        authenticator = TrueApiAuthenticator(
+            self.transport,
+            auth_signer,
+            self.config.participant_inn,
+        )
+        session_manager = AgentSessionManager(authenticator)
+        document_signer = WindowsCryptoProDocumentSigner(
+            certificate_thumbprint=normalized,
+            participant_inn=self.config.participant_inn,
+            cryptcp_path=self.config.cryptcp_path,
+            inspector=inspector,
+        )
+        executor = DurableWindowsAgentExecutor(
+            participant_inn=self.config.participant_inn,
             transport=self.transport,
-            session_manager=self.session_manager,
-            document_signer=self.document_signer,
+            session_manager=session_manager,
+            document_signer=document_signer,
             replay_store=self.replay_store,
             production_write=False,
         )
+        self.inspector = inspector
+        self.authenticator = authenticator
+        self.session_manager = session_manager
+        self.document_signer = document_signer
+        self.executor = executor
         self.agent = WindowsOutboundAgent(
             backend=self.backend,
-            machine_token=config.machine_token,
-            executor=self.executor,
+            machine_token=self.config.machine_token,
+            executor=executor,
         )
         self.preflight = WindowsAgentPreflight(
-            certificate_inspector=self.inspector,
+            certificate_inspector=inspector,
             transport=self.transport,
-            authenticator=self.authenticator,
-            session_manager=self.session_manager,
+            authenticator=authenticator,
+            session_manager=session_manager,
             backend=self.backend,
-            machine_token=config.machine_token,
+            machine_token=self.config.machine_token,
         )
+        self._selected_thumbprint = normalized
+
+    def _sync_control_plane(self, *, force: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if not force and now - self._last_control_sync < self.CONTROL_SYNC_SECONDS:
+            return {
+                "selected_thumbprint": self._selected_thumbprint,
+                "true_api_real_read_enabled": self._real_read_enabled,
+            }
+        config = self.backend.runtime_config(self.config.machine_token)
+        if str(config.get("participant_inn") or "") != self.config.participant_inn:
+            raise ValueError("agent runtime participant mismatch")
+        self._real_read_enabled = bool(config.get("true_api_real_read_enabled"))
+        inventory = self.discovery.discover()
+        candidates = inventory.get("candidates")
+        if not isinstance(candidates, list):
+            raise ValueError("certificate discovery result is invalid")
+        report = self.backend.report_certificates(
+            self.config.machine_token,
+            cryptopro_available=bool(inventory.get("cryptopro_available")),
+            selected_thumbprint=self._selected_thumbprint,
+            candidates=[dict(item) for item in candidates if isinstance(item, dict)],
+        )
+        desired = report.get("desired_certificate_thumbprint")
+        if isinstance(desired, str) and desired and desired != self._selected_thumbprint:
+            available = {
+                str(item.get("thumbprint") or ""): item
+                for item in candidates
+                if isinstance(item, dict)
+            }
+            if desired not in available:
+                raise ValueError("backend selected certificate is not present locally")
+            self._activate_certificate(desired)
+            report = self.backend.report_certificates(
+                self.config.machine_token,
+                cryptopro_available=bool(inventory.get("cryptopro_available")),
+                selected_thumbprint=self._selected_thumbprint,
+                candidates=[dict(item) for item in candidates if isinstance(item, dict)],
+            )
+        self._last_control_sync = now
+        return {
+            **report,
+            "true_api_real_read_enabled": self._real_read_enabled,
+        }
+
+    def local_readiness(self, *, test_cis: str | None = None) -> dict[str, Any]:
+        control = self._sync_control_plane(force=True)
+        result = {
+            "ok": self._selected_thumbprint is not None,
+            "certificate_selected": self._selected_thumbprint is not None,
+            "selected_thumbprint": self._selected_thumbprint,
+            "certificate_candidates": len(control.get("candidates") or []),
+            "cryptopro_available": bool(control.get("cryptopro_available")),
+            "true_api_real_read_authorized": self._real_read_enabled,
+            "production_write": False,
+        }
+        if not self._real_read_enabled:
+            result["true_api_authenticated"] = False
+            result["read_probe_performed"] = False
+            result["authorization_required"] = True
+            return result
+        if self.preflight is None:
+            result["true_api_authenticated"] = False
+            result["read_probe_performed"] = False
+            return result
+        return {
+            **result,
+            **self.preflight.check(test_cis=test_cis),
+            "read_probe_performed": bool(test_cis),
+            "authorization_required": False,
+        }
 
     def close(self) -> None:
         self.tunnel.close()
@@ -248,6 +351,14 @@ class WindowsAgentRuntime:
         failures = 0
         while not stopped:
             try:
+                self._sync_control_plane()
+                # Until explicit server-side authorization, do not fetch typed
+                # True API jobs at all. Control-plane calls remain outbound HTTPS
+                # and certificate discovery remains local-only.
+                if not self._real_read_enabled or self.agent is None:
+                    time.sleep(self.config.idle_poll_seconds)
+                    failures = 0
+                    continue
                 worked = self.agent.run_once()
                 failures = 0
                 if not worked:
@@ -298,7 +409,7 @@ def _enroll_from_env() -> dict[str, Any]:
         protocol_version=protocol,
         agent_version=version,
         supported_job_types=[item.value for item in AgentJobType],
-        supported_capabilities=["OUTBOUND_HTTPS", "TYPED_JOBS", "M11_DURABLE_RATE_LIMIT", "DPAPI_CREDENTIAL"],
+        supported_capabilities=["OUTBOUND_HTTPS", "TYPED_JOBS", "M11_DURABLE_RATE_LIMIT", "DPAPI_CREDENTIAL", "CERTIFICATE_DISCOVERY_V1", "CERTIFICATE_SELECTION_V1"],
     )
     response = parse_enrollment_response(json.dumps(value, separators=(",", ":")).encode("utf-8"))
     if response.compatibility != "COMPATIBLE" or not response.permanent_credential:
@@ -340,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     runtime = WindowsAgentRuntime(config)
     try:
         if args.mode in {"check", "preflight"}:
-            _safe_print_result(runtime.preflight.check(test_cis=args.cis))
+            _safe_print_result(runtime.local_readiness(test_cis=args.cis))
             return 0
         runtime.run()
         return 0
