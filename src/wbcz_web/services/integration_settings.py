@@ -1295,6 +1295,12 @@ class IntegrationSettingsService:
         auto_selected = False
         if conn is not None:
             by_thumb = {row.thumbprint: row for row in observed}
+            if conn.desired_certificate_ref:
+                desired = by_thumb.get(conn.desired_certificate_ref)
+                if desired is None or desired.readiness_state != "READY":
+                    conn.desired_certificate_ref = None
+                    conn.certificate_selection_state = "NONE"
+                    conn.observed_certificate_observation_id = None
             if not conn.desired_certificate_ref and len(eligible) == 1:
                 conn.desired_certificate_ref = eligible[0].thumbprint
                 conn.certificate_selection_state = "PENDING_LOCAL_APPLY"
@@ -1312,9 +1318,6 @@ class IntegrationSettingsService:
                     else:
                         conn.certificate_selection_state = "MISMATCH"
                         conn.observed_certificate_observation_id = None
-                elif desired is None or desired.readiness_state != "READY":
-                    conn.certificate_selection_state = "MISMATCH"
-                    conn.observed_certificate_observation_id = None
                 else:
                     conn.certificate_selection_state = "PENDING_LOCAL_APPLY"
                     conn.observed_certificate_observation_id = None

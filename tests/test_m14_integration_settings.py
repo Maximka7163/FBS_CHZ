@@ -791,7 +791,9 @@ def test_certificate_selection_uses_only_current_eligible_generation(db: Session
     status = service.certificate_status()
     assert {item["thumbprint"] for item in status["candidates"]} == {newer_a, newer_b}
     assert eligible not in {item["thumbprint"] for item in status["candidates"]}
-    assert status["selection_state"] == "MISMATCH"
+    assert status["selection_state"] == "NONE"
+    assert status["status"] == "SELECTION_REQUIRED"
+    assert status["reason_code"] == "CERTIFICATE_SELECTION_REQUIRED"
     with pytest.raises(ValueError, match="current ready"):
         service.select_certificate(conn["id"], eligible, user_id=user.id)
 
@@ -822,7 +824,8 @@ def test_disappeared_active_certificate_is_not_selectable(db: Session):
     assert status["status"] == "NOT_READY"
     assert status["eligible_count"] == 0
     assert status["candidates"] == []
-    assert status["selection_state"] == "MISMATCH"
+    assert status["selection_state"] == "NONE"
+    assert status["desired_certificate_thumbprint"] is None
     with pytest.raises(ValueError, match="current ready"):
         service.select_certificate(conn["id"], thumb, user_id=user.id)
 
