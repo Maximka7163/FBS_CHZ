@@ -12,6 +12,8 @@ env:
   EXPECTED_MIGRATION_REVISION: 0020_printing_physical_spool
   WBCZ_ENV: test
   WBCZ_OWN_INN: "1234567890"
+  WBCZ_AUDIT_PSEUDONYM_KEY: "focused-ci-test-only-pseudonym-key-20260924"
+  WBCZ_AUDIT_PSEUDONYM_KEY_ID: "focused-ci-v1"
   WBCZ_TRUE_API_WRITE_ENABLED: "false"
   WBCZ_FBS_DRY_RUN_ONLY: "true"
   WBCZ_AGENT_ENABLED: "true"
