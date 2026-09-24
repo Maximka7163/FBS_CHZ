@@ -83,7 +83,13 @@ def csrf(request: Request, response: Response, db: Session = Depends(get_db)) ->
             session.csrf_token_hash = __import__("wbcz_web.auth", fromlist=["token_hash"]).token_hash(token)
             db.flush()
         except AuthenticationError:
-            pass
+            response.delete_cookie(
+                config.session_cookie_name,
+                path="/",
+                secure=config.cookie_secure,
+                httponly=True,
+                samesite="lax",
+            )
     response.set_cookie(
         config.csrf_cookie_name,
         token,
