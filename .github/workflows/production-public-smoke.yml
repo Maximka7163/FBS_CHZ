@@ -17,6 +17,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           BASE="https://sellari-marking-fbs.vercel.app"
           EXPECTED_SHA="3fabe882dbc3e73d0e2df72fa429b6e40fa0c5bd"
 
@@ -32,26 +33,15 @@ jobs:
             echo "root=$root_code health=$health_code version=$version_code csrf=$csrf_code"
 
             if [[ "$root_code" == 200 && "$health_code" == 200 && "$version_code" == 200 && "$csrf_code" == 200 ]]; then
-              python3 - <<'PY'
-import json
-from pathlib import Path
+              jq -e '.status == "ok" and .service == "wbcz-web"' /tmp/health.json >/dev/null
+              jq -e --arg sha "$EXPECTED_SHA" '.application_version == "0.5.1" and .build_sha == $sha' /tmp/version.json >/dev/null
+              jq -e '.csrf_token | type == "string" and length > 0' /tmp/csrf.json >/dev/null
 
-health = json.loads(Path("/tmp/health.json").read_text())
-version = json.loads(Path("/tmp/version.json").read_text())
-csrf = json.loads(Path("/tmp/csrf.json").read_text())
-
-assert health.get("status") == "ok", health
-assert health.get("service") == "wbcz-web", health
-assert version.get("application_version") == "0.5.1", version
-assert version.get("build_sha") == "3fabe882dbc3e73d0e2df72fa429b6e40fa0c5bd", version
-assert isinstance(csrf.get("csrf_token"), str) and csrf["csrf_token"], csrf
-
-print("PUBLIC_FRONTEND=PASS")
-print("PUBLIC_API_HEALTH=PASS")
-print("PUBLIC_API_VERSION=PASS")
-print("PUBLIC_CSRF=PASS")
-print("BACKEND_SHA=" + version["build_sha"])
-PY
+              echo "PUBLIC_FRONTEND=PASS"
+              echo "PUBLIC_API_HEALTH=PASS"
+              echo "PUBLIC_API_VERSION=PASS"
+              echo "PUBLIC_CSRF=PASS"
+              echo "BACKEND_SHA=$EXPECTED_SHA"
               ok=1
               break
             fi
