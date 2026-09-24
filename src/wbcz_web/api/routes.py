@@ -303,11 +303,15 @@ def control(
 ) -> dict:
     try:
         config = request.app.state.config
-        if config.agent_enabled:
+        # Provider selection is independent from mutation permission and from
+        # whether a Windows agent happens to be configured for other features.
+        if config.true_api_real_read_enabled:
             return AgentControlService(db, config).run(import_id, identity.user_id, payload.mode, payload.event_ids)
         return ControlService(db, identity.participant_inn or "").run(import_id, identity.user_id, payload.mode, payload.event_ids)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidWriteOperation as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
