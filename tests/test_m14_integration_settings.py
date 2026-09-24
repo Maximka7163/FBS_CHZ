@@ -864,3 +864,42 @@ def test_p0_true_api_check_stops_before_real_auth_until_authorized(db: Session):
     assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(
         AgentJobRecord.purpose == "INTEGRATION_HEALTH"
     )) == 0
+
+
+def test_integration_route_service_uses_configured_rate_limiter_in_production(monkeypatch):
+    from types import SimpleNamespace
+    from wbcz_web.api import integration_routes
+
+    sentinel_limiter = object()
+    captured = {}
+
+    class StubIntegrationSettingsService:
+        def __init__(self, db, config, **kwargs):
+            captured["db"] = db
+            captured["config"] = config
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        integration_routes,
+        "IntegrationSettingsService",
+        StubIntegrationSettingsService,
+    )
+
+    config = SimpleNamespace(environment="production")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=config,
+                integration_secret_provider=object(),
+                wb_http_adapter=None,
+                wb_rate_limiter=sentinel_limiter,
+            )
+        )
+    )
+    db = object()
+
+    integration_routes._service(request, db)
+
+    assert captured["db"] is db
+    assert captured["config"] is config
+    assert captured["wb_rate_limiter"] is sentinel_limiter
