@@ -641,6 +641,92 @@ def test_exact_duplicate_rows_create_one_event_and_one_cis_check(pg_factory):
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_live_ready_is_blocked_after_newer_overlapping_wb_event_before_any_write_state(pg_factory):
+    sale = event("STALE-READY", Operation.SALE)
+    read_cfg = config(DB_URL, real_read=True)
+    with pg_factory() as db:
+        user, imported = seed_import(db, [sale])
+        response = AgentControlService(db, read_cfg).run(
+            imported.id, user.id, "AUTO", [sale.event_id]
+        )
+        assert response["pending"] == 1
+        job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
+        assert job is not None
+
+        AgentOrchestrationBroker(db, read_cfg).submit_result(
+            TOKEN,
+            AgentResult(
+                job.job_id,
+                job.operation_id,
+                "CIS_CHECKED",
+                cises=({
+                    "cis": sale.kiz,
+                    "status": "IN_CIRCULATION",
+                    "statusEx": None,
+                    "withdrawReason": None,
+                    "ownerInn": OWN,
+                    "productGroup": "lp",
+                },),
+            ),
+        )
+        check = ImportRepository(db).latest_check(sale.event_id)
+        assert check is not None
+        assert check.source == "windows-agent-true-api"
+        assert check.decision == Decision.READY_TO_WITHDRAW.value
+
+        newer_return = replace(
+            sale,
+            operation=Operation.RETURN,
+            task_number="task-newer-return",
+            sticker="sticker-newer-return",
+            occurred_at=sale.occurred_at + timedelta(hours=1),
+            receipt_number=None,
+            fiscal_drive_number=None,
+        )
+        newer_import = ImportRecord(
+            fingerprint=("f" * 63) + "2",
+            filename="wb-fbs-newer.xlsx",
+            imported_by=user.id,
+            new_events=1,
+            duplicate_events=0,
+            rejected_rows=0,
+            row_count=1,
+            unique_kiz=1,
+            sales=0,
+            returns=1,
+            dated=1,
+            undated=0,
+        )
+        db.add(newer_import)
+        db.flush()
+        db.add(event_to_record(newer_return))
+        db.flush()
+        db.add(ImportRow(import_id=newer_import.id, row_number=2, event_id=newer_return.event_id))
+        db.flush()
+
+        write_cfg = replace(
+            read_cfg,
+            fbs_dry_run_only=False,
+            true_api_write_enabled=True,
+            true_api_real_read_enabled=True,
+        )
+
+        with pytest.raises(BulkActionUnavailable, match="SUPERSEDED_BY_LATER_WB_EVENT"):
+            execute_bulk_actions(db, write_cfg, imported.id, user.id)
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+
+        with pytest.raises(InvalidWriteOperation, match="SUPERSEDED_BY_LATER_WB_EVENT"):
+            AgentOrchestrationBroker(db, write_cfg).prepare_approved_write(
+                sale.event_id,
+                ExactDocumentBuilder.from_json_value({"stale_ready": True}),
+                decision=Decision.READY_TO_WITHDRAW,
+            )
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
 def test_result_time_sequence_recheck_prevents_stale_ready_after_newer_import(pg_factory):
     older = event("RACE", Operation.SALE)
     cfg = config(DB_URL, dry_run=True)
