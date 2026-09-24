@@ -260,3 +260,14 @@ jobs:
           grep -F 'WBCZ_PRINTING_ENABLED: "false"' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_PRINT_EXECUTION_ENABLED: "false"' "$ROOT/docker-compose.prod.yml"
           grep -F 'WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED: "false"' "$ROOT/docker-compose.prod.yml"
+
+      - name: Upload validated FBS dry-run release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sellari-marking-fbs-dryrun-0.5.1-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/build-a/sellari-marking-fbs-dryrun-0.5.1-*.tar.gz
+            ${{ runner.temp }}/build-a/sellari-marking-fbs-dryrun-0.5.1-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
