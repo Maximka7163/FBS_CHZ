@@ -401,84 +401,36 @@ def test_tenant_object_lookup_is_non_enumerating_across_orgs_and_participants(db
         service_c._get("wb", wb_a["id"])
 
 
-def test_true_api_health_is_typed_agent_job_and_preserves_write_gate(db: Session):
+def test_true_api_health_stops_before_real_auth_and_preserves_write_gate(db: Session):
     user, org, participant = _tenant(db, "true", "7800000000")
     _scope(db, user, org, participant)
     binding, _ = AgentBindingService(db).create(
         installation_id=str(uuid4()), display_name="True API Agent", user_id=user.id
     )
-    cfg = _config()
+    cfg = _config(true_api_real_read_enabled=False)
     service = IntegrationSettingsService(db, cfg, secret_provider=ReadOnlySecretProvider())
     conn = service.create_true_api(
         environment="PRODUCTION", primary_agent_binding_id=binding.id, user_id=user.id
     )
-    started = service.check("true-api", conn["id"], user_id=user.id)
-    assert started["overall_status"] == "CHECKING"
 
-    check = db.get(IntegrationHealthCheckRecord, started["id"])
-    jobs = list(db.scalars(select(AgentJobRecord).where(
-        AgentJobRecord.agent_binding_id == binding.id,
-        AgentJobRecord.purpose == "INTEGRATION_HEALTH",
-    )))
-    assert len(jobs) == 1
-    job = jobs[0]
-    assert job.job_type == "INTEGRATION_HEALTH"
-    assert job.payload_json["read_payload"] == {
-        "check_id": check.id, "check_kind":"TRUE_API", "read_probe":"NOT_TESTED"
+    health = service.check("true-api", conn["id"], user_id=user.id)
+
+    assert health["overall_status"] == "ERROR"
+    assert health["error_code"] == "CERTIFICATE_NOT_FOUND"
+    assert health["components"]["TRUE_API_AUTH"] == {
+        "status": "BLOCKED",
+        "reason_code": "REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED",
     }
+    assert health["components"]["TRUE_API_READ_PROBE"]["status"] == "NOT_TESTED"
+    assert health["components"]["WRITE_FEATURE_GATE"]["status"] == "BLOCKED"
     assert not list(db.scalars(select(AgentJobRecord).where(
-        AgentJobRecord.purpose.in_(["WRITE","REPORT_AGENT"])
+        AgentJobRecord.purpose == "INTEGRATION_HEALTH"
     )))
-
-    thumb = "A" * 40
-    result = AgentResult(
-        job.job_id,
-        job.operation_id,
-        "HEALTH_READY",
-        read_result={
-            "type":"M14_INTEGRATION_HEALTH",
-            "check_id":check.id,
-            "components":{
-                "AGENT_REACHABILITY":{"status":"READY"},
-                "CRYPTO_PROVIDER":{"status":"READY"},
-                "CERTIFICATE_PRESENT":{"status":"READY"},
-                "CERTIFICATE_TIME_VALIDITY":{"status":"READY"},
-                "CERTIFICATE_PRIVATE_KEY":{"status":"READY"},
-                "CERTIFICATE_COMPATIBILITY":{"status":"READY"},
-                "CERTIFICATE_PARTICIPANT_MATCH":{"status":"READY"},
-                "TRUE_API_AUTH":{"status":"READY"},
-                "TRUE_API_READ_PROBE":{"status":"NOT_TESTED"},
-                "WRITE_FEATURE_GATE":{"status":"DISABLED"},
-            },
-            "certificate":{
-                "thumbprint":thumb,
-                "subject":f"CN=Synthetic, INN={participant.inn}",
-                "issuer":"CN=Synthetic CA",
-                "certificate_inn":participant.inn,
-                "valid_from":(NOW()-timedelta(days=1)).isoformat(),
-                "valid_to":(NOW()+timedelta(days=90)).isoformat(),
-                "algorithm":"1.2.643.7.1.1.1.1",
-                "has_private_key":True,
-                "crypto_provider":"Crypto-Pro GOST R 34.10-2012",
-                "compatibility":"GOST_CRYPTOPRO",
-                "serial":"SYNTHETIC-M14",
-            },
-            "read_probe":"NOT_TESTED",
-        },
-    )
-    service.apply_agent_health_result(binding, result)
-    db.flush()
-    assert check.overall_status == "READY"
-    assert check.component_statuses_json["TRUE_API_AUTH"]["status"] == "READY"
-    assert check.component_statuses_json["TRUE_API_READ_PROBE"]["status"] == "NOT_TESTED"
-    cert = db.get(AgentCertificateObservationRecord, db.get(TrueApiConnectionRecord, conn["id"]).observed_certificate_observation_id)
-    assert cert is not None and cert.readiness_state == "READY" and cert.match_state == "MATCH"
-    caps = {x["name"]:x["status"] for x in service.environment_capabilities()["capabilities"]}
-    assert caps["TRUE_API_AUTH"] == "READY"
-    assert caps["EDO_READ"] == "READY"
-    assert caps["EDO_XML_WRITE"] == "BLOCKED_CONTRACT"
-    assert caps["TRUE_API_PRODUCTION_WRITE"] == "BLOCKED_FEATURE_GATE"
-
+    assert not list(db.scalars(select(AgentJobRecord).where(
+        AgentJobRecord.purpose.in_(["WRITE", "REPORT_AGENT"])
+    )))
+    assert service.environment_capabilities()["true_api_real_read_gate"] is False
+    assert service.environment_capabilities()["true_api_write_gate"] is False
 
 def test_certificate_selection_is_pending_until_matching_local_observation(db: Session):
     user, org, participant = _tenant(db, "cert", "6900000003")
