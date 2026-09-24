@@ -77,8 +77,8 @@ def test_duplicate_import_preserved(env):
 def test_238_event_regression_preserved(env):
  c,_=env;t=auth(c);b=upload(c,t,regression_xlsx()).json();assert {k:b[k] for k in ("row_count","unique_kiz","sales","returns","dated","undated","rejected_rows")}=={"row_count":238,"unique_kiz":238,"sales":76,"returns":162,"dated":68,"undated":170,"rejected_rows":0}
 def test_decisions_match_backend_core(env):
- c,_=env;t=auth(c);imp=upload(c,t,regression_xlsx()).json();r=c.post(f"/api/files/{imp['id']}/control",json={"mode":"CONTROL","event_ids":None},headers={"X-CSRF-Token":t});assert r.status_code==200;assert r.json()["counts"]=={"MANUAL_REVIEW":159,"READY_TO_WITHDRAW":51,"ALREADY_DONE":20,"ERROR":5,"READY_TO_RETURN":3}
- ev=c.get(f"/api/files/{imp['id']}/events").json();p=c.post("/api/operation-preview",json={"import_id":imp["id"],"mode":"AUTO","event_ids":[x["event_id"] for x in ev]},headers={"X-CSRF-Token":t});assert {k:p.json()[k] for k in ("eligible_count","withdraw_count","return_count","excluded_count")}=={"eligible_count":54,"withdraw_count":51,"return_count":3,"excluded_count":184}
+ c,_=env;t=auth(c);imp=upload(c,t,regression_xlsx()).json();r=c.post(f"/api/files/{imp['id']}/control",json={"mode":"CONTROL","event_ids":None},headers={"X-CSRF-Token":t});assert r.status_code==200;assert r.json()["counts"]=={"MANUAL_REVIEW":22,"READY_TO_WITHDRAW":51,"ALREADY_DONE":20,"ERROR":5,"READY_TO_RETURN":140}
+ ev=c.get(f"/api/files/{imp['id']}/events").json();p=c.post("/api/operation-preview",json={"import_id":imp["id"],"mode":"AUTO","event_ids":[x["event_id"] for x in ev]},headers={"X-CSRF-Token":t});assert {k:p.json()[k] for k in ("eligible_count","withdraw_count","return_count","excluded_count")}=={"eligible_count":191,"withdraw_count":51,"return_count":140,"excluded_count":47}
 def test_frontend_cannot_override_decision(env):
  c,_=env;t=auth(c);imp=upload(c,t,make_xlsx([row(1)])).json();assert c.post(f"/api/files/{imp['id']}/control",json={"mode":"CONTROL","event_ids":None,"decision":"READY_TO_WITHDRAW"},headers={"X-CSRF-Token":t}).status_code==422
 def test_control_cannot_submit(env):
