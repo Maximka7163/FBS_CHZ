@@ -7,6 +7,8 @@ on:
       - "src/wbcz_web/api/routes.py"
       - "src/wbcz_web/services/control.py"
       - "src/wbcz_web/services/agent_orchestration.py"
+      - "src/wbcz_web/services/imports.py"
+      - "src/wbcz_web/services/kiz_transaction_lock.py"
       - "src/wbcz_web/services/workspace.py"
       - "frontend/**"
       - "tests/test_fbs_control_policy.py"
@@ -16,6 +18,7 @@ on:
       - "tests/test_ui_modes.py"
       - "tests/test_web_v05.py"
       - "tests/test_p0_frontend_integration.py"
+      - "tests/test_fbs_concurrent_locking.py"
       - ".github/workflows/fbs-control-dryrun-validation.yml"
   workflow_dispatch:
 
@@ -94,6 +97,7 @@ jobs:
             tests/test_p0_frontend_integration.py::test_http_live_read_only_control_uses_agent_without_enabling_writes \
             tests/test_p0_frontend_integration.py::test_exact_duplicate_rows_create_one_event_and_one_cis_check \
             tests/test_p0_frontend_integration.py::test_live_ready_is_blocked_after_newer_overlapping_wb_event_before_any_write_state \
+            tests/test_fbs_concurrent_locking.py \
             tests/test_p0_frontend_integration.py::test_result_time_sequence_recheck_prevents_stale_ready_after_newer_import \
             tests/test_p0_frontend_integration.py::test_238_row_upload_agent_results_and_workspace_regression
 
