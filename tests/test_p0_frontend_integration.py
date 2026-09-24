@@ -308,7 +308,7 @@ def test_agent_control_result_is_decision_only_while_write_gate_off(pg_factory):
     cfg = config(DB_URL)
     with pg_factory() as db:
         user, imported = seed_import(db, [item])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", [item.event_id])
         assert response["pending"] == 1
         job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert job is not None
@@ -356,7 +356,9 @@ def test_sequence_control_queues_only_latest_event(
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, [older, latest])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(
+            imported.id, user.id, "AUTO", [older.event_id, latest.event_id]
+        )
         assert response["pending"] == 1
         assert response["checked"] == 1
         jobs = list(db.scalars(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)))
@@ -395,7 +397,9 @@ def test_three_event_sequence_marks_all_older_events_superseded(pg_factory):
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, events)
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(
+            imported.id, user.id, "AUTO", [item.event_id for item in events]
+        )
         assert response["pending"] == 1
         assert response["counts"][Decision.NO_ACTION.value] == 2
         for old in events[:2]:
@@ -417,7 +421,9 @@ def test_ambiguous_event_order_never_queues_true_api_check(pg_factory, ambiguous
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, [first, second])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(
+            imported.id, user.id, "AUTO", [first.event_id, second.event_id]
+        )
         assert response["pending"] == 0
         assert response["counts"] == {Decision.MANUAL_REVIEW.value: 2}
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)) == 0
@@ -628,7 +634,8 @@ def test_exact_duplicate_rows_create_one_event_and_one_cis_check(pg_factory):
         imported = FileImportService(db).import_xlsx("duplicate.xlsx", stream.getvalue(), user.id)
         assert imported.new_events == 1
         assert imported.duplicate_events == 1
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        event_ids = [row.event_id for row in ImportRepository(db).ordered_event_records(imported.id)]
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", event_ids)
         assert response["pending"] == 1
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)) == 1
 
@@ -639,7 +646,7 @@ def test_result_time_sequence_recheck_prevents_stale_ready_after_newer_import(pg
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, [older])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", [older.event_id])
         assert response["pending"] == 1
         job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert job is not None
@@ -714,7 +721,8 @@ def test_238_row_upload_agent_results_and_workspace_regression(pg_factory, wb_re
         assert imported.new_events == 238
         assert imported.duplicate_events == 0
 
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        event_ids = [row.event_id for row in ImportRepository(db).ordered_event_records(imported.id)]
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", event_ids)
         assert response["pending"] == 238
         assert response["checked"] == 0
         jobs = list(db.scalars(
