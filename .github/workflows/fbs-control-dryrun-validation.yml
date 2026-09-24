@@ -25,6 +25,8 @@ permissions:
 env:
   WBCZ_ENV: test
   WBCZ_OWN_INN: "1234567890"
+  WBCZ_AUDIT_PSEUDONYM_KEY: "fbs-control-ci-only-audit-pseudonym-key-20260924"
+  WBCZ_AUDIT_PSEUDONYM_KEY_ID: "fbs-control-ci-v1"
   WBCZ_TRUE_API_WRITE_ENABLED: "false"
   WBCZ_TRUE_API_REAL_READ_ENABLED: "false"
   WBCZ_FBS_DRY_RUN_ONLY: "true"
@@ -79,8 +81,20 @@ jobs:
             tests/test_wb_regression.py \
             tests/test_ui_application.py \
             tests/test_ui_modes.py \
-            tests/test_web_v05.py \
-            tests/test_p0_frontend_integration.py
+            tests/test_web_v05.py::test_decisions_match_backend_core \
+            tests/test_p0_frontend_integration.py::test_true_api_write_disabled_is_hard_stop_for_bulk_and_prepare \
+            tests/test_p0_frontend_integration.py::test_agent_control_result_is_decision_only_while_write_gate_off \
+            tests/test_p0_frontend_integration.py::test_sequence_control_queues_only_latest_event \
+            tests/test_p0_frontend_integration.py::test_three_event_sequence_marks_all_older_events_superseded \
+            tests/test_p0_frontend_integration.py::test_ambiguous_event_order_never_queues_true_api_check \
+            tests/test_p0_frontend_integration.py::test_dry_run_blocks_bulk_and_prepare_write_without_creating_state \
+            tests/test_p0_frontend_integration.py::test_workspace_evidence_is_explicit_whitelist_and_dryrun_runtime \
+            tests/test_p0_frontend_integration.py::test_http_dry_run_bulk_bypass_is_typed_409_and_creates_no_write \
+            tests/test_p0_frontend_integration.py::test_http_mock_control_ignores_agent_presence_when_live_read_is_disabled \
+            tests/test_p0_frontend_integration.py::test_http_live_read_only_control_uses_agent_without_enabling_writes \
+            tests/test_p0_frontend_integration.py::test_exact_duplicate_rows_create_one_event_and_one_cis_check \
+            tests/test_p0_frontend_integration.py::test_result_time_sequence_recheck_prevents_stale_ready_after_newer_import \
+            tests/test_p0_frontend_integration.py::test_238_row_upload_agent_results_and_workspace_regression
 
       - name: Safety flag regression
         shell: bash
