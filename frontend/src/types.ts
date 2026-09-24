@@ -101,6 +101,8 @@ export interface WorkspaceView {
   runtime: {
     agent_enabled: boolean;
     production_write_enabled: boolean;
+    true_api_real_read_enabled: boolean;
+    control_provider: "mock-dry-run" | "live-read-only";
     fbs_dry_run_only: boolean;
   };
 }
