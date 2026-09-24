@@ -37,11 +37,6 @@ _REASON_GUIDANCE: dict[str, tuple[str, str, str]] = {
         "В архиве WB нет подтверждённых данных чека, необходимых для безопасного вывода.",
         "Получите архив WB с данными чека и загрузите его снова.",
     ),
-    "RETURN_RECEIPT_MISSING": (
-        "Не хватает данных чека для возврата",
-        "В архиве WB нет подтверждённых данных чека, необходимых для безопасного возврата.",
-        "Получите архив WB с данными чека и загрузите его снова.",
-    ),
     "WRONG_PRODUCT_GROUP": (
         "КИЗ относится к другой товарной группе",
         "P0 поддерживает только товарную группу lp (одежда).",
@@ -423,6 +418,8 @@ def workspace_overview(db: Session, config: WebConfig, import_id: str) -> dict[s
         "runtime": {
             "agent_enabled": config.agent_enabled,
             "production_write_enabled": config.true_api_write_enabled,
+            "true_api_real_read_enabled": config.true_api_real_read_enabled,
+            "control_provider": "live-read-only" if config.true_api_real_read_enabled else "mock-dry-run",
             "fbs_dry_run_only": config.fbs_dry_run_only,
         },
     }
@@ -439,12 +436,26 @@ class FbsDryRunWriteBlocked(BulkActionUnavailable):
 def execute_bulk_actions(db: Session, config: WebConfig, import_id: str, user_id: int) -> dict[str, Any]:
     if config.fbs_dry_run_only:
         raise FbsDryRunWriteBlocked("FBS_DRY_RUN_ONLY: bulk actions are disabled in dry-run-only mode")
+    if not config.true_api_write_enabled:
+        raise BulkActionUnavailable("TRUE_API_WRITE_DISABLED: business writes are disabled")
+    if not config.true_api_real_read_enabled:
+        raise BulkActionUnavailable("LIVE_CHZ_CONTROL_REQUIRED: fresh True API state is required before any write")
     if not config.agent_enabled or not config.agent_machine_token:
         raise BulkActionUnavailable("Windows agent is not configured; ready actions were not started")
 
     imports = ImportRepository(db)
     if imports.get(import_id) is None:
         raise KeyError("Импорт не найден")
+
+    # Fail the whole batch before creating any local write state if a READY
+    # decision did not come from a fresh live True API control result.
+    for row in imports.ordered_event_records(import_id):
+        check = imports.latest_check(row.event_id)
+        if check is not None and check.decision in READY_DECISIONS:
+            if check.source != "windows-agent-true-api":
+                raise BulkActionUnavailable(
+                    "LIVE_CHZ_CONTROL_REQUIRED: READY decision is not backed by live True API state"
+                )
 
     broker = AgentOrchestrationBroker(db, config)
     started: list[str] = []
