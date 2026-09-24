@@ -16,6 +16,7 @@ from wbcz_web.services.agent_orchestration import CONTROL_CIS, CONTROL_CIS_BATCH
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.imports import import_view, record_to_event
 from wbcz_web.services.tenant import active_tenant, optional_tenant
+from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 
 
 READY_DECISIONS = frozenset({Decision.READY_TO_WITHDRAW.value, Decision.READY_TO_RETURN.value})
@@ -455,6 +456,11 @@ def execute_bulk_actions(db: Session, config: WebConfig, import_id: str, user_id
             if check.source != "windows-agent-true-api":
                 raise BulkActionUnavailable(
                     "LIVE_CHZ_CONTROL_REQUIRED: READY decision is not backed by live True API state"
+                )
+            sequence_outcome = sequence_outcome_for_event(imports, row.event_id)
+            if sequence_outcome is not None:
+                raise BulkActionUnavailable(
+                    f"{sequence_outcome.reason}: READY decision is stale against current WB history"
                 )
 
     broker = AgentOrchestrationBroker(db, config)
