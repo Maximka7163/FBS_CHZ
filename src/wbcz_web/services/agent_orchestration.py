@@ -636,6 +636,11 @@ class AgentOrchestrationBroker:
         expected = Decision(check.decision) if check else None
         if expected is not approved:
             raise InvalidWriteOperation("write decision must match latest stored control decision")
+        sequence_outcome = sequence_outcome_for_event(self.imports, event_id)
+        if sequence_outcome is not None:
+            raise InvalidWriteOperation(
+                f"{sequence_outcome.reason}: READY decision is stale against current WB history"
+            )
         document_type, operation_reason = (
             ("LK_RECEIPT", "DISTANCE")
             if approved is Decision.READY_TO_WITHDRAW
