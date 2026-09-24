@@ -177,7 +177,9 @@ def test_fastapi_agent_endpoints_dispatch_machine_auth_and_duplicate_result_once
     event = sale_event("CIS-HTTP-DISPATCH")
     with pg_factory() as db:
         user, imported = seed_import(db, event)
-        AgentControlService(db, config).run(imported.id, user.id, "AUTO")
+        AgentControlService(db, config).run(
+            imported.id, user.id, "AUTO", [event.event_id]
+        )
         queued = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert queued is not None
         job_id = queued.job_id
@@ -362,7 +364,9 @@ def test_wb_control_queues_cis_and_windows_result_is_decided_on_vps(pg_factory):
     event = sale_event()
     with pg_factory() as db:
         user, imported = seed_import(db, event)
-        response = AgentControlService(db, config).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, config).run(
+            imported.id, user.id, "AUTO", [event.event_id]
+        )
         assert response["pending"] == 1
         job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert job is not None and job.job_type == AgentJobType.CIS_CHECK.value
