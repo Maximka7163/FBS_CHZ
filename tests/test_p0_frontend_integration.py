@@ -558,6 +558,9 @@ def test_http_mock_control_ignores_agent_presence_when_live_read_is_disabled(pg_
         assert response.status_code == 200
         assert response.json()["provider"] == "mock"
         assert response.json()["checked"] == 1
+        capabilities = client.get("/api/capabilities").json()
+        assert capabilities["true_api"] == "offline-dry-run"
+        assert capabilities["windows_bridge"] is True
     with pg_factory() as db:
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)) == 0
 
@@ -591,6 +594,9 @@ def test_http_live_read_only_control_uses_agent_without_enabling_writes(pg_facto
         view = client.get(f"/api/files/{import_id}/workspace").json()
         assert view["runtime"]["control_provider"] == "live-read-only"
         assert view["runtime"]["production_write_enabled"] is False
+        capabilities = client.get("/api/capabilities").json()
+        assert capabilities["true_api"] == "windows-agent"
+        assert capabilities["windows_bridge"] is True
     with pg_factory() as db:
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS_BATCH)) == 1
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
