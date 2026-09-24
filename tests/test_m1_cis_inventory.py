@@ -358,17 +358,17 @@ def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint()
     if not db_url:
         pytest.skip("WBCZ_TEST_DATABASE_URL requires PostgreSQL")
     from fastapi.testclient import TestClient
-    from sqlalchemy import create_engine, select
+    from sqlalchemy import create_engine, select, text
     from sqlalchemy.orm import sessionmaker
     from wbcz_web.auth import hash_password
     from wbcz_web.config import WebConfig
     from wbcz_web.main import create_app
-    from wbcz_web.models import AgentJobRecord, Base
+    from wbcz_web.models import AgentJobRecord
     from wbcz_web.services.authorization import BootstrapService
 
     engine = create_engine(db_url, future=True)
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE TABLE users, organisations RESTART IDENTITY CASCADE"))
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     config = WebConfig(
         db_url,
@@ -409,7 +409,8 @@ def test_m1_application_api_uses_session_csrf_and_never_exposes_agent_endpoint()
             row = db.scalar(select(AgentJobRecord).where(AgentJobRecord.job_id == request_id))
             assert row is not None and row.job_type == "CIS_INFO" and row.purpose == "CIS_INVENTORY"
     finally:
-        Base.metadata.drop_all(engine)
+        with engine.begin() as connection:
+            connection.execute(text("TRUNCATE TABLE users, organisations RESTART IDENTITY CASCADE"))
         engine.dispose()
 
 def test_p0_read_transport_errors_cover_429_and_5xx_safely():

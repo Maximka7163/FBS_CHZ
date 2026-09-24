@@ -11,6 +11,8 @@ permissions:
 env:
   WBCZ_ENV: test
   WBCZ_OWN_INN: "1234567890"
+  WBCZ_AUDIT_PSEUDONYM_KEY: "focused-ci-test-only-pseudonym-key-20260924"
+  WBCZ_AUDIT_PSEUDONYM_KEY_ID: "focused-ci-v1"
   WBCZ_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_p0_chz
   WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_p0_chz
   WBCZ_MIGRATION_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/wbcz_p0_chz
@@ -68,6 +70,22 @@ jobs:
 
       - name: Prepare isolated PostgreSQL schema
         run: python -m alembic -c alembic.ini upgrade 0020_printing_physical_spool
+
+      - name: Verify migrated PostgreSQL base schema
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+
+          engine = create_engine(os.environ["WBCZ_TEST_DATABASE_URL"], future=True)
+          try:
+              tables = set(inspect(engine).get_table_names())
+              missing = {"users", "organisations"} - tables
+              if missing:
+                  raise SystemExit("missing migrated tables: " + ",".join(sorted(missing)))
+          finally:
+              engine.dispose()
+          PY
 
       - name: P0 CHZ focused backend tests
         run: >-

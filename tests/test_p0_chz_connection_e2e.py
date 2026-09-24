@@ -45,6 +45,24 @@ def test_p0_production_read_and_write_gates_are_explicitly_closed() -> None:
         assert value in env_example
 
 
+def test_p0_focused_ci_uses_synthetic_audit_key_and_production_still_requires_explicit_audit_key() -> None:
+    workflow = source(".github/workflows/p0-chz-connection-focused.yml")
+    assert 'WBCZ_AUDIT_PSEUDONYM_KEY: "focused-ci-test-only-pseudonym-key-20260924"' in workflow
+
+    cfg = WebConfig(
+        database_url="postgresql+psycopg://app:strong-test-password@db.example.test/wbcz",
+        own_inn="1234567890",
+        environment="production",
+        cookie_secure=True,
+        trusted_hosts=("mark.example.test",),
+        build_sha="abcdef1",
+        audit_pseudonym_key=None,
+        audit_key_path=None,
+    )
+    with pytest.raises(ValueError, match="WBCZ_AUDIT_KEY_PATH or WBCZ_AUDIT_PSEUDONYM_KEY"):
+        cfg.validate_for_startup()
+
+
 def test_p0_production_cis_service_stops_before_real_certificate_auth() -> None:
     cfg = replace(
         WebConfig.from_env(),
