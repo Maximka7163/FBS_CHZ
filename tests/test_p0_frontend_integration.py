@@ -8,6 +8,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ from wbcz.document_assembler import OrganisationType
 from wbcz.models import Decision, Event, Operation
 from wbcz.windows_agent import AgentResult
 from wbcz.write_pipeline import ExactDocumentBuilder, InvalidWriteOperation
+from wbcz_web.api import routes as web_routes
 from wbcz_web.auth import hash_password
 from wbcz_web.config import WebConfig
 from wbcz_web.main import create_app
@@ -775,3 +777,51 @@ def test_fbs_dry_run_env_flag_and_frontend_execution_gate(monkeypatch):
     source = (ROOT / "frontend" / "src" / "main.ts").read_text(encoding="utf-8")
     assert "view.runtime.fbs_dry_run_only" in source
     assert "DRY RUN — реальные действия отключены" in source
+
+
+def test_production_dry_run_control_uses_mock_without_windows_agent(monkeypatch):
+    monkeypatch.setattr(
+        web_routes,
+        "ControlService",
+        lambda db, participant_inn: ("mock", db, participant_inn),
+    )
+    monkeypatch.setattr(
+        web_routes,
+        "AgentControlService",
+        lambda db, config: ("agent", db, config),
+    )
+    cfg = SimpleNamespace(
+        environment="production",
+        fbs_dry_run_only=True,
+        true_api_real_read_enabled=False,
+        agent_enabled=True,
+    )
+    db = object()
+
+    selected = web_routes._control_service(db, cfg, OWN)
+
+    assert selected == ("mock", db, OWN)
+
+
+def test_production_control_uses_agent_after_real_read_authorized(monkeypatch):
+    monkeypatch.setattr(
+        web_routes,
+        "ControlService",
+        lambda db, participant_inn: ("mock", db, participant_inn),
+    )
+    monkeypatch.setattr(
+        web_routes,
+        "AgentControlService",
+        lambda db, config: ("agent", db, config),
+    )
+    cfg = SimpleNamespace(
+        environment="production",
+        fbs_dry_run_only=True,
+        true_api_real_read_enabled=True,
+        agent_enabled=True,
+    )
+    db = object()
+
+    selected = web_routes._control_service(db, cfg, OWN)
+
+    assert selected == ("agent", db, cfg)
