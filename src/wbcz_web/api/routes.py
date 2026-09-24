@@ -292,6 +292,18 @@ def event_detail(event_id: str, identity: AuthenticatedIdentity = Depends(requir
     return result
 
 
+def _control_service(db: Session, config, participant_inn: str):
+    if (
+        config.environment == "production"
+        and config.fbs_dry_run_only
+        and not config.true_api_real_read_enabled
+    ):
+        return ControlService(db, participant_inn)
+    if config.agent_enabled:
+        return AgentControlService(db, config)
+    return ControlService(db, participant_inn)
+
+
 @router.post("/files/{import_id}/control")
 def control(
     import_id: str,
@@ -303,9 +315,11 @@ def control(
 ) -> dict:
     try:
         config = request.app.state.config
-        if config.agent_enabled:
-            return AgentControlService(db, config).run(import_id, identity.user_id, payload.mode, payload.event_ids)
-        return ControlService(db, identity.participant_inn or "").run(import_id, identity.user_id, payload.mode, payload.event_ids)
+        return _control_service(
+            db,
+            config,
+            identity.participant_inn or "",
+        ).run(import_id, identity.user_id, payload.mode, payload.event_ids)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
