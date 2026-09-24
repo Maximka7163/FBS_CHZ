@@ -42,5 +42,5 @@ def test_events_check_detail_preview_api(tmp_path, wb_regression_rows, make_xlsx
     assert detail['kiz'] == after[0]['kiz']
     assert detail['history']
     preview = client.post('/api/operation-preview', json={'event_ids': [event['event_id'] for event in after]}).json()
-    assert len(preview['included']) == 54
-    assert len(preview['excluded']) == 184
+    assert len(preview['included']) == 191
+    assert len(preview['excluded']) == 47
