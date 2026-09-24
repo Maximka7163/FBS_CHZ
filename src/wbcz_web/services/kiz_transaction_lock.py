@@ -10,7 +10,9 @@ _LOCK_NAMESPACE = "wbcz:wb-history-write:v1"
 
 
 def _canonical_kiz(kiz: str) -> str:
-    value = str(kiz).strip()
+    # Match WB parser text normalization without stripping ASCII GS (\x1d),
+    # which is meaningful marking-code data.
+    value = str(kiz).strip(" \t\r\n")
     if not value:
         raise ValueError("KIZ lock key must not be empty")
     return value
