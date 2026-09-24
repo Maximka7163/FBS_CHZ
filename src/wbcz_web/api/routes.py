@@ -168,7 +168,11 @@ def me(identity: AuthenticatedIdentity = Depends(require_user)) -> dict:
 def capabilities(request: Request, _: AuthenticatedIdentity = Depends(require_user)) -> dict:
     config = request.app.state.config
     return {
-        "true_api": "windows-agent" if config.agent_enabled else "offline-dry-run",
+        "true_api": (
+            "windows-agent"
+            if config.true_api_real_read_enabled and config.agent_enabled
+            else "offline-dry-run"
+        ),
         "true_api_write": config.true_api_write_enabled,
         "document_signing": False,
         "submission": False,
