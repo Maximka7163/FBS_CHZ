@@ -29,6 +29,7 @@ from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentBindingRecord, AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun, ParticipantRecord, ReportJobRecord
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
+from wbcz_web.services.kiz_transaction_lock import acquire_tenant_kiz_lock
 from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 from wbcz_web.services.agent_bindings import AgentBindingService, AgentPrincipal
 from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
@@ -625,6 +626,12 @@ class AgentOrchestrationBroker:
         row = self.imports.event(event_id)
         if row is None:
             raise KeyError(event_id)
+        acquire_tenant_kiz_lock(
+            self.db,
+            row.organisation_id,
+            row.participant_id,
+            row.kiz,
+        )
         check = self.imports.latest_check(event_id)
         if check is None or check.source != "windows-agent-true-api":
             raise InvalidWriteOperation(
