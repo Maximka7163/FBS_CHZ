@@ -15,6 +15,7 @@ from wbcz_web.repositories import AuditRepository, ImportRepository
 from wbcz_web.services.agent_orchestration import CONTROL_CIS, CONTROL_CIS_BATCH, POLL, RECONCILIATION_CIS, WRITE
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.imports import import_view, record_to_event
+from wbcz_web.services.kiz_transaction_lock import acquire_tenant_kiz_locks
 from wbcz_web.services.tenant import active_tenant, optional_tenant
 from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 
@@ -448,9 +449,32 @@ def execute_bulk_actions(db: Session, config: WebConfig, import_id: str, user_id
     if imports.get(import_id) is None:
         raise KeyError("Импорт не найден")
 
+    rows = imports.ordered_event_records(import_id)
+    ready_rows = [
+        row
+        for row in rows
+        if (check := imports.latest_check(row.event_id)) is not None
+        and check.decision in READY_DECISIONS
+    ]
+    tenant_groups: dict[tuple[str | None, str | None], list[str]] = {}
+    for row in ready_rows:
+        tenant_groups.setdefault(
+            (row.organisation_id, row.participant_id), []
+        ).append(row.kiz)
+    for tenant_key in sorted(
+        tenant_groups,
+        key=lambda value: (str(value[0] or ""), str(value[1] or "")),
+    ):
+        acquire_tenant_kiz_locks(
+            db,
+            tenant_key[0],
+            tenant_key[1],
+            tenant_groups[tenant_key],
+        )
+
     # Fail the whole batch before creating any local write state if a READY
     # decision did not come from a fresh live True API control result.
-    for row in imports.ordered_event_records(import_id):
+    for row in rows:
         check = imports.latest_check(row.event_id)
         if check is not None and check.decision in READY_DECISIONS:
             if check.source != "windows-agent-true-api":
@@ -470,7 +494,7 @@ def execute_bulk_actions(db: Session, config: WebConfig, import_id: str, user_id
     withdraw = 0
     returns = 0
 
-    for row in imports.ordered_event_records(import_id):
+    for row in rows:
         check = imports.latest_check(row.event_id)
         if check is None or check.decision not in READY_DECISIONS:
             continue
