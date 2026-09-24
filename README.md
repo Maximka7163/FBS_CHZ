@@ -23,10 +23,9 @@ For the standard WB archive flow, READY recommendations require both the current
 - sale + already withdrawn for distance sale → `ALREADY_DONE`;
 - sale + in circulation + missing receipt → `MANUAL_REVIEW / SALE_RECEIPT_MISSING`;
 - return + already in circulation → `ALREADY_DONE`;
-- return + withdrawn for distance sale + receipt evidence + our owner → `READY_TO_RETURN`;
-- return + withdrawn for distance sale + missing receipt → `MANUAL_REVIEW / RETURN_RECEIPT_MISSING`.
+- return + withdrawn for distance sale + our owner → `READY_TO_RETURN` even when the RETURN row has no sale receipt/date.
 
-Owner mismatch, ambiguous WB history, unknown CHZ state/statusEx and wrong product-group context are fail-safe manual-review outcomes. `ALREADY_DONE` is evaluated before the receipt requirement so missing receipt data never creates a needless new operation.
+Owner mismatch, ambiguous WB history, unknown CHZ state/statusEx and wrong product-group context are fail-safe manual-review outcomes. Receipt/date evidence is required only before a new SALE withdrawal; a RETURN decision is based on fresh CHZ state and DISTANCE withdrawal reason.
 
 ## Installation: Windows PowerShell
 
