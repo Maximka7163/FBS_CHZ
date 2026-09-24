@@ -44,6 +44,14 @@ def auth(c):
 def upload(c,t,data,name="wb.xlsx"):return c.post("/api/files",files={"file":(name,data,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},headers={"X-CSRF-Token":t})
 def test_login_success(env):
  c,_=env;t=csrf(c);r=c.post("/api/auth/login",json={"username":"owner","password":"very-secure-password"},headers={"X-CSRF-Token":t});assert r.status_code==200 and r.json()["username"]=="owner"
+def test_csrf_clears_stale_session_cookie_and_allows_relogin(env):
+ c,_=env
+ c.cookies.set("wbcz_session","stale-session-token")
+ t=csrf(c)
+ assert c.cookies.get("wbcz_session") is None
+ r=c.post("/api/auth/login",json={"username":"owner","password":"very-secure-password"},headers={"X-CSRF-Token":t})
+ assert r.status_code==200 and r.json()["username"]=="owner"
+ assert c.get("/api/me").status_code==200
 def test_wrong_login_denied(env):
  c,_=env;t=csrf(c);assert c.post("/api/auth/login",json={"username":"owner","password":"wrong"},headers={"X-CSRF-Token":t}).status_code==401
 def test_no_registration_endpoint(env):
