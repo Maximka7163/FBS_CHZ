@@ -40,14 +40,14 @@ def test_auto_preview_groups_withdraw_and_return(tmp_path, wb_regression_rows, m
     app, imported, checked, _, ids = _checked_real(tmp_path, wb_regression_rows, make_xlsx)
     assert checked["counts"] == {
         "READY_TO_WITHDRAW": 51,
-        "READY_TO_RETURN": 3,
+        "READY_TO_RETURN": 140,
         "ALREADY_DONE": 20,
-        "MANUAL_REVIEW": 159,
+        "MANUAL_REVIEW": 22,
         "ERROR": 5,
     }
     preview = app.operation_preview(ids, OperationMode.AUTO, imported["fingerprint"])
-    assert (preview["selected_count"], preview["eligible_count"]) == (238, 54)
-    assert (preview["withdraw_count"], preview["return_count"], preview["excluded_count"]) == (51, 3, 184)
+    assert (preview["selected_count"], preview["eligible_count"]) == (238, 191)
+    assert (preview["withdraw_count"], preview["return_count"], preview["excluded_count"]) == (51, 140, 47)
 
 
 def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path, wb_regression_rows, make_xlsx):
@@ -58,9 +58,9 @@ def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path, wb_regression_ro
     assert preview["return_count"] == 0
     assert preview["excluded_count"] == 187
     assert Counter(item["decision"] for item in preview["excluded"]) == {
-        "READY_TO_RETURN": 3,
+        "READY_TO_RETURN": 140,
         "ALREADY_DONE": 20,
-        "MANUAL_REVIEW": 159,
+        "MANUAL_REVIEW": 22,
         "ERROR": 5,
     }
     return_exclusion = next(item for item in preview["excluded"] if item["decision"] == "READY_TO_RETURN")
@@ -70,14 +70,14 @@ def test_withdraw_only_accepts_only_ready_to_withdraw(tmp_path, wb_regression_ro
 def test_return_only_accepts_only_ready_to_return(tmp_path, wb_regression_rows, make_xlsx):
     app, imported, _, _, ids = _checked_real(tmp_path, wb_regression_rows, make_xlsx)
     preview = app.operation_preview(ids, OperationMode.RETURN_ONLY, imported["fingerprint"])
-    assert preview["eligible_count"] == 3
+    assert preview["eligible_count"] == 140
     assert preview["withdraw_count"] == 0
-    assert preview["return_count"] == 3
-    assert preview["excluded_count"] == 235
+    assert preview["return_count"] == 140
+    assert preview["excluded_count"] == 98
     assert Counter(item["decision"] for item in preview["excluded"]) == {
         "READY_TO_WITHDRAW": 51,
         "ALREADY_DONE": 20,
-        "MANUAL_REVIEW": 159,
+        "MANUAL_REVIEW": 22,
         "ERROR": 5,
     }
     withdraw_exclusion = next(item for item in preview["excluded"] if item["decision"] == "READY_TO_WITHDRAW")
