@@ -33,7 +33,7 @@ from wbcz_web.models import (
     WriteOperationRecord,
 )
 from wbcz_web.repositories import ImportRepository
-from wbcz_web.services.agent_orchestration import AgentControlService, CONTROL_CIS, WRITE
+from wbcz_web.services.agent_orchestration import AgentControlService, CONTROL_CIS, CONTROL_CIS_BATCH, WRITE
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.imports import FileImportService, event_to_record
 from wbcz_web.services.authorization import BootstrapService
