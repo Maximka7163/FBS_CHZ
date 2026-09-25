@@ -17,6 +17,7 @@ import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const LOCAL_FBS_ONLY = import.meta.env.VITE_SELLARI_LOCAL_FBS_ONLY === "true";
+const BRAND_NAME = LOCAL_FBS_ONLY ? "Sellari" : "markflow";
 
 let user: UserInfo | null = null;
 let homeHistory: FileItem[] = [];
@@ -94,7 +95,7 @@ function shell(content: string): void {
   const initials = (user?.username || "").slice(0, 2).toUpperCase();
   app.innerHTML = `
     <header class="topbar">
-      <button id="nav-workspace" class="brand-button">markflow</button>
+      <button id="nav-workspace" class="brand-button">${BRAND_NAME}</button>
       <div class="topbar-right">
         ${LOCAL_FBS_ONLY ? "" : '<button id="nav-settings" class="quiet-button">Настройки</button>'}
         <span class="safety-indicator"><i></i>DRY RUN</span>
@@ -129,7 +130,7 @@ function shell(content: string): void {
 function renderLogin(error = ""): void {
   stopPolling();
   app.innerHTML = `<main class="login-page"><form id="login" class="login-card">
-    <div class="login-brand">markflow</div>
+    <div class="login-brand">${BRAND_NAME}</div>
     <h1>Маркировка</h1>
     <p>Рабочая область WB FBS</p>
     ${error ? `<div class="login-error">${esc(error)}</div>` : ""}
