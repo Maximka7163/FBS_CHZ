@@ -33,6 +33,7 @@ if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
 if (-not $npm) {
     throw "Node.js/npm not found. Install a current Node.js LTS release for the one-time frontend build."
 }
+Ensure-SellariPostgresService
 $psql = Get-Command psql.exe -ErrorAction SilentlyContinue
 if (-not $psql) { $psql = Get-Command psql -ErrorAction SilentlyContinue }
 if (-not $psql) {
@@ -150,19 +151,24 @@ $envLines = @(
 Import-SellariEnvFile -Path $paths.EnvFile
 Assert-SellariLocalSafety
 
-& $paths.Python -m alembic -c (Join-Path $repo "alembic.ini") upgrade 0020_printing_physical_spool
-if ($LASTEXITCODE -ne 0) { throw "Local database migration failed." }
+Push-Location $repo
+try {
+    & $paths.Python -m alembic -c "alembic.ini" upgrade 0020_printing_physical_spool
+    if ($LASTEXITCODE -ne 0) { throw "Local database migration failed." }
 
-$env:PGPASSWORD = $appPassword
-$bootstrapCount = (& $psql.Source -h $PostgresHost -p $PostgresPort -U sellari_local -d sellari_local -Atqc "SELECT count(*) FROM security_bootstrap;").Trim()
-if ($LASTEXITCODE -ne 0) { throw "Cannot verify local Sellari bootstrap state." }
-if ($bootstrapCount -eq "0") {
-    if (-not $OwnerUsername) { $OwnerUsername = Read-Host "Local owner username" }
-    Write-Host "Create the local Sellari owner password. It is stored only as a password hash in local PostgreSQL."
-    & $paths.Python -m wbcz_web.admin bootstrap-owner $OwnerUsername --organisation $OrganisationName --inn $ParticipantInn --participant-name "WB FBS"
-    if ($LASTEXITCODE -ne 0) { throw "Local OWNER bootstrap failed." }
-} else {
-    Write-Host "Local OWNER already bootstrapped; keeping existing account."
+    $env:PGPASSWORD = $appPassword
+    $bootstrapCount = (& $psql.Source -h $PostgresHost -p $PostgresPort -U sellari_local -d sellari_local -Atqc "SELECT count(*) FROM security_bootstrap;").Trim()
+    if ($LASTEXITCODE -ne 0) { throw "Cannot verify local Sellari bootstrap state." }
+    if ($bootstrapCount -eq "0") {
+        if (-not $OwnerUsername) { $OwnerUsername = Read-Host "Local owner username" }
+        Write-Host "Create the local Sellari owner password. It is stored only as a password hash in local PostgreSQL."
+        & $paths.Python -m wbcz_web.admin bootstrap-owner $OwnerUsername --organisation $OrganisationName --inn $ParticipantInn --participant-name "WB FBS"
+        if ($LASTEXITCODE -ne 0) { throw "Local OWNER bootstrap failed." }
+    } else {
+        Write-Host "Local OWNER already bootstrapped; keeping existing account."
+    }
+} finally {
+    Pop-Location
 }
 
 if ($null -eq $previousPgPassword) {
