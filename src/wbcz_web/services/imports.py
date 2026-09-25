@@ -6,6 +6,7 @@ from wbcz.models import Event,Operation
 from wbcz.wb_parser import MAX_FILE_BYTES,WorkbookError,parse_excel
 from wbcz_web.models import EventRecord,ImportRecord,ImportRow
 from wbcz_web.repositories import AuditRepository,ImportRepository
+from wbcz_web.services.kiz_transaction_lock import acquire_tenant_kiz_locks
 class UploadError(ValueError):pass
 def _scope(db:Session):
  s=db.info.get("tenant_scope")
@@ -25,6 +26,7 @@ class FileImportService:
   if len(data)>MAX_FILE_BYTES:raise UploadError("Файл превышает допустимый размер 50 MiB")
   try:parsed=parse_excel(data)
   except WorkbookError as exc:raise UploadError(str(exc)) from exc
+  acquire_tenant_kiz_locks(self.db,org,participant,[item.event.kiz for item in parsed.rows])
   fingerprint=sha256(data).hexdigest();repeated=self.imports.first_by_fingerprint(fingerprint);record=ImportRecord(organisation_id=org,participant_id=participant,fingerprint=fingerprint,filename=safe[:255],imported_by=user_id,repeated_of_id=repeated.id if repeated else None);self.db.add(record);self.db.flush()
   inserted=duplicates=dated=undated=0;unique_kiz=set();ops=Counter();known=set()
   for item in parsed.rows:

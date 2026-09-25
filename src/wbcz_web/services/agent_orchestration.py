@@ -29,6 +29,7 @@ from wbcz_web.config import WebConfig
 from wbcz_web.models import AgentBindingRecord, AgentJobRecord, BootstrapRecord, CheckRecord, ControlRun, ParticipantRecord, ReportJobRecord
 from wbcz_web.repositories import ImportRepository, SqlAlchemyAgentJobStore, SqlAlchemyWriteOperationStore
 from wbcz_web.services.imports import record_to_event
+from wbcz_web.services.kiz_transaction_lock import acquire_tenant_kiz_lock
 from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 from wbcz_web.services.agent_bindings import AgentBindingService, AgentPrincipal
 from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
@@ -604,16 +605,10 @@ class AgentOrchestrationBroker:
             )
         )
         self.db.flush()
-        if outcome.decision in {Decision.READY_TO_WITHDRAW, Decision.READY_TO_RETURN}:
-            if self.config.fbs_dry_run_only:
-                return
-            try:
-                document = self.document_assembler.build_exact(event, outcome.decision)
-            except ProductionDocumentContractUnconfirmed:
-                # READY is preserved as the control decision, but fail closed:
-                # no write operation/job exists until official exact bytes are available.
-                return
-            self.prepare_approved_write(event_id, document, decision=outcome.decision)
+        # Control is decision-only. A certificate/read result must never create
+        # a business operation implicitly; writes require the separate explicit
+        # confirmation workflow and the write gate below.
+        return
 
     def prepare_approved_write(
         self,
@@ -624,16 +619,35 @@ class AgentOrchestrationBroker:
     ) -> AgentJob:
         if self.config.fbs_dry_run_only:
             raise InvalidWriteOperation("FBS_DRY_RUN_ONLY: write operation creation is disabled")
+        if not self.config.true_api_write_enabled:
+            raise InvalidWriteOperation("TRUE_API_WRITE_DISABLED: write operation creation is disabled")
+        if not self.config.true_api_real_read_enabled:
+            raise InvalidWriteOperation("LIVE_CHZ_CONTROL_REQUIRED: live True API control is required")
         row = self.imports.event(event_id)
         if row is None:
             raise KeyError(event_id)
+        acquire_tenant_kiz_lock(
+            self.db,
+            row.organisation_id,
+            row.participant_id,
+            row.kiz,
+        )
         check = self.imports.latest_check(event_id)
+        if check is None or check.source != "windows-agent-true-api":
+            raise InvalidWriteOperation(
+                "LIVE_CHZ_CONTROL_REQUIRED: latest READY decision is not backed by live True API state"
+            )
         approved = decision or (Decision(check.decision) if check else None)
         if approved not in {Decision.READY_TO_WITHDRAW, Decision.READY_TO_RETURN}:
             raise InvalidWriteOperation("only READY control decisions can create a write job")
         expected = Decision(check.decision) if check else None
         if expected is not approved:
             raise InvalidWriteOperation("write decision must match latest stored control decision")
+        sequence_outcome = sequence_outcome_for_event(self.imports, event_id)
+        if sequence_outcome is not None:
+            raise InvalidWriteOperation(
+                f"{sequence_outcome.reason}: READY decision is stale against current WB history"
+            )
         document_type, operation_reason = (
             ("LK_RECEIPT", "DISTANCE")
             if approved is Decision.READY_TO_WITHDRAW

@@ -33,12 +33,13 @@ from wbcz_web.models import (
     WriteOperationRecord,
 )
 from wbcz_web.repositories import ImportRepository
-from wbcz_web.services.agent_orchestration import AgentControlService, CONTROL_CIS, WRITE
+from wbcz_web.services.agent_orchestration import AgentControlService, CONTROL_CIS, CONTROL_CIS_BATCH, WRITE
 from wbcz_web.services.document_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.imports import FileImportService, event_to_record
 from wbcz_web.services.authorization import BootstrapService
 from wbcz_web.services.tenant import bind_tenant_scope
 from wbcz_web.services.workspace import (
+    BulkActionUnavailable,
     FbsDryRunWriteBlocked,
     bulk_preview,
     execute_bulk_actions,
@@ -78,7 +79,14 @@ def event(label: str, operation: Operation = Operation.SALE) -> Event:
     )
 
 
-def config(database_url: str, *, agent: bool = True, org: bool = True, dry_run: bool = False) -> WebConfig:
+def config(
+    database_url: str,
+    *,
+    agent: bool = True,
+    org: bool = True,
+    dry_run: bool = False,
+    real_read: bool = False,
+) -> WebConfig:
     kwargs = dict(
         database_url=database_url,
         own_inn=OWN,
@@ -90,6 +98,7 @@ def config(database_url: str, *, agent: bool = True, org: bool = True, dry_run: 
         agent_poll_max_seconds=4,
         agent_poll_max_attempts=3,
         true_api_write_enabled=False,
+        true_api_real_read_enabled=real_read,
         fbs_dry_run_only=dry_run,
         audit_pseudonym_key=TEST_AUDIT_KEY,
         audit_pseudonym_key_id=TEST_AUDIT_KEY_ID,
@@ -274,47 +283,32 @@ def test_workspace_groups_states_and_bulk_is_backend_authoritative(pg_factory):
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
-def test_bulk_execution_stages_only_ready_backend_decisions(pg_factory):
-    rows = [
-        event("WITHDRAW"),
-        event("RETURN", Operation.RETURN),
-        event("MANUAL"),
-        event("ERROR"),
-        event("DONE"),
-        event("NOACTION"),
-    ]
+def test_true_api_write_disabled_is_hard_stop_for_bulk_and_prepare(pg_factory):
+    item = event("WRITE-GATE")
+    cfg = config(DB_URL)
     with pg_factory() as db:
-        user, imported = seed_import(db, rows)
-        for item, decision, reason in (
-            (rows[0], Decision.READY_TO_WITHDRAW, "SALE_IN_CIRCULATION"),
-            (rows[1], Decision.READY_TO_RETURN, "RETURN_WITHDRAWN_DISTANCE"),
-            (rows[2], Decision.MANUAL_REVIEW, "OWNER_MISMATCH"),
-            (rows[3], Decision.ERROR, "STATE_LOOKUP_OR_NORMALIZATION_FAILED"),
-            (rows[4], Decision.ALREADY_DONE, "SALE_ALREADY_WITHDRAWN_DISTANCE"),
-            (rows[5], Decision.NO_ACTION, "TEST_NO_ACTION"),
-        ):
-            add_check(db, imported, user, item, decision, reason)
-        result = execute_bulk_actions(db, config(DB_URL), imported.id, user.id)
-        assert result["started_count"] == 2
-        assert result["withdraw_count"] == 1
-        assert result["return_count"] == 1
-        assert result["production_write_enabled"] is False
-        writes = list(db.scalars(select(WriteOperationRecord)))
-        assert {row.event_id for row in writes} == {rows[0].event_id, rows[1].event_id}
-        assert {row.decision for row in writes} == {Decision.READY_TO_WITHDRAW.value, Decision.READY_TO_RETURN.value}
-        write_jobs = list(db.scalars(select(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)))
-        assert len(write_jobs) == 2
-        assert all(row.state == "PENDING" for row in write_jobs)
-        assert all(row.event_id not in {rows[2].event_id, rows[3].event_id, rows[4].event_id, rows[5].event_id} for row in write_jobs)
+        user, imported = seed_import(db, [item])
+        add_check(db, imported, user, item, Decision.READY_TO_WITHDRAW, "SALE_IN_CIRCULATION")
+        with pytest.raises(BulkActionUnavailable, match="TRUE_API_WRITE_DISABLED"):
+            execute_bulk_actions(db, cfg, imported.id, user.id)
+        document = ExactDocumentBuilder.from_json_value({"write_gate": False})
+        with pytest.raises(InvalidWriteOperation, match="TRUE_API_WRITE_DISABLED"):
+            AgentOrchestrationBroker(db, cfg).prepare_approved_write(
+                item.event_id,
+                document,
+                decision=Decision.READY_TO_WITHDRAW,
+            )
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
-def test_agent_control_result_remains_ready_until_explicit_bulk_confirmation(pg_factory):
+def test_agent_control_result_is_decision_only_while_write_gate_off(pg_factory):
     item = event("CONTROL")
     cfg = config(DB_URL)
     with pg_factory() as db:
         user, imported = seed_import(db, [item])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", [item.event_id])
         assert response["pending"] == 1
         job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert job is not None
@@ -339,10 +333,10 @@ def test_agent_control_result_remains_ready_until_explicit_bulk_confirmation(pg_
         assert check is not None and check.decision == Decision.READY_TO_WITHDRAW.value
         assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
-        result = execute_bulk_actions(db, cfg, imported.id, user.id)
-        assert result["started_count"] == 1
-        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 1
-        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 1
+        with pytest.raises(BulkActionUnavailable, match="TRUE_API_WRITE_DISABLED"):
+            execute_bulk_actions(db, cfg, imported.id, user.id)
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
@@ -362,7 +356,9 @@ def test_sequence_control_queues_only_latest_event(
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, [older, latest])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(
+            imported.id, user.id, "AUTO", [older.event_id, latest.event_id]
+        )
         assert response["pending"] == 1
         assert response["checked"] == 1
         jobs = list(db.scalars(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)))
@@ -401,7 +397,9 @@ def test_three_event_sequence_marks_all_older_events_superseded(pg_factory):
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, events)
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(
+            imported.id, user.id, "AUTO", [item.event_id for item in events]
+        )
         assert response["pending"] == 1
         assert response["counts"][Decision.NO_ACTION.value] == 2
         for old in events[:2]:
@@ -423,7 +421,9 @@ def test_ambiguous_event_order_never_queues_true_api_check(pg_factory, ambiguous
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, [first, second])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(
+            imported.id, user.id, "AUTO", [first.event_id, second.event_id]
+        )
         assert response["pending"] == 0
         assert response["counts"] == {Decision.MANUAL_REVIEW.value: 2}
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)) == 0
@@ -502,6 +502,8 @@ def test_workspace_evidence_is_explicit_whitelist_and_dryrun_runtime(pg_factory)
         assert '"token"' not in serialized
         assert view["runtime"]["fbs_dry_run_only"] is True
         assert view["runtime"]["production_write_enabled"] is False
+        assert view["runtime"]["true_api_real_read_enabled"] is False
+        assert view["runtime"]["control_provider"] == "mock-dry-run"
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
@@ -527,6 +529,76 @@ def test_http_dry_run_bulk_bypass_is_typed_409_and_creates_no_write(pg_factory):
         assert response.json()["detail"]["code"] == "FBS_DRY_RUN_ONLY"
     with pg_factory() as db:
         assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_http_mock_control_ignores_agent_presence_when_live_read_is_disabled(pg_factory):
+    password = "very-secure-mock-provider-password"
+    cfg = config(DB_URL, agent=True, org=True, dry_run=True, real_read=False)
+    with pg_factory() as db:
+        _,org,participant,_=BootstrapService(db).bootstrap(
+            username="operator",password=password,organisation_name="Mock Provider",
+            participant_inn=OWN,
+        )
+        org_id,participant_id=org.id,participant.id
+        db.commit()
+    app = create_app(cfg, session_factory=pg_factory)
+    with TestClient(app) as client:
+        login(client, password)
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        client.post("/api/security/scope", headers={"X-CSRF-Token":csrf}, json={"organisation_id":org_id,"participant_id":participant_id})
+        uploaded = client.post("/api/files", headers={"X-CSRF-Token":csrf}, files={"file":("wb.xlsx",workbook_bytes(),"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+        import_id = uploaded.json()["id"]
+        response = client.post(
+            f"/api/files/{import_id}/control",
+            headers={"X-CSRF-Token":csrf},
+            json={"mode":"AUTO","event_ids":None},
+        )
+        assert response.status_code == 200
+        assert response.json()["provider"] == "mock"
+        assert response.json()["checked"] == 1
+        capabilities = client.get("/api/capabilities").json()
+        assert capabilities["true_api"] == "offline-dry-run"
+        assert capabilities["windows_bridge"] is True
+    with pg_factory() as db:
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_http_live_read_only_control_uses_agent_without_enabling_writes(pg_factory):
+    password = "very-secure-live-provider-password"
+    cfg = config(DB_URL, agent=True, org=True, dry_run=True, real_read=True)
+    with pg_factory() as db:
+        _,org,participant,_=BootstrapService(db).bootstrap(
+            username="operator",password=password,organisation_name="Live Provider",
+            participant_inn=OWN,
+        )
+        org_id,participant_id=org.id,participant.id
+        db.commit()
+    app = create_app(cfg, session_factory=pg_factory)
+    with TestClient(app) as client:
+        login(client, password)
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        client.post("/api/security/scope", headers={"X-CSRF-Token":csrf}, json={"organisation_id":org_id,"participant_id":participant_id})
+        uploaded = client.post("/api/files", headers={"X-CSRF-Token":csrf}, files={"file":("wb.xlsx",workbook_bytes(),"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+        import_id = uploaded.json()["id"]
+        response = client.post(
+            f"/api/files/{import_id}/control",
+            headers={"X-CSRF-Token":csrf},
+            json={"mode":"AUTO","event_ids":None},
+        )
+        assert response.status_code == 200
+        assert response.json()["provider"] == "windows-agent"
+        assert response.json()["pending"] == 1
+        view = client.get(f"/api/files/{import_id}/workspace").json()
+        assert view["runtime"]["control_provider"] == "live-read-only"
+        assert view["runtime"]["production_write_enabled"] is False
+        capabilities = client.get("/api/capabilities").json()
+        assert capabilities["true_api"] == "windows-agent"
+        assert capabilities["windows_bridge"] is True
+    with pg_factory() as db:
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS_BATCH)) == 1
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
 
 
@@ -568,9 +640,96 @@ def test_exact_duplicate_rows_create_one_event_and_one_cis_check(pg_factory):
         imported = FileImportService(db).import_xlsx("duplicate.xlsx", stream.getvalue(), user.id)
         assert imported.new_events == 1
         assert imported.duplicate_events == 1
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        event_ids = [row.event_id for row in ImportRepository(db).ordered_event_records(imported.id)]
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", event_ids)
         assert response["pending"] == 1
         assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS)) == 1
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_live_ready_is_blocked_after_newer_overlapping_wb_event_before_any_write_state(pg_factory):
+    sale = event("STALE-READY", Operation.SALE)
+    read_cfg = config(DB_URL, real_read=True)
+    with pg_factory() as db:
+        user, imported = seed_import(db, [sale])
+        response = AgentControlService(db, read_cfg).run(
+            imported.id, user.id, "AUTO", [sale.event_id]
+        )
+        assert response["pending"] == 1
+        job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
+        assert job is not None
+
+        AgentOrchestrationBroker(db, read_cfg).submit_result(
+            TOKEN,
+            AgentResult(
+                job.job_id,
+                job.operation_id,
+                "CIS_CHECKED",
+                cises=({
+                    "cis": sale.kiz,
+                    "status": "IN_CIRCULATION",
+                    "statusEx": None,
+                    "withdrawReason": None,
+                    "ownerInn": OWN,
+                    "productGroup": "lp",
+                },),
+            ),
+        )
+        check = ImportRepository(db).latest_check(sale.event_id)
+        assert check is not None
+        assert check.source == "windows-agent-true-api"
+        assert check.decision == Decision.READY_TO_WITHDRAW.value
+
+        newer_return = replace(
+            sale,
+            operation=Operation.RETURN,
+            task_number="task-newer-return",
+            sticker="sticker-newer-return",
+            occurred_at=sale.occurred_at + timedelta(hours=1),
+            receipt_number=None,
+            fiscal_drive_number=None,
+        )
+        newer_import = ImportRecord(
+            fingerprint=("f" * 63) + "2",
+            filename="wb-fbs-newer.xlsx",
+            imported_by=user.id,
+            new_events=1,
+            duplicate_events=0,
+            rejected_rows=0,
+            row_count=1,
+            unique_kiz=1,
+            sales=0,
+            returns=1,
+            dated=1,
+            undated=0,
+        )
+        db.add(newer_import)
+        db.flush()
+        db.add(event_to_record(newer_return))
+        db.flush()
+        db.add(ImportRow(import_id=newer_import.id, row_number=2, event_id=newer_return.event_id))
+        db.flush()
+
+        write_cfg = replace(
+            read_cfg,
+            fbs_dry_run_only=False,
+            true_api_write_enabled=True,
+            true_api_real_read_enabled=True,
+        )
+
+        with pytest.raises(BulkActionUnavailable, match="SUPERSEDED_BY_LATER_WB_EVENT"):
+            execute_bulk_actions(db, write_cfg, imported.id, user.id)
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
+
+        with pytest.raises(InvalidWriteOperation, match="SUPERSEDED_BY_LATER_WB_EVENT"):
+            AgentOrchestrationBroker(db, write_cfg).prepare_approved_write(
+                sale.event_id,
+                ExactDocumentBuilder.from_json_value({"stale_ready": True}),
+                decision=Decision.READY_TO_WITHDRAW,
+            )
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord).where(AgentJobRecord.purpose == WRITE)) == 0
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
@@ -579,7 +738,7 @@ def test_result_time_sequence_recheck_prevents_stale_ready_after_newer_import(pg
     cfg = config(DB_URL, dry_run=True)
     with pg_factory() as db:
         user, imported = seed_import(db, [older])
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", [older.event_id])
         assert response["pending"] == 1
         job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert job is not None
@@ -654,7 +813,8 @@ def test_238_row_upload_agent_results_and_workspace_regression(pg_factory, wb_re
         assert imported.new_events == 238
         assert imported.duplicate_events == 0
 
-        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO")
+        event_ids = [row.event_id for row in ImportRepository(db).ordered_event_records(imported.id)]
+        response = AgentControlService(db, cfg).run(imported.id, user.id, "AUTO", event_ids)
         assert response["pending"] == 238
         assert response["checked"] == 0
         jobs = list(db.scalars(
@@ -693,8 +853,8 @@ def test_238_row_upload_agent_results_and_workspace_regression(pg_factory, wb_re
         decisions = Counter(item["decision"] for item in view["items"])
         assert decisions == {
             Decision.READY_TO_WITHDRAW.value: 63,
-            Decision.READY_TO_RETURN.value: 5,
-            Decision.MANUAL_REVIEW.value: 170,
+            Decision.READY_TO_RETURN.value: 162,
+            Decision.MANUAL_REVIEW.value: 13,
         }
         assert all(item["source"] == "windows-agent-true-api" for item in view["items"])
         assert all(item["owner_match"] is True for item in view["items"])

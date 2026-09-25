@@ -87,7 +87,7 @@ def test_return_withdrawn_remote_with_receipt_ready(event):
     )
 
 
-def test_return_withdrawn_remote_without_receipt_manual(event):
+def test_return_withdrawn_remote_without_receipt_ready(event):
     returned = replace(
         event,
         operation=Operation.RETURN,
@@ -100,8 +100,8 @@ def test_return_withdrawn_remote_without_receipt_manual(event):
         OWN,
     )
     assert (outcome.decision, outcome.reason) == (
-        Decision.MANUAL_REVIEW,
-        "RETURN_RECEIPT_MISSING",
+        Decision.READY_TO_RETURN,
+        "RETURN_WITHDRAWN_DISTANCE",
     )
 
 

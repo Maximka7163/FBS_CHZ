@@ -56,8 +56,8 @@ def valid_test_cis(label: str) -> str:
     return value
 
 
-def agent_config(database_url: str) -> WebConfig:
-    return WebConfig(
+def agent_config(database_url: str, *, writes: bool = False) -> WebConfig:
+    config = WebConfig(
         database_url=database_url,
         own_inn=OWN,
         environment="test",
@@ -68,7 +68,9 @@ def agent_config(database_url: str) -> WebConfig:
         agent_poll_max_seconds=4,
         agent_poll_max_attempts=3,
         true_api_write_enabled=False,
+        true_api_real_read_enabled=writes,
     ).validate_for_startup()
+    return replace(config, true_api_write_enabled=True) if writes else config
 
 
 @pytest.fixture
@@ -127,14 +129,23 @@ def seed_import(db, event: Event):
     return user, record
 
 
-def add_check(db, event: Event, import_id: str, user_id: int, decision: Decision, reason: str):
+def add_check(
+    db,
+    event: Event,
+    import_id: str,
+    user_id: int,
+    decision: Decision,
+    reason: str,
+    *,
+    source: str = "test",
+):
     run = ControlRun(import_id=import_id, user_id=user_id, mode="AUTO", provider="test")
     db.add(run)
     db.flush()
     db.add(CheckRecord(
         run_id=run.id,
         event_id=event.event_id,
-        source="test",
+        source=source,
         snapshot=None,
         decision=decision.value,
         reason=reason,
@@ -166,7 +177,9 @@ def test_fastapi_agent_endpoints_dispatch_machine_auth_and_duplicate_result_once
     event = sale_event("CIS-HTTP-DISPATCH")
     with pg_factory() as db:
         user, imported = seed_import(db, event)
-        AgentControlService(db, config).run(imported.id, user.id, "AUTO")
+        AgentControlService(db, config).run(
+            imported.id, user.id, "AUTO", [event.event_id]
+        )
         queued = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert queued is not None
         job_id = queued.job_id
@@ -351,7 +364,9 @@ def test_wb_control_queues_cis_and_windows_result_is_decided_on_vps(pg_factory):
     event = sale_event()
     with pg_factory() as db:
         user, imported = seed_import(db, event)
-        response = AgentControlService(db, config).run(imported.id, user.id, "AUTO")
+        response = AgentControlService(db, config).run(
+            imported.id, user.id, "AUTO", [event.event_id]
+        )
         assert response["pending"] == 1
         job = db.scalar(select(AgentJobRecord).where(AgentJobRecord.purpose == CONTROL_CIS))
         assert job is not None and job.job_type == AgentJobType.CIS_CHECK.value
@@ -393,11 +408,14 @@ def test_wb_control_queues_cis_and_windows_result_is_decided_on_vps(pg_factory):
     ],
 )
 def test_only_ready_decisions_map_to_exact_write_types(pg_factory, decision, operation, job_type):
-    config = agent_config(DB_URL)
+    config = agent_config(DB_URL, writes=True)
     event = replace(sale_event(f"CIS-{decision.value}"), operation=operation)
     with pg_factory() as db:
         user, imported = seed_import(db, event)
-        add_check(db, event, imported.id, user.id, decision, "TEST_READY")
+        add_check(
+            db, event, imported.id, user.id, decision, "TEST_READY",
+            source="windows-agent-true-api",
+        )
         broker = AgentOrchestrationBroker(db, config)
         job = broker.prepare_approved_write(
             event.event_id,
@@ -410,11 +428,14 @@ def test_only_ready_decisions_map_to_exact_write_types(pg_factory, decision, ope
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
 @pytest.mark.parametrize("decision", [Decision.MANUAL_REVIEW, Decision.ERROR, Decision.ALREADY_DONE, Decision.NO_ACTION])
 def test_non_ready_decisions_cannot_queue_write(pg_factory, decision):
-    config = agent_config(DB_URL)
+    config = agent_config(DB_URL, writes=True)
     event = sale_event(f"CIS-{decision.value}")
     with pg_factory() as db:
         user, imported = seed_import(db, event)
-        add_check(db, event, imported.id, user.id, decision, "TEST_BLOCKED")
+        add_check(
+            db, event, imported.id, user.id, decision, "TEST_BLOCKED",
+            source="windows-agent-true-api",
+        )
         broker = AgentOrchestrationBroker(db, config)
         with pytest.raises(InvalidWriteOperation, match="only READY"):
             broker.prepare_approved_write(
@@ -425,7 +446,10 @@ def test_non_ready_decisions_cannot_queue_write(pg_factory, decision):
 
 
 def _prepare_submitted_write(db, config: WebConfig, event: Event, imported, user):
-    add_check(db, event, imported.id, user.id, Decision.READY_TO_WITHDRAW, "TEST_READY")
+    add_check(
+        db, event, imported.id, user.id, Decision.READY_TO_WITHDRAW, "TEST_READY",
+        source="windows-agent-true-api",
+    )
     broker = AgentOrchestrationBroker(db, config)
     write_job = broker.prepare_approved_write(
         event.event_id,
@@ -452,7 +476,7 @@ def _prepare_submitted_write(db, config: WebConfig, event: Event, imported, user
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
 def test_checked_ok_requires_reconciliation_and_mismatch_becomes_manual_review(pg_factory):
-    config = agent_config(DB_URL)
+    config = agent_config(DB_URL, writes=True)
     event = sale_event("CIS-RECON")
     with pg_factory() as db:
         user, imported = seed_import(db, event)
@@ -495,7 +519,7 @@ def test_checked_ok_requires_reconciliation_and_mismatch_becomes_manual_review(p
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
 def test_intermediate_poll_is_backoff_scheduled_and_unknown_status_fails_closed(pg_factory):
-    config = agent_config(DB_URL)
+    config = agent_config(DB_URL, writes=True)
     event = sale_event("CIS-POLL")
     with pg_factory() as db:
         user, imported = seed_import(db, event)

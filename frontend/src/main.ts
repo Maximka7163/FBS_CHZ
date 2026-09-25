@@ -374,8 +374,11 @@ function statusBanner(view: WorkspaceView): string {
 
 function bulkBar(view: WorkspaceView): string {
   const total = view.bulk.eligible_count;
-  if (view.runtime.fbs_dry_run_only) {
-    return `<div class="bulk-bar"><div class="bulk-copy"><strong>DRY RUN — реальные действия отключены</strong><span>Результаты проверки доступны только для просмотра; backend запрещает создание операций и WRITE jobs.</span></div></div>`;
+  if (view.runtime.fbs_dry_run_only || !view.runtime.production_write_enabled) {
+    const title = view.runtime.fbs_dry_run_only
+      ? "DRY RUN — реальные действия отключены"
+      : "READ ONLY — реальные действия отключены";
+    return `<div class="bulk-bar"><div class="bulk-copy"><strong>${title}</strong><span>Результаты проверки доступны только для просмотра; backend запрещает создание операций и WRITE jobs.</span></div></div>`;
   }
   return `<div class="bulk-bar">
     <div class="bulk-copy">${total ? `<strong>${total} ${plural(total, "готовое действие", "готовых действия", "готовых действий")}</strong><span>Состав определён backend</span>` : `<strong>Готовых действий нет</strong><span>Сначала проверьте КИЗ или устраните проблемы</span>`}</div>

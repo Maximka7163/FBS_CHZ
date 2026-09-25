@@ -9,8 +9,8 @@ def validate_owner_inn(value: str) -> None:
         raise ValueError("ИНН владельца должен содержать 10 или 12 ASCII-цифр")
 
 
-def _has_receipt_evidence(event: Event) -> bool:
-    """Evidence required by the standard WB FBS archive flow."""
+def _has_sale_receipt_evidence(event: Event) -> bool:
+    """Sale evidence required before a new distance-sale withdrawal."""
     return bool(event.receipt_number) and event.occurred_at is not None
 
 
@@ -45,7 +45,7 @@ def decide(event: Event, state: KiState, own_inn: str) -> Outcome:
             return Outcome(Decision.ALREADY_DONE, "RETURN_ALREADY_IN_CIRCULATION")
         if event.legal_entity_sale is not False:
             return Outcome(Decision.MANUAL_REVIEW, "LEGAL_ENTITY_RULES_UNDEFINED")
-        if verified_lp and not _has_receipt_evidence(event):
+        if verified_lp and not _has_sale_receipt_evidence(event):
             return Outcome(Decision.MANUAL_REVIEW, "SALE_RECEIPT_MISSING")
         return Outcome(Decision.READY_TO_WITHDRAW, "SALE_IN_CIRCULATION")
 
@@ -53,6 +53,6 @@ def decide(event: Event, state: KiState, own_inn: str) -> Outcome:
         return Outcome(Decision.MANUAL_REVIEW, "NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL")
     if event.operation is Operation.SALE:
         return Outcome(Decision.ALREADY_DONE, "SALE_ALREADY_WITHDRAWN_DISTANCE")
-    if verified_lp and not _has_receipt_evidence(event):
-        return Outcome(Decision.MANUAL_REVIEW, "RETURN_RECEIPT_MISSING")
+    # A WB return row does not need a new sale receipt/date. Fresh CHZ state is
+    # authoritative: a KI withdrawn specifically for distance sale needs return.
     return Outcome(Decision.READY_TO_RETURN, "RETURN_WITHDRAWN_DISTANCE")
