@@ -9,6 +9,7 @@ if (-not (Test-SellariWindows)) { throw "Sellari local supports Windows 10/11 on
 $paths = Get-SellariLocalPaths -RepositoryRoot $repo
 Import-SellariEnvFile -Path $paths.EnvFile
 Assert-SellariLocalSafety
+Ensure-SellariPostgresService
 
 if ($Port -lt 1 -or $Port -gt 65535) { throw "Port must be between 1 and 65535." }
 if (-not (Test-Path -LiteralPath $paths.Python)) { throw "Run .\Setup-Local.ps1 first." }
