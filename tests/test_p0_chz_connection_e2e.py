@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
+import os
 from pathlib import Path
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 from wbcz.cis_inventory import MAX_BATCH, decision_state_from_cis_info
 from wbcz.models import Decision, Event, Operation
 from wbcz.control_engine import decide
+from wbcz.write_pipeline import InvalidWriteOperation
+from wbcz_web.api.routes import capabilities
 from wbcz_web.config import WebConfig
+from wbcz_web.services.agent_orchestration import AgentOrchestrationBroker
 from wbcz_web.services.cis_inventory import CisInventoryService, CisInventoryUnavailable
 
 
@@ -19,13 +26,51 @@ def source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _compose_config(real_read: str | None) -> dict:
+    env = os.environ.copy()
+    env.update({
+        "WBCZ_POSTGRES_DB": "wbcz_gate_test",
+        "WBCZ_POSTGRES_SUPERUSER_PASSWORD": "synthetic-superuser-password",
+        "WBCZ_APP_DB_PASSWORD": "synthetic-app-password",
+        "WBCZ_MIGRATOR_DB_PASSWORD": "synthetic-migrator-password",
+        "WBCZ_BACKUP_DB_PASSWORD": "synthetic-backup-password",
+        "WBCZ_APP_VERSION": "0.5.1",
+        "WBCZ_BUILD_SHA": "a" * 40,
+        "WBCZ_DATABASE_URL": "postgresql+psycopg://app:pass@db/wbcz",
+        "WBCZ_MIGRATION_DATABASE_URL": "postgresql+psycopg://migrator:pass@db/wbcz",
+        "WBCZ_OWN_INN": "1234567890",
+        "WBCZ_APP_URL": "https://mark.example.test",
+        "WBCZ_TRUSTED_HOSTS": "mark.example.test",
+        "WBCZ_TRUSTED_PROXY_CIDRS": "127.0.0.1/32",
+        "WBCZ_REPORT_ARTIFACT_KEY_VERSION": "artifact-v1",
+        "WBCZ_AUDIT_PSEUDONYM_KEY_ID": "audit-v1",
+    })
+    env.pop("WBCZ_TRUE_API_REAL_READ_ENABLED", None)
+    if real_read is not None:
+        env["WBCZ_TRUE_API_REAL_READ_ENABLED"] = real_read
+    result = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.prod.yml", "config", "--format", "json"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+class _NoPersistenceAccess:
+    def __getattr__(self, name: str):
+        raise AssertionError(f"write preparation touched persistence while hard-stopped: {name}")
+
+
 def test_p0_production_read_and_write_gates_are_explicitly_closed() -> None:
     compose = source("docker-compose.prod.yml")
     env_example = source(".env.production.example")
     required_compose = (
         'WBCZ_FBS_DRY_RUN_ONLY: "true"',
         'WBCZ_TRUE_API_WRITE_ENABLED: "false"',
-        'WBCZ_TRUE_API_REAL_READ_ENABLED: "false"',
+        'WBCZ_TRUE_API_REAL_READ_ENABLED: ${WBCZ_TRUE_API_REAL_READ_ENABLED:-false}',
         'WBCZ_PRINTING_ENABLED: "false"',
         'WBCZ_PRINT_EXECUTION_ENABLED: "false"',
         'WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED: "false"',
@@ -43,6 +88,60 @@ def test_p0_production_read_and_write_gates_are_explicitly_closed() -> None:
         "WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED=false",
     ):
         assert value in env_example
+
+
+def test_p0_production_live_read_gate_defaults_false_and_explicit_true_is_read_only() -> None:
+    safety = {
+        "WBCZ_FBS_DRY_RUN_ONLY": "true",
+        "WBCZ_TRUE_API_WRITE_ENABLED": "false",
+        "WBCZ_PRINTING_ENABLED": "false",
+        "WBCZ_PRINT_EXECUTION_ENABLED": "false",
+        "WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED": "false",
+    }
+    default = _compose_config(None)
+    enabled = _compose_config("true")
+    for service_name in ("marking-backend", "marking-worker"):
+        default_env = default["services"][service_name]["environment"]
+        enabled_env = enabled["services"][service_name]["environment"]
+        assert default_env["WBCZ_TRUE_API_REAL_READ_ENABLED"] == "false"
+        assert enabled_env["WBCZ_TRUE_API_REAL_READ_ENABLED"] == "true"
+        for name, value in safety.items():
+            assert default_env[name] == value
+            assert enabled_env[name] == value
+
+
+def test_p0_real_read_alone_keeps_mutation_capabilities_closed() -> None:
+    live = WebConfig(
+        database_url="postgresql+psycopg://app:pass@db/wbcz",
+        own_inn="1234567890",
+        agent_enabled=True,
+        agent_machine_token="focused-test-agent-token-0123456789",
+        true_api_real_read_enabled=True,
+        true_api_write_enabled=False,
+        fbs_dry_run_only=True,
+        printing_enabled=False,
+        print_execution_enabled=False,
+        suz_full_km_remote_acquisition_enabled=False,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(config=live)))
+    live_caps = capabilities(request, None)
+    assert live_caps["true_api"] == "windows-agent"
+    assert live_caps["true_api_write"] is False
+    assert live_caps["document_signing"] is False
+    assert live_caps["submission"] is False
+
+    offline = replace(live, true_api_real_read_enabled=False)
+    offline_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(config=offline)))
+    assert capabilities(offline_request, None)["true_api"] == "offline-dry-run"
+
+    broker = AgentOrchestrationBroker(_NoPersistenceAccess(), live)  # type: ignore[arg-type]
+    with pytest.raises(InvalidWriteOperation, match="FBS_DRY_RUN_ONLY"):
+        broker.prepare_approved_write("must-not-be-read", None)  # type: ignore[arg-type]
+
+    assert live.true_api_write_enabled is False
+    assert live.printing_enabled is False
+    assert live.print_execution_enabled is False
+    assert live.suz_full_km_remote_acquisition_enabled is False
 
 
 def test_p0_focused_ci_uses_synthetic_audit_key_and_production_still_requires_explicit_audit_key() -> None:
