@@ -66,12 +66,16 @@ function Get-SellariPythonCommand {
     $py = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($py) {
         & $py.Source -3.12 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,12) else 2)"
-        if ($LASTEXITCODE -eq 0) { return @($py.Source, "-3.12") }
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{ Exe = $py.Source; PrefixArgs = @("-3.12") }
+        }
     }
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($python) {
         & $python.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3,12) else 2)"
-        if ($LASTEXITCODE -eq 0) { return @($python.Source) }
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{ Exe = $python.Source; PrefixArgs = @() }
+        }
     }
     throw "Python 3.12+ not found. Install Python 3.12 for Windows, then rerun Setup-Local.ps1."
 }
