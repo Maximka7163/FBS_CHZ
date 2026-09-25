@@ -16,6 +16,7 @@ import type {
 import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const LOCAL_FBS_ONLY = import.meta.env.VITE_SELLARI_LOCAL_FBS_ONLY === "true";
 
 let user: UserInfo | null = null;
 let homeHistory: FileItem[] = [];
@@ -95,7 +96,7 @@ function shell(content: string): void {
     <header class="topbar">
       <button id="nav-workspace" class="brand-button">markflow</button>
       <div class="topbar-right">
-        <button id="nav-settings" class="quiet-button">Настройки</button>
+        ${LOCAL_FBS_ONLY ? "" : '<button id="nav-settings" class="quiet-button">Настройки</button>'}
         <span class="safety-indicator"><i></i>DRY RUN</span>
         <span class="safety-indicator"><i></i>Отправка в ЧЗ отключена</span>
         <span class="profile" title="${esc(user?.username || "")}">${esc(initials)}</span>
@@ -750,7 +751,7 @@ function readError(error: unknown): string {
 }
 
 async function restoreInitialView(): Promise<void> {
-  if (viewFromUrl() === "integrations") {
+  if (!LOCAL_FBS_ONLY && viewFromUrl() === "integrations") {
     await openIntegrations();
     return;
   }
@@ -763,7 +764,7 @@ async function restoreInitialView(): Promise<void> {
 }
 
 window.addEventListener("popstate", () => {
-  if (viewFromUrl() === "integrations") {
+  if (!LOCAL_FBS_ONLY && viewFromUrl() === "integrations") {
     void openIntegrations();
     return;
   }
