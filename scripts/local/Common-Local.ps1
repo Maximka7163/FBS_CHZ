@@ -80,6 +80,20 @@ function Get-SellariPythonCommand {
     throw "Python 3.12+ not found. Install Python 3.12 for Windows, then rerun Setup-Local.ps1."
 }
 
+function Ensure-SellariPostgresService {
+    $services = @(Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue)
+    if (-not $services.Count) { return }
+    if ($services | Where-Object { $_.Status -eq "Running" }) { return }
+    $preferred = $services | Where-Object { $_.Name -match "16" } | Select-Object -First 1
+    if (-not $preferred) { $preferred = $services | Select-Object -First 1 }
+    try {
+        Start-Service -Name $preferred.Name
+        $preferred.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(15))
+    } catch {
+        throw "Local PostgreSQL service '$($preferred.Name)' is stopped and could not be started. Start it manually or run PowerShell with permission to start the service."
+    }
+}
+
 function Find-SellariCryptoPro {
     $candidates = @(
         "$env:ProgramFiles\Crypto Pro\CSP\csptest.exe",
