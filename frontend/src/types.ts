@@ -217,6 +217,54 @@ export interface EnrollmentIntent {
   requested_protocol_version: string | null;
 }
 
+export interface LocalTrueApiCandidate {
+  thumbprint: string;
+  subject: string | null;
+  certificate_inn: string | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  has_private_key: boolean;
+  compatibility: string | null;
+  crypto_provider: string | null;
+  eligible: boolean;
+}
+
+export interface LocalTrueApiStatus {
+  cryptopro_available: boolean;
+  candidates: LocalTrueApiCandidate[];
+  error_code: string | null;
+  selected_thumbprint: string | null;
+  authenticated: boolean;
+  expire_date: string | null;
+  gost_session_verified: boolean;
+  real_read_enabled: boolean;
+  read_only: boolean;
+  business_write_enabled: boolean;
+  uuid_token_persisted: boolean;
+  pin_persisted: boolean;
+}
+
+export interface LocalCisInfoResponse {
+  status: "completed";
+  source: "local-cryptopro-true-api";
+  items: Array<{
+    requested_cis: string;
+    normalized: {
+      requested_cis: string;
+      cis: string | null;
+      gtin: string | null;
+      product_name: string | null;
+      product_group: string | null;
+      owner_inn: string | null;
+      owner_name: string | null;
+      status: string | null;
+      status_ex: string | null;
+      withdraw_reason: string | null;
+    } | null;
+    item_error: { code?: string | null; message?: string | null } | null;
+  }>;
+}
+
 export interface CisInventoryRequest {
   request_id: string;
   job_type: string;
