@@ -52,8 +52,8 @@ def local_preflight() -> dict:
     checks.append({
         "name": "cryptopro_stunnel",
         "ok": bool(crypto.stunnel_path),
-        "detail": crypto.stunnel_path or "CryptoPro stunnel not detected; required by later live-read activation",
-        "required": False,
+        "detail": crypto.stunnel_path or "CryptoPro stunnel_msspi.exe not detected",
+        "required": True,
     })
 
     psql = shutil.which("psql")
@@ -101,7 +101,7 @@ def local_preflight() -> dict:
         "required_failures": required_failures,
         "checks": checks,
         "safety": {
-            "true_api_real_read_enabled": False,
+            "true_api_real_read_enabled": True,
             "true_api_write_enabled": False,
             "fbs_dry_run_only": True,
             "printing_enabled": False,
