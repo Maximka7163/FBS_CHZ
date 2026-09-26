@@ -5,10 +5,11 @@ from decimal import Decimal
 from io import BytesIO
 import os
 from pathlib import Path
+from uuid import uuid4
 
 from openpyxl import Workbook
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from wbcz.models import Decision, Event, KiState, Operation
@@ -256,15 +257,19 @@ def test_local_cises_info_batches_more_than_1000_codes() -> None:
     assert transport.batch_sizes == [1000, 1]
 
 
-def test_local_auth_is_cleared_after_true_api_unauthorized_response() -> None:
+@pytest.mark.parametrize("http_status", [401, 403])
+def test_local_auth_is_cleared_after_true_api_unauthorized_response(
+    http_status: int,
+) -> None:
     runtime, transport, _, _ = _runtime()
     runtime.authenticate()
-    transport.fail_next_info_status = 401
+    transport.fail_next_info_status = http_status
 
     with pytest.raises(TrueApiHttpError):
         runtime.read_states([CIS])
 
     assert runtime.authenticated is False
+    assert runtime._session is None
 
 
 def test_local_bridge_persists_only_certificate_selection_not_uuid_token(
@@ -339,6 +344,63 @@ def test_local_certificate_selection_requires_exact_participant_inn(tmp_path: Pa
         bridge.select_certificate(INN, THUMBPRINT)
     assert exc_info.value.code == "CERTIFICATE_NOT_ELIGIBLE"
     assert not (tmp_path / "settings.json").exists()
+
+
+def test_tampered_persisted_certificate_is_rebound_to_active_participant_before_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other_thumbprint = "B" * 40
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        '{"thumbprint":"' + other_thumbprint + '","participant_inn":"' + INN + '"}',
+        encoding="utf-8",
+    )
+
+    class OtherParticipantDiscovery:
+        def discover(self) -> dict:
+            return {
+                "cryptopro_available": True,
+                "candidates": [{
+                    "thumbprint": other_thumbprint,
+                    "subject": "CN=Other Participant, INN=9999999999",
+                    "certificate_inn": "9999999999",
+                    "valid_from": "2026-01-01T00:00:00+00:00",
+                    "valid_to": "2027-01-01T00:00:00+00:00",
+                    "has_private_key": True,
+                    "compatibility": "GOST_CRYPTOPRO",
+                    "crypto_provider": "Crypto-Pro GOST R 34.10-2012",
+                }],
+            }
+
+    class ForbiddenInspector:
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("certificate inspector must not run for INN mismatch")
+
+    bridge = LocalTrueApiReadBridge(
+        settings_path=settings,
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=OtherParticipantDiscovery(),
+    )
+    build_calls = 0
+
+    def forbidden_build(participant_inn: str, thumbprint: str):
+        nonlocal build_calls
+        build_calls += 1
+        raise AssertionError("signer/transport runtime must not be constructed")
+
+    monkeypatch.setattr(
+        "wbcz_local.bridge.WindowsCryptoProCertificateInspector",
+        ForbiddenInspector,
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", forbidden_build)
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.authenticate(INN)
+
+    assert exc_info.value.code == "CERTIFICATE_NOT_ELIGIBLE"
+    assert build_calls == 0
+    assert bridge._runtime is None
 
 
 def test_local_bridge_has_no_document_sign_or_business_mutation_method(tmp_path: Path) -> None:
@@ -429,15 +491,28 @@ def _workbook_bytes(event: Event) -> bytes:
 def local_pg_factory():
     if not DB_URL:
         pytest.skip("WBCZ_TEST_DATABASE_URL requires PostgreSQL")
-    engine = create_engine(DB_URL, future=True)
-    Base.metadata.drop_all(engine)
+
+    # Never mutate the shared/public test schema. Each local True API test gets
+    # its own PostgreSQL schema and drops only that schema at teardown.
+    schema = f"local_true_api_{uuid4().hex}"
+    admin_engine = create_engine(DB_URL, future=True)
+    with admin_engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+
+    engine = create_engine(
+        DB_URL,
+        future=True,
+        connect_args={"options": f"-csearch_path={schema}"},
+    )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     try:
         yield factory
     finally:
-        Base.metadata.drop_all(engine)
         engine.dispose()
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin_engine.dispose()
 
 
 def _seed_local_sale(factory):
@@ -509,6 +584,81 @@ def test_local_fbs_control_uses_fresh_true_api_state_without_agent_or_write_stat
         assert check.snapshot["status"] == "IN_CIRCULATION"
         assert db.scalar(select(func.count()).select_from(AgentJobRecord)) == 0
         assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_fbs_control_rechecks_history_after_read_and_later_return_wins(
+    local_pg_factory,
+) -> None:
+    user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
+    state = KiState(
+        status="IN_CIRCULATION",
+        statusEx=None,
+        withdrawReason=None,
+        ownerInn=INN,
+        productGroup="lp",
+    )
+
+    class LaterReturnDuringReadBridge(StaticStateBridge):
+        def read_states(self, participant_inn: str, cises):
+            values = tuple(cises)
+            self.calls.append((participant_inn, values))
+            later_return = Event(
+                kiz=CIS,
+                task_number="local-task-2",
+                sticker="local-sticker-2",
+                operation=Operation.RETURN,
+                occurred_at=datetime(2026, 9, 25, 13, 0, tzinfo=timezone.utc),
+                receipt_number=None,
+                fiscal_drive_number=None,
+                amount=Decimal("1900.00"),
+                currency="RUB",
+                legal_entity_sale=False,
+            )
+            # Separate DB session simulates a rolling WB import committing while
+            # the original control request is waiting on True API network I/O.
+            with local_pg_factory() as other:
+                bind_tenant_scope(
+                    other,
+                    organisation_id=org_id,
+                    participant_id=participant_id,
+                    user_id=user_id,
+                    role="OWNER",
+                )
+                FileImportService(other).import_xlsx(
+                    "later-return.xlsx",
+                    _workbook_bytes(later_return),
+                    user_id,
+                )
+                other.commit()
+            return {cis: state for cis in values}
+
+    bridge = LaterReturnDuringReadBridge(state=state)
+
+    with local_pg_factory() as db:
+        bind_tenant_scope(
+            db,
+            organisation_id=org_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            role="OWNER",
+        )
+        result = LocalTrueApiControlService(db, bridge).run(  # type: ignore[arg-type]
+            import_id,
+            user_id,
+            OperationMode.AUTO,
+        )
+        db.commit()
+
+        old_event_id = ImportRepository(db).ordered_event_records(import_id)[0].event_id
+        check = ImportRepository(db).latest_check(old_event_id)
+        assert check is not None
+        assert check.source == "wb-sequence-policy"
+        assert check.decision == Decision.NO_ACTION.value
+        assert check.reason == "SUPERSEDED_BY_LATER_WB_EVENT"
+        assert check.snapshot is None
+        assert check.decision != Decision.READY_TO_WITHDRAW.value
+        assert result["counts"].get(Decision.READY_TO_WITHDRAW.value, 0) == 0
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
