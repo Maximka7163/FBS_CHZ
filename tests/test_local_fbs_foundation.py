@@ -27,7 +27,7 @@ def _config(**changes) -> WebConfig:
         agent_enabled=False,
         agent_legacy_bootstrap_enabled=False,
         fbs_dry_run_only=True,
-        true_api_real_read_enabled=False,
+        true_api_real_read_enabled=True,
         true_api_write_enabled=False,
         printing_enabled=False,
         print_execution_enabled=False,
@@ -49,7 +49,10 @@ def test_local_app_is_loopback_fbs_surface_and_serves_frontend(tmp_path: Path) -
     assert "/api/auth/login" in paths
     assert "/api/files" in paths
     assert "/api/files/{import_id}/control" in paths
-    assert "/api/cis-inventory/info" in paths
+    assert "/api/local/true-api/status" in paths
+    assert "/api/local/true-api/authenticate" in paths
+    assert "/api/local/true-api/cises-info" in paths
+    assert "/api/cis-inventory/info" not in paths
     assert "/api/live" in paths
     assert "/api/integrations" not in paths
     assert "/api/agent/status" not in paths
@@ -63,7 +66,7 @@ def test_local_app_is_loopback_fbs_surface_and_serves_frontend(tmp_path: Path) -
     ("field", "value", "message"),
     [
         ("fbs_dry_run_only", False, "FBS_DRY_RUN_ONLY"),
-        ("true_api_real_read_enabled", True, "real read"),
+        ("true_api_real_read_enabled", False, "real read"),
         ("true_api_write_enabled", True, "business writes"),
         ("agent_enabled", True, "VPS/agent"),
         ("printing_enabled", True, "printing"),
@@ -82,7 +85,7 @@ def test_local_foundation_accepts_only_closed_gates() -> None:
     config = _config()
     assert_local_foundation_safety(config)
     assert config.fbs_dry_run_only is True
-    assert config.true_api_real_read_enabled is False
+    assert config.true_api_real_read_enabled is True
     assert config.true_api_write_enabled is False
     assert config.agent_enabled is False
     assert config.printing_enabled is False
@@ -99,15 +102,16 @@ def test_local_cli_refuses_non_loopback_bind() -> None:
         _loopback_host("192.168.1.10")
 
 
-def test_local_true_api_bridge_is_diagnostics_only() -> None:
+def test_local_true_api_bridge_exposes_read_auth_but_no_business_signing() -> None:
     bridge = LocalTrueApiBridgeFoundation()
     assert callable(bridge.diagnostics)
+    assert callable(bridge.authenticate)
+    assert callable(bridge.read_states)
     public = {name for name in dir(bridge) if not name.startswith("_")}
     assert "sign" not in public
     assert "submit" not in public
     assert "create_document" not in public
     result = bridge.diagnostics()
-    assert result["real_read_enabled"] is False
     assert result["business_write_enabled"] is False
 
 
@@ -119,7 +123,7 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
 
     for marker in (
         "WBCZ_FBS_DRY_RUN_ONLY=true",
-        "WBCZ_TRUE_API_REAL_READ_ENABLED=false",
+        "WBCZ_TRUE_API_REAL_READ_ENABLED=true",
         "WBCZ_TRUE_API_WRITE_ENABLED=false",
         "WBCZ_AGENT_ENABLED=false",
         "WBCZ_PRINTING_ENABLED=false",
@@ -131,7 +135,9 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "Assert-SellariLocalSafety" in start
     assert "LOCALAPPDATA" in common
     assert "does **not** redistribute CryptoPro" in readme
-    assert "WBCZ_TRUE_API_REAL_READ_ENABLED=true" not in setup
+    assert "WBCZ_TRUE_API_REAL_READ_ENABLED=true" in setup
+    assert "stunnel_msspi.exe" in setup
+    assert "cryptcp.exe" in setup
     assert "WBCZ_TRUE_API_WRITE_ENABLED=true" not in setup
 
 
