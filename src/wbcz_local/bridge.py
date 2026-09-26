@@ -223,14 +223,26 @@ class LocalTrueApiReadBridge:
     def __init__(
         self,
         *,
-        settings_path: str | Path,
-        audit_log_path: str | Path,
+        settings_path: str | Path | None = None,
+        audit_log_path: str | Path | None = None,
         cryptcp_path: str | Path | None = None,
         stunnel_path: str | Path | None = None,
         discovery: Any | None = None,
     ) -> None:
-        self.settings_path = Path(settings_path)
-        self.audit_log_path = Path(audit_log_path)
+        config_dir = Path(
+            os.getenv(
+                "SELLARI_LOCAL_CONFIG_DIR",
+                str(Path.home() / "AppData" / "Local" / "SellariMarking" / "config"),
+            )
+        ).expanduser()
+        log_dir = Path(
+            os.getenv(
+                "SELLARI_LOCAL_LOG_DIR",
+                str(Path.home() / "AppData" / "Local" / "SellariMarking" / "logs"),
+            )
+        ).expanduser()
+        self.settings_path = Path(settings_path) if settings_path else config_dir / "true_api_read.json"
+        self.audit_log_path = Path(audit_log_path) if audit_log_path else log_dir / "true_api_read_audit.jsonl"
         self.cryptcp_path = Path(cryptcp_path) if cryptcp_path else None
         self.stunnel_path = Path(stunnel_path) if stunnel_path else None
         self.discovery = discovery or WindowsCryptoProCertificateDiscovery(
@@ -439,6 +451,9 @@ class LocalTrueApiReadBridge:
             raise LocalTrueApiUnavailable(
                 "TRUE_API_READ_FAILED", "True API read-only request failed"
             ) from exc
+
+    def diagnostics(self) -> dict[str, Any]:
+        return inspect_local_cryptopro_foundation().safe_dict()
 
     def status(self, participant_inn: str) -> dict[str, Any]:
         inventory = self.discover(participant_inn)
