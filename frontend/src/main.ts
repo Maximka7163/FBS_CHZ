@@ -196,7 +196,7 @@ function localTrueApiBlock(): string {
       </div>`).join("")
     : "";
   const connection = status.authenticated
-    ? `<span>Подключено · только чтение${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
+    ? `<span>Подключено · только чтение · GOST TLS ${status.gost_session_verified ? "подтверждён" : "не подтверждён"}${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
     : status.selected_thumbprint
       ? `<button id="local-true-api-auth" class="secondary-button" ${localTrueApiBusy ? "disabled" : ""}>${localTrueApiBusy ? "Подключаем…" : "Войти через CryptoPro / УКЭП"}</button>`
       : candidateRows || '<span>Подходящая УКЭП не найдена. Проверьте CryptoPro и сертификат.</span>';
