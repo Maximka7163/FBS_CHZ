@@ -197,6 +197,65 @@ def test_local_cises_info_uses_in_memory_bearer_and_normalizes_fresh_state() -> 
     assert call["bearer_token"] == TOKEN
 
 
+class BatchTransport(FakeTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_sizes: list[int] = []
+
+    def request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params=None,
+        body=None,
+        bearer_token=None,
+        cis_count=0,
+    ):
+        if (method, path) != ("POST", "/cises/info"):
+            return super().request_json(
+                method,
+                path,
+                params=params,
+                body=body,
+                bearer_token=bearer_token,
+                cis_count=cis_count,
+            )
+        assert params == {"pg": "lp"}
+        assert bearer_token == TOKEN
+        assert isinstance(body, list)
+        self.batch_sizes.append(len(body))
+        return [
+            {
+                "cisInfo": {
+                    "requestedCis": cis,
+                    "status": "INTRODUCED",
+                    "statusEx": "EMPTY",
+                    "ownerInn": INN,
+                    "productGroup": "lp",
+                }
+            }
+            for cis in body
+        ]
+
+
+def test_local_cises_info_batches_more_than_1000_codes() -> None:
+    transport = BatchTransport()
+    runtime = LocalTrueApiReadRuntime(
+        participant_inn=INN,
+        transport=transport,  # type: ignore[arg-type]
+        inspector=FakeInspector(),
+        signer=FakeSigner(),
+    )
+    runtime.authenticate()
+    cises = [f"010460123456{index:06d}" for index in range(1001)]
+
+    result = runtime.read_states(cises)
+
+    assert len(result) == 1001
+    assert transport.batch_sizes == [1000, 1]
+
+
 def test_local_auth_is_cleared_after_true_api_unauthorized_response() -> None:
     runtime, transport, _, _ = _runtime()
     runtime.authenticate()
