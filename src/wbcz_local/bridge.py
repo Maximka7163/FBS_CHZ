@@ -470,13 +470,34 @@ class LocalTrueApiReadBridge:
     def status(self, participant_inn: str) -> dict[str, Any]:
         inventory = self.discover(participant_inn)
         selected = self.selected_thumbprint(participant_inn)
+        selected_candidate = next(
+            (
+                item
+                for item in inventory.get("candidates", [])
+                if item.get("thumbprint") == selected
+            ),
+            None,
+        )
         runtime = (
             self._runtime
             if self._runtime_key == (participant_inn, selected)
             else None
         )
+        error_code = inventory.get("error_code")
+        if not error_code and selected:
+            if selected_candidate is None:
+                error_code = "CERTIFICATE_NOT_FOUND"
+            elif not selected_candidate.get("eligible"):
+                error_code = "CERTIFICATE_NOT_ELIGIBLE"
+        tls: dict[str, Any] = {}
+        if runtime is not None:
+            try:
+                tls = runtime.transport.tls_diagnostics()
+            except Exception:
+                tls = {}
         return {
             **inventory,
+            "error_code": error_code,
             "selected_thumbprint": selected,
             "authenticated": bool(runtime and runtime.authenticated),
             "expire_date": (
@@ -484,6 +505,7 @@ class LocalTrueApiReadBridge:
                 if runtime and runtime.expire_date is not None
                 else None
             ),
+            "gost_session_verified": bool(tls.get("gost_session_verified")),
             "real_read_enabled": True,
             "read_only": True,
             "business_write_enabled": False,
