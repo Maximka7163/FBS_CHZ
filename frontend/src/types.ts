@@ -236,6 +236,7 @@ export interface LocalTrueApiStatus {
   selected_thumbprint: string | null;
   authenticated: boolean;
   expire_date: string | null;
+  gost_session_verified: boolean;
   real_read_enabled: boolean;
   read_only: boolean;
   business_write_enabled: boolean;
