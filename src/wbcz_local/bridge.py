@@ -10,8 +10,9 @@ import shutil
 import threading
 from typing import Any, Iterable
 
+from wbcz.cis_inventory import MAX_BATCH, SharedRateLimiter
 from wbcz.models import KiState
-from wbcz.true_api import normalize_cises
+from wbcz.true_api import normalize_cis
 from wbcz_ui.live_true_api import (
     AuthSession,
     CryptoProGostTlsTunnel,
@@ -127,6 +128,7 @@ class LocalTrueApiReadRuntime:
         self.signer = signer
         self.authenticator = TrueApiAuthenticator(transport, signer, participant_inn)
         self.adapter = TrueApiCisesInfoAdapter()
+        self.rate_limiter = SharedRateLimiter(max_rps=50)
         self._session: AuthSession | None = None
 
     @property
@@ -169,51 +171,59 @@ class LocalTrueApiReadRuntime:
             close()
 
     def read_states(self, cises: Iterable[str]) -> dict[str, KiState | Exception]:
-        requested = normalize_cises(cises)
+        requested = tuple(dict.fromkeys(normalize_cis(cis) for cis in cises))
+        if not requested:
+            raise ValueError("cises/info batch must contain at least one CIS")
         bearer = self._bearer()
-        try:
-            payload = self.transport.request_json(
-                "POST",
-                "/cises/info",
-                params={"pg": "lp"},
-                body=list(requested),
-                bearer_token=bearer,
-                cis_count=len(requested),
-            )
-        except TrueApiHttpError as exc:
-            if exc.status in {401, 403}:
-                self.clear_session()
-            raise
-
-        if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-            items = payload["results"]
-        elif isinstance(payload, list):
-            items = payload
-        else:
-            raise TrueApiProtocolError(
-                "cises/info returned an unexpected top-level payload"
-            )
-
-        by_requested: dict[str, Any] = {}
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            info = item.get("cisInfo", item)
-            if isinstance(info, dict):
-                key = info.get("requestedCis") or info.get("cis")
-                if isinstance(key, str):
-                    by_requested[key] = item
-
         result: dict[str, KiState | Exception] = {}
-        for cis in requested:
-            item = by_requested.get(cis)
-            if item is None:
-                result[cis] = TrueApiProtocolError("cises/info omitted requested KI")
-                continue
+
+        for offset in range(0, len(requested), MAX_BATCH):
+            batch = requested[offset : offset + MAX_BATCH]
+            self.rate_limiter.acquire()
             try:
-                result[cis] = self.adapter.normalize(cis, item)
-            except Exception as exc:
-                result[cis] = exc
+                payload = self.transport.request_json(
+                    "POST",
+                    "/cises/info",
+                    params={"pg": "lp"},
+                    body=list(batch),
+                    bearer_token=bearer,
+                    cis_count=len(batch),
+                )
+            except TrueApiHttpError as exc:
+                if exc.status in {401, 403}:
+                    self.clear_session()
+                raise
+
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                items = payload["results"]
+            elif isinstance(payload, list):
+                items = payload
+            else:
+                raise TrueApiProtocolError(
+                    "cises/info returned an unexpected top-level payload"
+                )
+
+            by_requested: dict[str, Any] = {}
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                info = item.get("cisInfo", item)
+                if isinstance(info, dict):
+                    key = info.get("requestedCis") or info.get("cis")
+                    if isinstance(key, str):
+                        by_requested[key] = item
+
+            for cis in batch:
+                item = by_requested.get(cis)
+                if item is None:
+                    result[cis] = TrueApiProtocolError(
+                        "cises/info omitted requested KI"
+                    )
+                    continue
+                try:
+                    result[cis] = self.adapter.normalize(cis, item)
+                except Exception as exc:
+                    result[cis] = exc
         return result
 
 
