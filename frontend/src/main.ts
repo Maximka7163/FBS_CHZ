@@ -301,6 +301,7 @@ async function runKiLookup(): Promise<void> {
     kiLookupMessage = "Ответ ещё не получен. Повторите проверку позже.";
   } catch (error) {
     kiLookupMessage = readError(error);
+    if (LOCAL_FBS_ONLY) await refreshLocalTrueApiStatus();
   }
   renderHome();
 }
@@ -615,6 +616,7 @@ async function runCheck(): Promise<void> {
     await api.control(current.file.id);
     await refreshCurrent();
   } catch (e) {
+    if (LOCAL_FBS_ONLY) await refreshLocalTrueApiStatus();
     showToast(readError(e), "error");
   } finally {
     checking = false;
