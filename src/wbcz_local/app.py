@@ -15,6 +15,9 @@ from wbcz_web.db import build_session_factory
 from wbcz_web.middleware import RequestContextMiddleware
 from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
 
+from .bridge import LocalTrueApiReadBridge
+from .routes import local_router
+
 
 LOCAL_BIND_HOST = "127.0.0.1"
 LOCAL_DEFAULT_PORT = 8765
@@ -29,8 +32,8 @@ def assert_local_foundation_safety(config: WebConfig) -> None:
         raise ValueError("local foundation requires WBCZ_FBS_DRY_RUN_ONLY=true")
     if config.true_api_write_enabled:
         raise ValueError("local foundation forbids True API business writes")
-    if config.true_api_real_read_enabled:
-        raise ValueError("local True API real read is not enabled in foundation phase")
+    if not config.true_api_real_read_enabled:
+        raise ValueError("local True API real read must be enabled for the accepted read-only runtime")
     if config.agent_enabled:
         raise ValueError("VPS/agent transport is not used by the local foundation runtime")
     if config.printing_enabled or config.print_execution_enabled:
@@ -53,6 +56,7 @@ def create_local_app(
     *,
     session_factory=None,
     frontend_dist: Path | None = None,
+    true_api_bridge: LocalTrueApiReadBridge | None = None,
 ) -> FastAPI:
     config = (config or WebConfig.from_env()).validate_for_startup()
     assert_local_foundation_safety(config)
@@ -63,6 +67,29 @@ def create_local_app(
             f"local frontend build is missing: {dist / 'index.html'}; run Setup-Local.ps1"
         )
 
+    local_fbs_paths = {
+        "/api/health",
+        "/api/version",
+        "/api/auth/csrf",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/me",
+        "/api/capabilities",
+        "/api/workspace",
+        "/api/files",
+        "/api/files/{import_id}",
+        "/api/files/{import_id}/events",
+        "/api/files/{import_id}/workspace",
+        "/api/files/{import_id}/bulk-preview",
+        "/api/files/{import_id}/bulk-actions",
+        "/api/events/{event_id}",
+        "/api/operation-preview",
+    }
+    local_base_routes = [
+        route
+        for route in fbs_router.routes
+        if getattr(route, "path", None) in local_fbs_paths
+    ]
     app = FastAPI(
         title="Sellari Marking — Local WB FBS",
         version=config.app_version,
@@ -71,7 +98,8 @@ def create_local_app(
         redoc_url=None,
         openapi_url=None,
         routes=[
-            *fbs_router.routes,
+            *local_router.routes,
+            *local_base_routes,
             *health_router.routes,
         ],
     )
@@ -81,6 +109,7 @@ def create_local_app(
     app.state.wb_http_adapter = None
     app.state.wb_rate_limiter = StatefulWbRateLimiter()
     app.state.draining = False
+    app.state.local_true_api_bridge = true_api_bridge or LocalTrueApiReadBridge.from_env()
 
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.trusted_hosts))
     app.add_middleware(RequestContextMiddleware)
