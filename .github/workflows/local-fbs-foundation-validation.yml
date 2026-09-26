@@ -28,6 +28,22 @@ jobs:
   foundation:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: sellari_local_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sellari_local_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/sellari_local_test
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
