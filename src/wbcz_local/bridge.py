@@ -363,6 +363,51 @@ class LocalTrueApiReadBridge:
         self._runtime = None
         self._runtime_key = None
 
+    def _validated_persisted_selection(self, participant_inn: str) -> str:
+        """Re-bind persisted certificate metadata to the active participant.
+
+        true_api_read.json is local operator metadata, not an identity proof.
+        Every runtime/auth construction therefore re-resolves the thumbprint
+        through the Windows certificate store and requires the discovered
+        certificate INN to match the active participant exactly before any
+        signer or network transport is constructed.
+        """
+        settings = self._settings()
+        thumbprint = settings.get("thumbprint")
+        if not thumbprint:
+            raise LocalTrueApiUnavailable(
+                "CERTIFICATE_SELECTION_REQUIRED",
+                "Select an eligible local UKEP certificate first",
+            )
+
+        inventory = self.discover(participant_inn)
+        candidate = next(
+            (
+                item
+                for item in inventory.get("candidates", [])
+                if item.get("thumbprint") == thumbprint
+            ),
+            None,
+        )
+        if candidate is None or not candidate.get("eligible"):
+            self._clear_runtime()
+            raise LocalTrueApiUnavailable(
+                "CERTIFICATE_NOT_ELIGIBLE",
+                "Persisted certificate is not eligible for the active participant",
+            )
+
+        try:
+            WindowsCryptoProCertificateInspector(
+                thumbprint, cryptcp_path=self.cryptcp_path
+            ).inspect()
+        except Exception as exc:
+            self._clear_runtime()
+            raise LocalTrueApiUnavailable(
+                "CERTIFICATE_NOT_ELIGIBLE",
+                "Persisted certificate failed current local CryptoPro validation",
+            ) from exc
+        return thumbprint
+
     def select_certificate(self, participant_inn: str, thumbprint: str) -> dict[str, Any]:
         normalized = thumbprint.replace(" ", "").upper()
         inventory = self.discover(participant_inn)
@@ -421,12 +466,10 @@ class LocalTrueApiReadBridge:
         )
 
     def _runtime_for(self, participant_inn: str) -> LocalTrueApiReadRuntime:
-        thumbprint = self.selected_thumbprint(participant_inn)
-        if not thumbprint:
-            raise LocalTrueApiUnavailable(
-                "CERTIFICATE_SELECTION_REQUIRED",
-                "Select an eligible local UKEP certificate first",
-            )
+        # Do not trust participant_inn/thumbprint persisted in true_api_read.json
+        # as identity proof. Re-resolve and validate the selected certificate
+        # before a signer or GOST transport can be constructed.
+        thumbprint = self._validated_persisted_selection(participant_inn)
         key = (participant_inn, thumbprint)
         with self._lock:
             if self._runtime is None or self._runtime_key != key:
