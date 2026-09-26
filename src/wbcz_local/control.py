@@ -11,6 +11,7 @@ from wbcz_web.models import CheckRecord, ControlRun
 from wbcz_web.repositories import AuditRepository, ImportRepository
 from wbcz_web.services.control import OperationMode
 from wbcz_web.services.imports import record_to_event
+from wbcz_web.services.kiz_transaction_lock import acquire_tenant_kiz_locks
 from wbcz_web.services.tenant import active_tenant
 from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 
@@ -77,6 +78,24 @@ class LocalTrueApiControlService:
             list(dict.fromkeys(event.kiz for _, event in effective)),
         ) if effective else {}
 
+        # A rolling WB import can commit a later event while /cises/info is in
+        # flight. Serialize final history resolution with the same tenant+KIZ
+        # transaction locks used by imports, in deterministic KIZ order. Once
+        # acquired, re-resolve sequence policy under the lock and keep it until
+        # the CheckRecords are persisted/transaction commits.
+        selected_kizes: list[str] = []
+        for event_id in selected:
+            row = self.imports.event(event_id)
+            if row is None:
+                raise KeyError(event_id)
+            selected_kizes.append(record_to_event(row).kiz)
+        acquire_tenant_kiz_locks(
+            self.db,
+            self.scope.organisation_id,
+            self.scope.participant_id,
+            selected_kizes,
+        )
+
         run = ControlRun(
             organisation_id=self.scope.organisation_id,
             participant_id=self.scope.participant_id,
@@ -95,7 +114,10 @@ class LocalTrueApiControlService:
                 raise KeyError(event_id)
             event = record_to_event(row)
             snapshot = None
-            outcome = immediate.get(event_id)
+            # Never persist a pre-network history decision. Re-evaluate the
+            # current tenant WB history while holding its KIZ transaction lock;
+            # any newly imported later/ambiguous event wins over fetched CHZ.
+            outcome = sequence_outcome_for_event(self.imports, event_id)
             source = "wb-sequence-policy"
             if outcome is None:
                 source = "local-cryptopro-true-api"
