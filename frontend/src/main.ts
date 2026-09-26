@@ -12,6 +12,7 @@ import type {
   CertificateStatus,
   EnrollmentIntent,
   IntegrationItem,
+  LocalTrueApiStatus,
 } from "./types";
 import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
 
@@ -32,6 +33,8 @@ let bulkBusy = false;
 let pollTimer: number | null = null;
 let enrollmentIntent: EnrollmentIntent | null = null;
 let kiLookupMessage = "";
+let localTrueApiStatus: LocalTrueApiStatus | null = null;
+let localTrueApiBusy = false;
 let viewToken = 0;
 
 const icons = {
@@ -145,6 +148,7 @@ function renderLogin(error = ""): void {
         document.querySelector<HTMLInputElement>("#username")!.value,
         document.querySelector<HTMLInputElement>("#password")!.value,
       );
+      await refreshLocalTrueApiStatus();
       await restoreInitialView();
     } catch (e) {
       renderLogin(readError(e));
@@ -177,13 +181,104 @@ function kiLookupBlock(): string {
   </section>`;
 }
 
+function localTrueApiBlock(): string {
+  if (!LOCAL_FBS_ONLY) return "";
+  if (!localTrueApiStatus) {
+    return `<section class="ki-lookup-card"><div><strong>Честный знак / CryptoPro</strong><span>Проверяем локальную УКЭП…</span></div></section>`;
+  }
+  const status = localTrueApiStatus;
+  const selected = status.candidates.find((item) => item.thumbprint === status.selected_thumbprint);
+  const candidates = status.candidates.filter((item) => item.eligible);
+  const candidateRows = !status.selected_thumbprint
+    ? candidates.map((candidate) => `<div class="certificate-row">
+        <div><b>${esc(candidate.subject || candidate.thumbprint)}</b><small>${esc(candidate.certificate_inn || "ИНН не извлечён")} · до ${esc(candidate.valid_to || "—")}</small></div>
+        <button class="quiet-button" data-local-cert="${esc(candidate.thumbprint)}">Выбрать</button>
+      </div>`).join("")
+    : "";
+  const connection = status.authenticated
+    ? `<span>Подключено · только чтение${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
+    : status.selected_thumbprint
+      ? `<button id="local-true-api-auth" class="secondary-button" ${localTrueApiBusy ? "disabled" : ""}>${localTrueApiBusy ? "Подключаем…" : "Войти через CryptoPro / УКЭП"}</button>`
+      : candidateRows || '<span>Подходящая УКЭП не найдена. Проверьте CryptoPro и сертификат.</span>';
+  return `<section class="ki-lookup-card">
+    <div><strong>Честный знак / CryptoPro</strong><span>${status.authenticated ? "Real read-only включён" : "Business writes отключены"}</span></div>
+    ${selected ? `<p class="integration-note">Сертификат: ${esc(selected.subject || selected.thumbprint)}</p>` : ""}
+    ${connection}
+    ${status.error_code ? `<p class="login-error">${esc(status.error_code)}</p>` : ""}
+    <p class="integration-note">PIN запрашивает CryptoPro локально; Sellari не сохраняет PIN, ключ или uuidToken.</p>
+  </section>`;
+}
+
+function rerenderCurrentSurface(): void {
+  if (current) renderWorkspace();
+  else renderHome();
+}
+
+async function refreshLocalTrueApiStatus(): Promise<void> {
+  if (!LOCAL_FBS_ONLY || !user) return;
+  try {
+    localTrueApiStatus = await api.localTrueApiStatus();
+  } catch (error) {
+    localTrueApiStatus = null;
+    showToast(readError(error), "error");
+  }
+}
+
+function bindLocalTrueApi(): void {
+  if (!LOCAL_FBS_ONLY) return;
+  document.querySelectorAll<HTMLButtonElement>("[data-local-cert]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const thumbprint = button.dataset.localCert || "";
+      if (!thumbprint || localTrueApiBusy) return;
+      localTrueApiBusy = true;
+      rerenderCurrentSurface();
+      try {
+        localTrueApiStatus = await api.selectLocalTrueApiCertificate(thumbprint);
+        showToast("УКЭП выбрана");
+      } catch (error) {
+        showToast(readError(error), "error");
+      } finally {
+        localTrueApiBusy = false;
+        rerenderCurrentSurface();
+      }
+    });
+  });
+  document.querySelector<HTMLButtonElement>("#local-true-api-auth")?.addEventListener("click", async () => {
+    if (localTrueApiBusy) return;
+    localTrueApiBusy = true;
+    rerenderCurrentSurface();
+    try {
+      await api.authenticateLocalTrueApi();
+      await refreshLocalTrueApiStatus();
+      showToast("True API подключён в режиме только чтения");
+    } catch (error) {
+      await refreshLocalTrueApiStatus();
+      showToast(readError(error), "error");
+    } finally {
+      localTrueApiBusy = false;
+      rerenderCurrentSurface();
+    }
+  });
+}
+
 async function runKiLookup(): Promise<void> {
   const input = document.querySelector<HTMLInputElement>("#ki-lookup-value");
   const value = input?.value.trim() || "";
   if (!value) return;
-  kiLookupMessage = "Ставим безопасный read-only запрос…";
+  kiLookupMessage = "Выполняем безопасный read-only запрос…";
   renderHome();
   try {
+    if (LOCAL_FBS_ONLY) {
+      const response = await api.localCisesInfo([value]);
+      const item = response.items[0];
+      const state = item?.normalized;
+      kiLookupMessage = state
+        ? `${state.status || "—"} · владелец ${state.owner_inn || "—"} · ${state.product_group || "lp"} · сейчас`
+        : `ЧЗ не вернул состояние КИ${item?.item_error?.code ? ` · ${item.item_error.code}` : ""}`;
+      await refreshLocalTrueApiStatus();
+      renderHome();
+      return;
+    }
     const queued = await api.queueKiInfo([value]);
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 500));
@@ -205,10 +300,7 @@ async function runKiLookup(): Promise<void> {
     }
     kiLookupMessage = "Ответ ещё не получен. Повторите проверку позже.";
   } catch (error) {
-    const raw = readError(error);
-    kiLookupMessage = raw.includes("REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED")
-      ? "Реальный read-only вход в ЧЗ подготовлен, но ещё не разрешён."
-      : raw;
+    kiLookupMessage = readError(error);
   }
   renderHome();
 }
@@ -261,7 +353,12 @@ function renderHome(): void {
   query = "";
   openDetail = null;
   setImportUrl(null);
-  shell(`${pageHeading()}${uploadBlock()}${historySection(homeHistory, null)}`);
+  shell(`${pageHeading()}${localTrueApiBlock()}${kiLookupBlock()}${uploadBlock()}${historySection(homeHistory, null)}`);
+  bindLocalTrueApi();
+  document.querySelector<HTMLFormElement>("#ki-lookup-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void runKiLookup();
+  });
   bindUpload();
   bindHistory();
 }
@@ -390,6 +487,7 @@ function bulkBar(view: WorkspaceView): string {
 
 function workspaceMarkup(view: WorkspaceView): string {
   return `${pageHeading()}
+  ${localTrueApiBlock()}
   <section class="workspace-card">
     <div class="active-file-row">
       <div class="active-file"><span class="file-icon">${icons.file}</span><div><strong>${esc(view.file.filename)}</strong><span>${view.file.unique_kiz} КИ · Все ${view.items.length}</span></div></div>
@@ -406,6 +504,7 @@ function workspaceMarkup(view: WorkspaceView): string {
 function renderWorkspace(): void {
   if (!current) return;
   shell(workspaceMarkup(current));
+  bindLocalTrueApi();
   bindWorkspaceEvents();
   bindHistory();
 }
@@ -506,6 +605,10 @@ function schedulePollIfNeeded(token: number): void {
 
 async function runCheck(): Promise<void> {
   if (!current || checking) return;
+  if (LOCAL_FBS_ONLY && !localTrueApiStatus?.authenticated) {
+    showToast("Сначала выберите УКЭП и войдите в True API через CryptoPro", "warn");
+    return;
+  }
   checking = true;
   renderWorkspace();
   try {
@@ -778,6 +881,7 @@ window.addEventListener("popstate", () => {
   await api.seedCsrf();
   try {
     user = await api.me();
+    await refreshLocalTrueApiStatus();
     await restoreInitialView();
   } catch {
     renderLogin();
