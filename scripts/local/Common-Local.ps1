@@ -44,7 +44,7 @@ function Import-SellariEnvFile {
 function Assert-SellariLocalSafety {
     $required = @{
         "WBCZ_FBS_DRY_RUN_ONLY" = "true"
-        "WBCZ_TRUE_API_REAL_READ_ENABLED" = "false"
+        "WBCZ_TRUE_API_REAL_READ_ENABLED" = "true"
         "WBCZ_TRUE_API_WRITE_ENABLED" = "false"
         "WBCZ_AGENT_ENABLED" = "false"
         "WBCZ_PRINTING_ENABLED" = "false"
@@ -92,6 +92,20 @@ function Ensure-SellariPostgresService {
     } catch {
         throw "Local PostgreSQL service '$($preferred.Name)' is stopped and could not be started. Start it manually or run PowerShell with permission to start the service."
     }
+}
+
+function Find-SellariCryptoProTool {
+    param([Parameter(Mandatory=$true)][string]$FileName)
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "Crypto Pro\CSP\$FileName"),
+        (Join-Path ${env:ProgramFiles(x86)} "Crypto Pro\CSP\$FileName")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    $command = Get-Command $FileName -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
 }
 
 function Find-SellariCryptoPro {
