@@ -293,12 +293,19 @@ def test_local_bridge_persists_only_certificate_selection_not_uuid_token(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn, thumbprint: runtime)
 
     auth = bridge.authenticate(INN)
+    status = bridge.status(INN)
 
     stored = (tmp_path / "true_api_read.json").read_text(encoding="utf-8")
     assert THUMBPRINT in stored
     assert INN in stored
     assert TOKEN not in stored
     assert TOKEN not in repr(auth)
+    assert TOKEN not in repr(status)
+    assert status["authenticated"] is True
+    assert status["gost_session_verified"] is True
+    assert status["business_write_enabled"] is False
+    assert status["uuid_token_persisted"] is False
+    assert status["pin_persisted"] is False
     assert not (tmp_path / "true_api_audit.jsonl").exists()
 
 
