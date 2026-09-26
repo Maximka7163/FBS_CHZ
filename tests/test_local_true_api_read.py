@@ -302,6 +302,38 @@ def test_local_bridge_persists_only_certificate_selection_not_uuid_token(
     assert not (tmp_path / "true_api_audit.jsonl").exists()
 
 
+def test_local_certificate_selection_requires_exact_participant_inn(tmp_path: Path) -> None:
+    class UnknownInnDiscovery:
+        def discover(self) -> dict:
+            return {
+                "cryptopro_available": True,
+                "candidates": [{
+                    "thumbprint": THUMBPRINT,
+                    "subject": "CN=Test Without INN",
+                    "certificate_inn": None,
+                    "valid_from": "2026-01-01T00:00:00+00:00",
+                    "valid_to": "2027-01-01T00:00:00+00:00",
+                    "has_private_key": True,
+                    "compatibility": "GOST_CRYPTOPRO",
+                    "crypto_provider": "Crypto-Pro GOST R 34.10-2012",
+                }],
+            }
+
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=UnknownInnDiscovery(),
+    )
+
+    status = bridge.discover(INN)
+
+    assert status["candidates"][0]["eligible"] is False
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.select_certificate(INN, THUMBPRINT)
+    assert exc_info.value.code == "CERTIFICATE_NOT_ELIGIBLE"
+    assert not (tmp_path / "settings.json").exists()
+
+
 def test_local_bridge_has_no_document_sign_or_business_mutation_method(tmp_path: Path) -> None:
     bridge = LocalTrueApiReadBridge(
         settings_path=tmp_path / "settings.json",
