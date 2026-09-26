@@ -11,6 +11,8 @@ import type {
   CisInventoryRequest,
   EnrollmentIntent,
   IntegrationItem,
+  LocalCisInfoResponse,
+  LocalTrueApiStatus,
 } from "./types";
 
 let csrfToken = "";
@@ -181,3 +183,26 @@ export const queueKiInfo = (cises: string[]) =>
 
 export const kiRequest = (requestId: string) =>
   request<CisInventoryRequest>(`/api/cis-inventory/requests/${encodeURIComponent(requestId)}`);
+
+export const localTrueApiStatus = () =>
+  request<LocalTrueApiStatus>("/api/local/true-api/status");
+
+export const selectLocalTrueApiCertificate = (thumbprint: string) =>
+  request<LocalTrueApiStatus>("/api/local/true-api/certificate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ thumbprint }),
+  });
+
+export const authenticateLocalTrueApi = () =>
+  request<{ authenticated: boolean; expire_date: string; read_only: boolean }>(
+    "/api/local/true-api/authenticate",
+    { method: "POST" },
+  );
+
+export const localCisesInfo = (cises: string[]) =>
+  request<LocalCisInfoResponse>("/api/local/true-api/cises-info", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cises }),
+  });
