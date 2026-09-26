@@ -317,7 +317,7 @@ class LocalTrueApiReadBridge:
         return bool(
             candidate.get("compatibility") == "GOST_CRYPTOPRO"
             and candidate.get("has_private_key") is True
-            and (not certificate_inn or certificate_inn == participant_inn)
+            and certificate_inn == participant_inn
         )
 
     def discover(self, participant_inn: str) -> dict[str, Any]:
