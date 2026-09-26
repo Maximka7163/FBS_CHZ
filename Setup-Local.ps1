@@ -25,7 +25,17 @@ $crypto = Find-SellariCryptoPro
 if (-not $crypto) {
     throw "CryptoPro CSP was not detected. Install licensed CryptoPro CSP and authorised UKEP first. Sellari does not redistribute CryptoPro binaries."
 }
+$cryptcp = Find-SellariCryptoProTool -FileName "cryptcp.exe"
+if (-not $cryptcp) {
+    throw "CryptoPro cryptcp.exe was not detected. Install the CryptoPro command-line component; Sellari does not redistribute it."
+}
+$stunnel = Find-SellariCryptoProTool -FileName "stunnel_msspi.exe"
+if (-not $stunnel) {
+    throw "CryptoPro stunnel_msspi.exe was not detected. Install the CryptoPro GOST TLS component; Sellari does not redistribute it."
+}
 Write-Host "CryptoPro detected: $crypto"
+Write-Host "CryptoPro signer: $cryptcp"
+Write-Host "CryptoPro GOST TLS: $stunnel"
 
 $pythonCommand = Get-SellariPythonCommand
 $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
@@ -137,13 +147,17 @@ $envLines = @(
     "WBCZ_AGENT_ENABLED=false",
     "WBCZ_AGENT_LEGACY_BOOTSTRAP_ENABLED=false",
     "WBCZ_FBS_DRY_RUN_ONLY=true",
-    "WBCZ_TRUE_API_REAL_READ_ENABLED=false",
+    "WBCZ_TRUE_API_REAL_READ_ENABLED=true",
     "WBCZ_TRUE_API_WRITE_ENABLED=false",
     "WBCZ_PRINTING_ENABLED=false",
     "WBCZ_PRINT_EXECUTION_ENABLED=false",
     "WBCZ_SUZ_FULL_KM_REMOTE_ACQUISITION_ENABLED=false",
     "WBCZ_TRUE_API_REPORTS_ENABLED=false",
+    "WBCZ_CRYPTOPRO_CRYPTCP=$cryptcp",
+    "WBCZ_CRYPTOPRO_STUNNEL=$stunnel",
     "SELLARI_LOCAL_FRONTEND_DIST=$($paths.Frontend)",
+    "SELLARI_LOCAL_CONFIG_DIR=$($paths.Config)",
+    "SELLARI_LOCAL_LOG_DIR=$($paths.Logs)",
     "WBCZ_LOCAL_DB_PASSWORD=$appPassword"
 )
 [System.IO.File]::WriteAllLines($paths.EnvFile, $envLines, [System.Text.UTF8Encoding]::new($false))
