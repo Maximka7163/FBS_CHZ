@@ -436,31 +436,33 @@ class LocalTrueApiReadBridge:
             return self._runtime
 
     def authenticate(self, participant_inn: str) -> dict[str, Any]:
-        runtime = self._runtime_for(participant_inn)
-        try:
-            return runtime.authenticate()
-        except Exception as exc:
-            runtime.clear_session()
-            raise LocalTrueApiUnavailable(
-                "TRUE_API_AUTH_FAILED",
-                "Local CryptoPro / True API authentication failed",
-            ) from exc
+        with self._lock:
+            runtime = self._runtime_for(participant_inn)
+            try:
+                return runtime.authenticate()
+            except Exception as exc:
+                runtime.clear_session()
+                raise LocalTrueApiUnavailable(
+                    "TRUE_API_AUTH_FAILED",
+                    "Local CryptoPro / True API authentication failed",
+                ) from exc
 
     def read_states(
         self, participant_inn: str, cises: Iterable[str]
     ) -> dict[str, KiState | Exception]:
-        runtime = self._runtime_for(participant_inn)
-        try:
-            return runtime.read_states(cises)
-        except LiveAuthorizationRequired as exc:
-            raise LocalTrueApiUnavailable(
-                "TRUE_API_AUTH_REQUIRED",
-                "Authenticate with the selected local UKEP first",
-            ) from exc
-        except (TrueApiError, ValueError) as exc:
-            raise LocalTrueApiUnavailable(
-                "TRUE_API_READ_FAILED", "True API read-only request failed"
-            ) from exc
+        with self._lock:
+            runtime = self._runtime_for(participant_inn)
+            try:
+                return runtime.read_states(cises)
+            except LiveAuthorizationRequired as exc:
+                raise LocalTrueApiUnavailable(
+                    "TRUE_API_AUTH_REQUIRED",
+                    "Authenticate with the selected local UKEP first",
+                ) from exc
+            except (TrueApiError, ValueError) as exc:
+                raise LocalTrueApiUnavailable(
+                    "TRUE_API_READ_FAILED", "True API read-only request failed"
+                ) from exc
 
     def diagnostics(self) -> dict[str, Any]:
         return inspect_local_cryptopro_foundation().safe_dict()
