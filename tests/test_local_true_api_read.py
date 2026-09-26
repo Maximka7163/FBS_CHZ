@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from io import BytesIO
+import os
 from pathlib import Path
 
+from openpyxl import Workbook
 import pytest
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import sessionmaker
 
-from wbcz.models import KiState
+from wbcz.models import Decision, Event, KiState, Operation
 from wbcz_ui.live_true_api import ProductionMutationDisabled, ReadOnlyTrueApiTransport, TrueApiHttpError
-from wbcz_local.bridge import LocalTrueApiReadBridge, LocalTrueApiReadRuntime
+from wbcz_local.bridge import LocalTrueApiReadBridge, LocalTrueApiReadRuntime, LocalTrueApiUnavailable
+from wbcz_local.control import LocalTrueApiControlService
+from wbcz_web.models import AgentJobRecord, Base, CheckRecord, ControlRun, WriteOperationRecord
+from wbcz_web.repositories import ImportRepository
+from wbcz_web.services.authorization import BootstrapService
+from wbcz_web.services.control import OperationMode
+from wbcz_web.services.imports import FileImportService
+from wbcz_web.services.tenant import bind_tenant_scope
 
 
+DB_URL = os.getenv("WBCZ_TEST_DATABASE_URL")
 CIS = "010460123456789021"
 INN = "1234567890"
 THUMBPRINT = "A" * 40
@@ -261,3 +275,172 @@ def test_local_control_source_contains_no_agent_job_or_write_pipeline() -> None:
     assert "create_document" not in source
     assert 'provider="local-cryptopro-true-api"' in source
     assert '"production_submission_available": False' in source
+
+
+class StaticStateBridge:
+    def __init__(self, state: KiState | None = None, error: Exception | None = None) -> None:
+        self.state = state
+        self.error = error
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def read_states(self, participant_inn: str, cises) -> dict[str, KiState | Exception]:
+        values = tuple(cises)
+        self.calls.append((participant_inn, values))
+        if self.error is not None:
+            raise self.error
+        assert self.state is not None
+        return {cis: self.state for cis in values}
+
+
+def _workbook_bytes(event: Event) -> bytes:
+    wb = Workbook()
+    sheet = wb.active
+    sheet.title = "КИЗ"
+    sheet.append([
+        "№ задания",
+        "Стикер",
+        "КИЗ",
+        "Номер чека",
+        "Стоимость",
+        "Валюта",
+        "Номер фискального накопителя",
+        "Дата",
+        "Тип операции",
+        "Признак продажи юрлицу",
+    ])
+    sheet.append([
+        event.task_number,
+        event.sticker,
+        event.kiz,
+        event.receipt_number,
+        float(event.amount),
+        event.currency,
+        event.fiscal_drive_number,
+        event.occurred_at.astimezone(timezone.utc).strftime("%H:%M:%S %d.%m.%Y")
+        if event.occurred_at else None,
+        event.operation.value,
+        "нет",
+    ])
+    stream = BytesIO()
+    wb.save(stream)
+    wb.close()
+    return stream.getvalue()
+
+
+@pytest.fixture
+def local_pg_factory():
+    if not DB_URL:
+        pytest.skip("WBCZ_TEST_DATABASE_URL requires PostgreSQL")
+    engine = create_engine(DB_URL, future=True)
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def _seed_local_sale(factory):
+    with factory() as db:
+        user, org, participant, _ = BootstrapService(db).bootstrap(
+            username="local-read-owner",
+            password="local-read-regression-password",
+            organisation_name="Sellari Local Read",
+            participant_inn=INN,
+        )
+        event = Event(
+            kiz=CIS,
+            task_number="local-task-1",
+            sticker="local-sticker-1",
+            operation=Operation.SALE,
+            occurred_at=datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc),
+            receipt_number="local-receipt-1",
+            fiscal_drive_number="7380440903834317",
+            amount=Decimal("1900.00"),
+            currency="RUB",
+            legal_entity_sale=False,
+        )
+        imported = FileImportService(db).import_xlsx(
+            "local-sale.xlsx",
+            _workbook_bytes(event),
+            user.id,
+        )
+        db.commit()
+        return user.id, org.id, participant.id, imported.id
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_fbs_control_uses_fresh_true_api_state_without_agent_or_write_state(
+    local_pg_factory,
+) -> None:
+    user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
+    state = KiState(
+        status="IN_CIRCULATION",
+        statusEx=None,
+        withdrawReason=None,
+        ownerInn=INN,
+        productGroup="lp",
+    )
+    bridge = StaticStateBridge(state=state)
+
+    with local_pg_factory() as db:
+        bind_tenant_scope(
+            db,
+            organisation_id=org_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            role="OWNER",
+        )
+        result = LocalTrueApiControlService(db, bridge).run(  # type: ignore[arg-type]
+            import_id,
+            user_id,
+            OperationMode.AUTO,
+        )
+        db.commit()
+
+        assert result["provider"] == "local-cryptopro-true-api"
+        assert result["production_submission_available"] is False
+        assert bridge.calls == [(INN, (CIS,))]
+        event_id = ImportRepository(db).ordered_event_records(import_id)[0].event_id
+        check = ImportRepository(db).latest_check(event_id)
+        assert check is not None
+        assert check.source == "local-cryptopro-true-api"
+        assert check.decision == Decision.READY_TO_WITHDRAW.value
+        assert check.snapshot["status"] == "IN_CIRCULATION"
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_fbs_control_auth_failure_persists_no_control_result(
+    local_pg_factory,
+) -> None:
+    user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
+    bridge = StaticStateBridge(
+        error=LocalTrueApiUnavailable(
+            "TRUE_API_AUTH_REQUIRED",
+            "Authenticate locally first",
+        )
+    )
+
+    with local_pg_factory() as db:
+        bind_tenant_scope(
+            db,
+            organisation_id=org_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            role="OWNER",
+        )
+        with pytest.raises(LocalTrueApiUnavailable, match="Authenticate locally first"):
+            LocalTrueApiControlService(db, bridge).run(  # type: ignore[arg-type]
+                import_id,
+                user_id,
+                OperationMode.AUTO,
+            )
+        db.rollback()
+        assert db.scalar(select(func.count()).select_from(ControlRun)) == 0
+        assert db.scalar(select(func.count()).select_from(CheckRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentJobRecord)) == 0
+        assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
