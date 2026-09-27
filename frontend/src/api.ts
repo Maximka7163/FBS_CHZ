@@ -11,6 +11,8 @@ import type {
   CisInventoryRequest,
   EnrollmentIntent,
   IntegrationItem,
+  LocalBrowserAuthComplete,
+  LocalBrowserAuthPrepare,
   LocalCisInfoResponse,
   LocalTrueApiStatus,
 } from "./types";
@@ -187,18 +189,25 @@ export const kiRequest = (requestId: string) =>
 export const localTrueApiStatus = () =>
   request<LocalTrueApiStatus>("/api/local/true-api/status");
 
-export const selectLocalTrueApiCertificate = (thumbprint: string) =>
-  request<LocalTrueApiStatus>("/api/local/true-api/certificate", {
+export const prepareLocalBrowserAuth = () =>
+  request<LocalBrowserAuthPrepare>("/api/local/auth/prepare", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ thumbprint }),
   });
 
-export const authenticateLocalTrueApi = () =>
-  request<{ authenticated: boolean; expire_date: string; read_only: boolean }>(
-    "/api/local/true-api/authenticate",
-    { method: "POST" },
-  );
+export const completeLocalBrowserAuth = (
+  attemptId: string,
+  signatureBase64: string,
+  selectedCertificateThumbprint: string,
+) =>
+  request<LocalBrowserAuthComplete>("/api/local/auth/complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      attempt_id: attemptId,
+      signature_base64: signatureBase64,
+      selected_certificate_thumbprint: selectedCertificateThumbprint,
+    }),
+  });
 
 export const localCisesInfo = (cises: string[]) =>
   request<LocalCisInfoResponse>("/api/local/true-api/cises-info", {
