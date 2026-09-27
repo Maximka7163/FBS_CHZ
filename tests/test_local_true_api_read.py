@@ -241,6 +241,7 @@ def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
     )
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
@@ -267,6 +268,7 @@ def test_typed_prepare_complete_attempt_keeps_token_server_side_and_is_one_time(
         settings_path=tmp_path / "true_api_read.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -327,6 +329,7 @@ def test_auth_attempt_rejects_wrong_session_and_wrong_thumbprint(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -360,6 +363,41 @@ def test_auth_attempt_rejects_wrong_session_and_wrong_thumbprint(
     assert wrong_cert.value.code == "CERTIFICATE_NOT_ELIGIBLE"
 
 
+def test_browser_cades_cms_signer_must_match_selected_thumbprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, transport = _runtime()
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: "B" * 40,
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+    prepared = bridge.prepare_auth(INN, "browser-session-1")
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.complete_auth(
+            INN,
+            "browser-session-1",
+            attempt_id=prepared["attempt_id"],
+            signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+            selected_certificate_thumbprint=THUMBPRINT,
+        )
+
+    assert exc_info.value.code == "CERTIFICATE_NOT_ELIGIBLE"
+    assert not any(call["path"] == "/auth/simpleSignIn" for call in transport.calls)
+
+
 def test_expired_auth_attempt_is_rejected_before_simple_sign_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -369,6 +407,7 @@ def test_expired_auth_attempt_is_rejected_before_simple_sign_in(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -411,6 +450,7 @@ def test_participant_inn_is_server_side_attempt_state_not_frontend_input(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -508,6 +548,7 @@ def test_missing_stunnel_is_reported_as_transport_not_ready_not_cryptopro_missin
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: TransportBlockedRuntime())
     monkeypatch.setattr(
@@ -531,6 +572,7 @@ def test_local_bridge_has_no_arbitrary_sign_or_business_mutation_method(tmp_path
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
     )
     public = {name for name in dir(bridge) if not name.startswith("_")}
     assert {"prepare_auth", "complete_auth", "read_states", "status"} <= public
