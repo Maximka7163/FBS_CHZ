@@ -438,8 +438,24 @@ class LocalTrueApiReadBridge:
         provider = str(candidate.get("crypto_provider") or "").casefold().replace("-", " ")
         public_key_oid = str(candidate.get("public_key_oid") or "")
         certificate_inn = candidate.get("certificate_inn")
+        try:
+            valid_from = datetime.fromisoformat(
+                str(candidate.get("valid_from") or "").replace("Z", "+00:00")
+            )
+            valid_to = datetime.fromisoformat(
+                str(candidate.get("valid_to") or "").replace("Z", "+00:00")
+            )
+            if valid_from.tzinfo is None:
+                valid_from = valid_from.replace(tzinfo=timezone.utc)
+            if valid_to.tzinfo is None:
+                valid_to = valid_to.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            valid_now = valid_from <= now <= valid_to
+        except ValueError:
+            valid_now = False
         return bool(
             candidate.get("has_private_key") is True
+            and valid_now
             and public_key_oid in {
                 "1.2.643.2.2.19",
                 "1.2.643.7.1.1.1.1",
