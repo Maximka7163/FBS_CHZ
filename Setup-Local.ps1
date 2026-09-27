@@ -26,16 +26,20 @@ if (-not $crypto) {
     throw "CryptoPro CSP was not detected. Install licensed CryptoPro CSP and authorised UKEP first. Sellari does not redistribute CryptoPro binaries."
 }
 $cryptcp = Find-SellariCryptoProTool -FileName "cryptcp.exe"
-if (-not $cryptcp) {
-    throw "CryptoPro cryptcp.exe was not detected. Install the CryptoPro command-line component; Sellari does not redistribute it."
-}
 $stunnel = Find-SellariCryptoProTool -FileName "stunnel_msspi.exe"
-if (-not $stunnel) {
-    throw "CryptoPro stunnel_msspi.exe was not detected. Install the CryptoPro GOST TLS component; Sellari does not redistribute it."
+
+Write-Host "CryptoPro CSP detected: $crypto"
+if ($cryptcp) {
+    Write-Host "cryptcp.exe detected (optional legacy diagnostic): $cryptcp"
+} else {
+    Write-Host "cryptcp.exe not detected (OK for Browser CAdES auth)."
 }
-Write-Host "CryptoPro detected: $crypto"
-Write-Host "CryptoPro signer: $cryptcp"
-Write-Host "CryptoPro GOST TLS: $stunnel"
+if ($stunnel) {
+    Write-Host "CryptoPro GOST transport detected: $stunnel"
+} else {
+    Write-Warning "stunnel_msspi.exe not detected. Sellari UI can still start, but True API auth/read will remain blocked until GOST transport is installed."
+}
+Write-Host "Browser CAdES plug-in readiness is checked inside Yandex Browser/Chromium at runtime."
 
 $pythonCommand = Get-SellariPythonCommand
 $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
