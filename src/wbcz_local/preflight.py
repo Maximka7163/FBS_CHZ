@@ -45,15 +45,33 @@ def local_preflight() -> dict:
     crypto = inspect_local_cryptopro_foundation()
     checks.append({
         "name": "cryptopro_csp",
-        "ok": crypto.cryptopro_csp_detected,
-        "detail": crypto.cryptcp_path or "CryptoPro CSP/cryptcp not detected",
+        "ok": crypto.csp_available,
+        "detail": "CryptoPro CSP detected" if crypto.csp_available else "CryptoPro CSP not detected",
         "required": True,
     })
     checks.append({
-        "name": "cryptopro_stunnel",
-        "ok": bool(crypto.stunnel_path),
-        "detail": crypto.stunnel_path or "CryptoPro stunnel_msspi.exe not detected",
-        "required": True,
+        "name": "browser_cades",
+        "ok": True,
+        "detail": "checked in Yandex Browser/Chromium at runtime",
+        "required": False,
+    })
+    checks.append({
+        "name": "ukep",
+        "ok": True,
+        "detail": "enumerated and participant-bound at runtime",
+        "required": False,
+    })
+    checks.append({
+        "name": "cryptcp_optional",
+        "ok": crypto.cryptcp_available,
+        "detail": crypto.cryptcp_path or "cryptcp.exe not detected; Browser CAdES auth does not require it",
+        "required": False,
+    })
+    checks.append({
+        "name": "gost_transport",
+        "ok": crypto.gost_transport_available,
+        "detail": crypto.stunnel_path or "stunnel_msspi.exe not detected; UI starts but True API auth/read is blocked",
+        "required": False,
     })
 
     psql = shutil.which("psql")
