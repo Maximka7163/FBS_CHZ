@@ -16,9 +16,9 @@ import type {
 } from "./types";
 import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
 import {
+  authenticateLocalBrowserCades,
   detectBrowserCades,
   enumerateBrowserCertificates,
-  signBrowserAuthChallenge,
   type BrowserCadesCertificate,
 } from "./local_cades";
 
@@ -302,16 +302,7 @@ function bindLocalTrueApi(): void {
     localTrueApiBusy = true;
     rerenderCurrentSurface();
     try {
-      const prepared = await api.prepareLocalBrowserAuth();
-      const signatureBase64 = await signBrowserAuthChallenge(
-        prepared.challenge_base64,
-        selectedBrowserThumbprint,
-      );
-      await api.completeLocalBrowserAuth(
-        prepared.attempt_id,
-        signatureBase64,
-        selectedBrowserThumbprint,
-      );
+      await authenticateLocalBrowserCades(selectedBrowserThumbprint);
       await refreshLocalTrueApiStatus();
       showToast("Честный знак подключён · только чтение");
     } catch (error) {
