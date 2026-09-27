@@ -150,6 +150,14 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "OK for Browser CAdES auth" in setup
     assert "True API auth/read will remain blocked" in setup
     assert "WBCZ_TRUE_API_WRITE_ENABLED=true" not in setup
+    assert "D54CFE9186C4B6DBE9ED73D83F289D31DA7B50000B48BA3E7C278E820578086B" in setup
+    assert "Publish-SellariPinnedArtifact" in setup
+    assert "Assert-SellariPinnedSha256" in setup
+    assert "Invoke-WebRequest" in setup and "-OutFile $cadesApiTemp" in setup
+    assert "-OutFile $cadesApiPath" not in setup
+    assert "Get-FileHash" in common
+    assert "SHA256" in common
+    assert "CreateObjectAsync" not in setup
 
 
 def test_local_frontend_build_hides_non_fbs_settings_without_changing_default_build() -> None:
