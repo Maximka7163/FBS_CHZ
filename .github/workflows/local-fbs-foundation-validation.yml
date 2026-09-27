@@ -115,3 +115,31 @@ jobs:
               throw "PowerShell parse failed: $file"
             }
           }
+
+      - name: Pinned Browser CAdES artifact helper fails closed
+        shell: pwsh
+        run: |
+          . ./scripts/local/Common-Local.ps1
+          $root = Join-Path $env:RUNNER_TEMP "sellari-pinned-cades-test"
+          Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          $good = Join-Path $root "good.js"
+          $published = Join-Path $root "published.js"
+          [System.IO.File]::WriteAllBytes($good, [System.Text.Encoding]::UTF8.GetBytes("audited-cades-artifact"))
+          $expected = (Get-FileHash -LiteralPath $good -Algorithm SHA256).Hash
+          Publish-SellariPinnedArtifact -CandidatePath $good -DestinationPath $published -ExpectedSha256 $expected
+          if (-not (Test-Path -LiteralPath $published)) { throw "Verified artifact was not published." }
+          Assert-SellariPinnedSha256 -Path $published -ExpectedSha256 $expected | Out-Null
+
+          $mutated = Join-Path $root "mutated.js"
+          $mustNotPublish = Join-Path $root "must-not-publish.js"
+          [System.IO.File]::WriteAllBytes($mutated, [System.Text.Encoding]::UTF8.GetBytes("mutated-cades-artifact"))
+          $rejected = $false
+          try {
+            Publish-SellariPinnedArtifact -CandidatePath $mutated -DestinationPath $mustNotPublish -ExpectedSha256 $expected
+          } catch {
+            $rejected = $true
+          }
+          if (-not $rejected) { throw "Mutated artifact was not rejected." }
+          if (Test-Path -LiteralPath $mustNotPublish) { throw "Mutated artifact was published." }
