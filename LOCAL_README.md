@@ -38,14 +38,15 @@ The setup:
 
 1. refuses non-Windows systems;
 2. detects CryptoPro CSP independently; reports Browser CAdES at runtime, `stunnel_msspi.exe` as transport readiness, and `cryptcp.exe` as optional diagnostics;
-3. creates `.venv-local` and installs Sellari/open-source Python dependencies;
-4. builds the frontend in local-FBS-only mode;
-5. creates per-user config/data/log/run folders under `%LOCALAPPDATA%\SellariMarking\`;
-6. provisions/reuses local PostgreSQL database `sellari_local`;
-7. runs existing Alembic migrations;
-8. bootstraps one local OWNER + participant on first run;
-9. writes only local paths/configuration and closed mutation gates;
-10. runs the local preflight.
+3. downloads the official CryptoPro `cadesplugin_api.js` activation script into the local frontend public directory (the file is gitignored and not vendored);
+4. creates `.venv-local` and installs Sellari/open-source Python dependencies;
+5. builds the frontend in local-FBS-only mode;
+6. creates per-user config/data/log/run folders under `%LOCALAPPDATA%\SellariMarking\`;
+7. provisions/reuses local PostgreSQL database `sellari_local`;
+8. runs existing Alembic migrations;
+9. bootstraps one local OWNER + participant on first run;
+10. writes only local paths/configuration and closed mutation gates;
+11. runs the local preflight.
 
 The PostgreSQL administrator password is used only for local database provisioning and is not written to the repository or local.env.
 
