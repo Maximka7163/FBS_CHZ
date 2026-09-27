@@ -27,8 +27,10 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class CertificateSelectionRequest(_Strict):
-    thumbprint: str = Field(min_length=16, max_length=160)
+class BrowserAuthCompleteRequest(_Strict):
+    attempt_id: str = Field(min_length=16, max_length=256)
+    signature_base64: str = Field(min_length=16, max_length=262144)
+    selected_certificate_thumbprint: str = Field(min_length=16, max_length=160)
 
 
 def _bridge(request: Request) -> LocalTrueApiReadBridge:
@@ -47,6 +49,8 @@ def _handle(exc: LocalTrueApiUnavailable) -> HTTPException:
         "TRUE_API_AUTH_REQUIRED",
         "CERTIFICATE_NOT_ELIGIBLE",
         "CERTIFICATE_NOT_FOUND",
+        "AUTH_ATTEMPT_INVALID",
+        "AUTH_ATTEMPT_MISMATCH",
     } else 503
     return HTTPException(
         status_code=status,
@@ -64,9 +68,8 @@ def true_api_status(
     return _bridge(request).status(identity.participant_inn or "")
 
 
-@local_router.post("/local/true-api/certificate")
-def select_certificate(
-    payload: CertificateSelectionRequest,
+@local_router.post("/local/auth/prepare")
+def prepare_browser_auth(
     request: Request,
     _: None = Depends(require_csrf),
     identity: AuthenticatedIdentity = Depends(
@@ -74,15 +77,17 @@ def select_certificate(
     ),
 ) -> dict[str, Any]:
     try:
-        return _bridge(request).select_certificate(
-            identity.participant_inn or "", payload.thumbprint
+        return _bridge(request).prepare_auth(
+            identity.participant_inn or "",
+            identity.session_id,
         )
     except LocalTrueApiUnavailable as exc:
         raise _handle(exc) from exc
 
 
-@local_router.post("/local/true-api/authenticate")
-def authenticate(
+@local_router.post("/local/auth/complete")
+def complete_browser_auth(
+    payload: BrowserAuthCompleteRequest,
     request: Request,
     _: None = Depends(require_csrf),
     identity: AuthenticatedIdentity = Depends(
@@ -90,7 +95,13 @@ def authenticate(
     ),
 ) -> dict[str, Any]:
     try:
-        return _bridge(request).authenticate(identity.participant_inn or "")
+        return _bridge(request).complete_auth(
+            identity.participant_inn or "",
+            identity.session_id,
+            attempt_id=payload.attempt_id,
+            signature_base64=payload.signature_base64,
+            selected_certificate_thumbprint=payload.selected_certificate_thumbprint,
+        )
     except LocalTrueApiUnavailable as exc:
         raise _handle(exc) from exc
 
