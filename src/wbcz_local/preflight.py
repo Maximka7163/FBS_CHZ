@@ -51,14 +51,14 @@ def local_preflight() -> dict:
     })
     checks.append({
         "name": "browser_cades",
-        "ok": True,
-        "detail": "checked in Yandex Browser/Chromium at runtime",
+        "ok": False,
+        "detail": "unknown in CLI; checked in Yandex Browser/Chromium at runtime",
         "required": False,
     })
     checks.append({
         "name": "ukep",
-        "ok": True,
-        "detail": "enumerated and participant-bound at runtime",
+        "ok": False,
+        "detail": "unknown in CLI; enumerated and participant-bound at runtime",
         "required": False,
     })
     checks.append({
