@@ -15,3 +15,6 @@ frontend/dist/
 frontend/dist-static/
 frontend/harness.html
 ui_screenshots/
+
+# Downloaded from official CryptoPro during local setup; do not vendor it.
+frontend/public/cadesplugin_api.js
