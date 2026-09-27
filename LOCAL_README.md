@@ -38,7 +38,7 @@ The setup:
 
 1. refuses non-Windows systems;
 2. detects CryptoPro CSP independently; reports Browser CAdES at runtime, `stunnel_msspi.exe` as transport readiness, and `cryptcp.exe` as optional diagnostics;
-3. downloads the official CryptoPro `cadesplugin_api.js` activation script into the local frontend public directory (the file is gitignored and not vendored);
+3. downloads the audited CryptoPro `cadesplugin_api.js` 2.4.5 activation script to a temporary file, verifies pinned SHA-256 `D54CFE9186C4B6DBE9ED73D83F289D31DA7B50000B48BA3E7C278E820578086B`, and publishes it only on an exact match (the file is gitignored and not vendored);
 4. creates `.venv-local` and installs Sellari/open-source Python dependencies;
 5. builds the frontend in local-FBS-only mode;
 6. creates per-user config/data/log/run folders under `%LOCALAPPDATA%\SellariMarking\`;
@@ -81,11 +81,11 @@ Diagnostics:
 5. The Bridge stores only in process memory: `attempt_id`, CRPT `uuid`, exact challenge `data`, participant INN, local browser session binding, eligible thumbprints, expiry and used-state. It returns only `attempt_id`, `Base64(UTF8(exact data))`, participant display context and expiry. No `uuidToken` exists yet.
 6. **Browser signing:** CAdES uses `CreateObjectAsync`, CurrentUser/My, `CAdESCOM.CPSigner`, `CheckCertificate=true`, then `CAdESCOM.CadesSignedData`. `ContentEncoding=CADESCOM_BASE64_TO_BINARY` is set before `Content`; `SignCades(..., CADESCOM_CADES_BES, false)` creates an attached signature. No trim/newline/BOM/normalisation is applied to the CRPT challenge.
 7. **Complete:** the browser calls `POST /api/local/auth/complete` with only `attempt_id`, attached signature and selected thumbprint. Participant INN is never accepted from frontend input; it comes from the server-side attempt/session.
-8. The Bridge rejects missing, expired, used, replayed, session-mismatched or certificate-mismatched attempts and re-validates the certificate/participant binding before calling True API.
-9. The Bridge sends `POST /api/v3/true-api/auth/simpleSignIn` with the stored CRPT UUID, browser-produced attached CAdES signature, stored participant INN and `unitedToken=true`.
+8. The Bridge rejects missing, expired, used, replayed, session-mismatched or certificate-mismatched attempts and re-validates the certificate/participant binding before calling True API. It decodes the attached CMS and calls `SignedCms.CheckSignature(true)`: the `true` argument verifies cryptographic signature integrity without adding an unrelated Windows trust-chain policy; participant/certificate eligibility is enforced separately. Only after successful verification may signer thumbprint/content be trusted.
+9. The Bridge requires the verified CMS signer thumbprint to equal the selected participant-bound certificate and the verified attached content to equal the stored UTF-8 challenge byte-for-byte, then sends `POST /api/v3/true-api/auth/simpleSignIn` with the stored CRPT UUID, browser-produced attached CAdES signature, stored participant INN and `unitedToken=true`.
 10. The returned `uuidToken` exists only in Bridge process memory. It is never returned to the browser and is not written to localStorage, sessionStorage, PostgreSQL, local.env, selection JSON or logs.
 11. FBS control and single-KI lookup use the in-memory bearer for `POST /api/v3/true-api/cises/info?pg=lp`. HTTP 401/403 clears the in-memory session.
-12. Missing Browser CAdES prevents signing but does not imply GOST transport failure. Missing `stunnel_msspi.exe` is reported separately as transport-not-ready; the UI may still start, but prepare/read fail closed. There is no OpenSSL fallback.
+12. Missing Browser CAdES prevents signing but does not imply GOST transport failure. Missing/unavailable `stunnel_msspi.exe` is reported as `GOST_TRANSPORT_NOT_READY` on both prepare and authenticated read paths; the UI may still start. There is no OpenSSL or mock fallback.
 
 The production transport allowlist remains limited to:
 
