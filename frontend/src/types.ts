@@ -226,11 +226,16 @@ export interface LocalTrueApiCandidate {
   has_private_key: boolean;
   compatibility: string | null;
   crypto_provider: string | null;
+  public_key_oid: string | null;
   eligible: boolean;
 }
 
 export interface LocalTrueApiStatus {
   cryptopro_available: boolean;
+  csp_available: boolean;
+  browser_cades_available: boolean | null;
+  gost_transport_available: boolean;
+  cryptcp_available: boolean;
   candidates: LocalTrueApiCandidate[];
   error_code: string | null;
   selected_thumbprint: string | null;
@@ -242,6 +247,21 @@ export interface LocalTrueApiStatus {
   business_write_enabled: boolean;
   uuid_token_persisted: boolean;
   pin_persisted: boolean;
+}
+
+export interface LocalBrowserAuthPrepare {
+  attempt_id: string;
+  challenge_base64: string;
+  participant_inn: string;
+  expires_at: string;
+  read_only: true;
+}
+
+export interface LocalBrowserAuthComplete {
+  authenticated: boolean;
+  expire_date: string;
+  read_only: boolean;
+  business_write_enabled: boolean;
 }
 
 export interface LocalCisInfoResponse {
