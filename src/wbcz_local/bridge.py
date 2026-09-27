@@ -142,16 +142,17 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
     )
 
 
-def _browser_cades_signer_thumbprint(
+def _browser_cades_signature_info(
     signature_base64: str,
     *,
     powershell: str = "powershell.exe",
     runner: Any = subprocess.run,
-) -> str:
-    """Extract signer certificate thumbprint from browser-produced attached CMS.
+) -> tuple[str, bytes]:
+    """Extract signer thumbprint and attached content from Browser CAdES CMS.
 
-    This performs parsing only. It never signs, opens a private key, or handles
-    a PIN. The signature is supplied through stdin and is never persisted.
+    Parsing is read-only: no private-key access, signing, PIN handling or
+    persistence. Returning the attached content lets the Bridge prove that the
+    browser signed exactly the one-time CRPT auth challenge.
     """
     if not signature_base64:
         raise TrueApiError("Empty Browser CAdES signature")
@@ -168,10 +169,14 @@ $raw=[Console]::In.ReadToEnd()
 $bytes=[Convert]::FromBase64String($raw)
 $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms
 $cms.Decode($bytes)
+if ($cms.Detached) { throw 'Detached CMS is not allowed for True API auth' }
 if ($cms.SignerInfos.Count -ne 1) { throw 'Expected exactly one CMS signer' }
 $cert=$cms.SignerInfos[0].Certificate
 if ($null -eq $cert) { throw 'CMS signer certificate is missing' }
-$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
+[pscustomobject]@{
+  thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
+  contentBase64=[Convert]::ToBase64String($cms.ContentInfo.Content)
+} | ConvertTo-Json -Compress
 '''
     completed = runner(
         [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
@@ -183,12 +188,17 @@ $cert.Thumbprint.Replace(' ','').ToUpperInvariant()
     )
     if completed.returncode != 0:
         raise TrueApiError(
-            (completed.stderr.strip() or "Cannot inspect Browser CAdES signer")[:1000]
+            (completed.stderr.strip() or "Cannot inspect Browser CAdES signature")[:1000]
         )
-    thumbprint = completed.stdout.strip().replace(" ", "").upper()
+    try:
+        payload = json.loads(completed.stdout.strip())
+        thumbprint = str(payload["thumbprint"]).replace(" ", "").upper()
+        content = base64.b64decode(str(payload["contentBase64"]), validate=True)
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise TrueApiError("Browser CAdES signature inspection returned invalid data") from exc
     if not thumbprint:
         raise TrueApiError("Browser CAdES signer thumbprint is empty")
-    return thumbprint
+    return thumbprint, content
 
 
 class LocalTrueApiReadRuntime:
@@ -356,7 +366,7 @@ class LocalTrueApiReadBridge:
         cryptcp_path: str | Path | None = None,
         stunnel_path: str | Path | None = None,
         discovery: Any | None = None,
-        cms_signer_thumbprint: Any | None = None,
+        cms_signature_info: Any | None = None,
     ) -> None:
         config_dir = Path(
             os.getenv(
@@ -377,7 +387,7 @@ class LocalTrueApiReadBridge:
         self.discovery = discovery or WindowsCryptoProCertificateDiscovery(
             cryptcp_path=self.cryptcp_path
         )
-        self._cms_signer_thumbprint = cms_signer_thumbprint or _browser_cades_signer_thumbprint
+        self._cms_signature_info = cms_signature_info or _browser_cades_signature_info
         self._runtime: LocalTrueApiReadRuntime | None = None
         self._runtime_key: str | None = None
         self._attempts: dict[str, BrowserAuthAttempt] = {}
@@ -651,16 +661,24 @@ class LocalTrueApiReadBridge:
                 )
             self._eligible_candidate(participant_inn, normalized)
             try:
-                signer_thumbprint = self._cms_signer_thumbprint(signature_base64)
+                signer_thumbprint, signed_content = self._cms_signature_info(
+                    signature_base64
+                )
             except Exception as exc:
                 raise LocalTrueApiUnavailable(
                     "CADES_SIGNER_VALIDATION_FAILED",
-                    "Cannot validate Browser CAdES signer certificate",
+                    "Cannot validate Browser CAdES signer certificate/content",
                 ) from exc
             if signer_thumbprint.replace(" ", "").upper() != normalized:
                 raise LocalTrueApiUnavailable(
                     "CERTIFICATE_NOT_ELIGIBLE",
                     "Browser CAdES signer does not match the selected participant certificate",
+                )
+            exact_challenge = attempt.challenge_data.encode("utf-8")
+            if signed_content != exact_challenge:
+                raise LocalTrueApiUnavailable(
+                    "AUTH_CHALLENGE_MISMATCH",
+                    "Browser CAdES content does not match the typed CRPT auth attempt",
                 )
 
             # Consume before network completion. A failed/retried completion
