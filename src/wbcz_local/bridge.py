@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import secrets
 import shutil
+import subprocess
 import threading
 from typing import Any, Iterable
 
@@ -119,6 +120,51 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
         ),
         business_write_enabled=False,
     )
+
+
+def _browser_cades_signer_thumbprint(
+    signature_base64: str,
+    *,
+    powershell: str = "powershell.exe",
+    runner: Any = subprocess.run,
+) -> str:
+    """Extract signer certificate thumbprint from browser-produced attached CMS.
+
+    This performs parsing only. It never signs, opens a private key, or handles
+    a PIN. The signature is supplied through stdin and is never persisted.
+    """
+    if not signature_base64:
+        raise TrueApiError("Empty Browser CAdES signature")
+    if os.name != "nt" and runner is subprocess.run:
+        raise TrueApiError("Browser CAdES signer inspection requires Windows")
+    script = r'''
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+$raw=[Console]::In.ReadToEnd()
+$bytes=[Convert]::FromBase64String($raw)
+$cms=New-Object System.Security.Cryptography.Pkcs.SignedCms
+$cms.Decode($bytes)
+if ($cms.SignerInfos.Count -ne 1) { throw 'Expected exactly one CMS signer' }
+$cert=$cms.SignerInfos[0].Certificate
+if ($null -eq $cert) { throw 'CMS signer certificate is missing' }
+$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
+'''
+    completed = runner(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+        input=signature_base64,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise TrueApiError(
+            (completed.stderr.strip() or "Cannot inspect Browser CAdES signer")[:1000]
+        )
+    thumbprint = completed.stdout.strip().replace(" ", "").upper()
+    if not thumbprint:
+        raise TrueApiError("Browser CAdES signer thumbprint is empty")
+    return thumbprint
 
 
 class LocalTrueApiReadRuntime:
@@ -286,6 +332,7 @@ class LocalTrueApiReadBridge:
         cryptcp_path: str | Path | None = None,
         stunnel_path: str | Path | None = None,
         discovery: Any | None = None,
+        cms_signer_thumbprint: Any | None = None,
     ) -> None:
         config_dir = Path(
             os.getenv(
@@ -306,6 +353,7 @@ class LocalTrueApiReadBridge:
         self.discovery = discovery or WindowsCryptoProCertificateDiscovery(
             cryptcp_path=self.cryptcp_path
         )
+        self._cms_signer_thumbprint = cms_signer_thumbprint or _browser_cades_signer_thumbprint
         self._runtime: LocalTrueApiReadRuntime | None = None
         self._runtime_key: str | None = None
         self._attempts: dict[str, BrowserAuthAttempt] = {}
@@ -555,6 +603,18 @@ class LocalTrueApiReadBridge:
                     "Selected browser certificate is not bound to this auth attempt",
                 )
             self._eligible_candidate(participant_inn, normalized)
+            try:
+                signer_thumbprint = self._cms_signer_thumbprint(signature_base64)
+            except Exception as exc:
+                raise LocalTrueApiUnavailable(
+                    "CADES_SIGNER_VALIDATION_FAILED",
+                    "Cannot validate Browser CAdES signer certificate",
+                ) from exc
+            if signer_thumbprint.replace(" ", "").upper() != normalized:
+                raise LocalTrueApiUnavailable(
+                    "CERTIFICATE_NOT_ELIGIBLE",
+                    "Browser CAdES signer does not match the selected participant certificate",
+                )
 
             # Consume before network completion. A failed/retried completion
             # cannot replay a CRPT challenge/signature pair.
