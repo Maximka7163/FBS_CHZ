@@ -1,4 +1,4 @@
-import { completeLocalBrowserAuth, prepareLocalBrowserAuth } from "./api";
+import { completeLocalBrowserAuth, prepareLocalBrowserAuth } from "./api.ts";
 import type { LocalBrowserAuthComplete, LocalBrowserAuthPrepare } from "./types";
 
 export interface BrowserCadesCertificate {
