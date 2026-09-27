@@ -64,6 +64,22 @@ if (-not (Test-Path -LiteralPath $paths.Python)) {
 & $paths.Python -m pip install --disable-pip-version-check -e ($repo + "[web]")
 if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
 
+$cadesPublicDir = Join-Path $repo "frontend\public"
+$cadesApiPath = Join-Path $cadesPublicDir "cadesplugin_api.js"
+New-Item -ItemType Directory -Force -Path $cadesPublicDir | Out-Null
+if (-not (Test-Path -LiteralPath $cadesApiPath)) {
+    Write-Host "Downloading official CryptoPro cadesplugin_api.js for local Browser CAdES activation..."
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri "https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js" -OutFile $cadesApiPath
+    } catch {
+        throw "Cannot download official CryptoPro cadesplugin_api.js. Download it from the CryptoPro CAdES downloads page and place it at '$cadesApiPath', then rerun setup."
+    }
+}
+$cadesApiText = Get-Content -LiteralPath $cadesApiPath -Raw -Encoding UTF8
+if (($cadesApiText.Length -lt 1000) -or ($cadesApiText -notmatch "CreateObjectAsync") -or ($cadesApiText -notmatch "cadesplugin")) {
+    throw "Local cadesplugin_api.js failed activation-script sanity checks. Replace it with the official CryptoPro file."
+}
+
 Push-Location (Join-Path $repo "frontend")
 try {
     & $npm.Source ci --no-audit --no-fund
