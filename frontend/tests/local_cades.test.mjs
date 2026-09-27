@@ -159,6 +159,13 @@ test("Browser auth exposes no public arbitrary-content signer primitive", async 
   assert.equal(source.includes("CachePin"), false);
   assert.equal(source.includes("function signPreparedAuthAttempt"), true);
   assert.equal(source.includes("export async function authenticateLocalBrowserCades"), true);
+
+  const mainSource = await import("node:fs/promises").then((fs) =>
+    fs.readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
+  );
+  assert.equal(mainSource.includes("prepareLocalBrowserAuth"), false);
+  assert.equal(mainSource.includes("completeLocalBrowserAuth"), false);
+  assert.equal(mainSource.includes("authenticateLocalBrowserCades"), true);
 });
 
 test("local Browser auth never persists token/signature state in web storage", async () => {
