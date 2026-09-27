@@ -259,6 +259,34 @@ def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
     assert status["candidates"][0]["eligible"] is True
 
 
+def test_expired_certificate_is_not_eligible_even_without_cryptcp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExpiredDiscovery:
+        def discover(self) -> dict:
+            data = FakeDiscovery().discover()
+            data["candidates"][0]["valid_to"] = "2025-01-01T00:00:00+00:00"
+            return data
+
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=ExpiredDiscovery(),
+        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+    )
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+
+    assert bridge.discover(INN)["candidates"][0]["eligible"] is False
+
+
 def test_typed_prepare_complete_attempt_keeps_token_server_side_and_is_one_time(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
