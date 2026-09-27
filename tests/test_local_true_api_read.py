@@ -490,6 +490,42 @@ def test_persisted_wrong_participant_certificate_blocks_read(
     assert build_calls == 0
 
 
+def test_missing_stunnel_is_reported_as_transport_not_ready_not_cryptopro_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TransportBlockedRuntime:
+        authenticated = False
+        expire_date = None
+
+        def prepare_auth_challenge(self):
+            raise RuntimeError("stunnel missing")
+
+        def close(self):
+            pass
+
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: TransportBlockedRuntime())
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": False,
+            "cryptcp_available": False,
+        })(),
+    )
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.prepare_auth(INN, "browser-session-1")
+
+    assert exc_info.value.code == "GOST_TRANSPORT_NOT_READY"
+    assert "CryptoPro" not in str(exc_info.value)
+
+
 def test_local_bridge_has_no_arbitrary_sign_or_business_mutation_method(tmp_path: Path) -> None:
     bridge = LocalTrueApiReadBridge(
         settings_path=tmp_path / "settings.json",
