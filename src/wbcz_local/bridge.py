@@ -307,7 +307,9 @@ class LocalTrueApiReadBridge:
             cryptcp_path=self.cryptcp_path
         )
         self._runtime: LocalTrueApiReadRuntime | None = None
-        self._runtime_key: tuple[str, str] | None = None
+        self._runtime_key: str | None = None
+        self._attempts: dict[str, BrowserAuthAttempt] = {}
+        self._attempt_ttl = timedelta(minutes=5)
         self._lock = threading.RLock()
 
     @classmethod
@@ -361,10 +363,17 @@ class LocalTrueApiReadBridge:
 
     @staticmethod
     def _eligible(candidate: dict[str, Any], participant_inn: str) -> bool:
+        provider = str(candidate.get("crypto_provider") or "").casefold().replace("-", " ")
+        public_key_oid = str(candidate.get("public_key_oid") or "")
         certificate_inn = candidate.get("certificate_inn")
         return bool(
-            candidate.get("compatibility") == "GOST_CRYPTOPRO"
-            and candidate.get("has_private_key") is True
+            candidate.get("has_private_key") is True
+            and public_key_oid in {
+                "1.2.643.2.2.19",
+                "1.2.643.7.1.1.1.1",
+                "1.2.643.7.1.1.1.2",
+            }
+            and ("crypto pro" in provider or "cryptopro" in provider)
             and certificate_inn == participant_inn
         )
 
@@ -390,11 +399,17 @@ class LocalTrueApiReadBridge:
                 "has_private_key": bool(item.get("has_private_key")),
                 "compatibility": item.get("compatibility"),
                 "crypto_provider": item.get("crypto_provider"),
+                "public_key_oid": item.get("public_key_oid"),
             }
             safe["eligible"] = self._eligible(item, participant_inn)
             candidates.append(safe)
+        components = inspect_local_cryptopro_foundation()
         return {
-            "cryptopro_available": bool(inventory.get("cryptopro_available")),
+            "cryptopro_available": components.csp_available,
+            "csp_available": components.csp_available,
+            "browser_cades_available": None,
+            "gost_transport_available": components.gost_transport_available,
+            "cryptcp_available": components.cryptcp_available,
             "candidates": candidates,
             "error_code": None,
         }
@@ -411,144 +426,170 @@ class LocalTrueApiReadBridge:
         self._runtime = None
         self._runtime_key = None
 
-    def _validated_persisted_selection(self, participant_inn: str) -> str:
-        """Re-bind persisted certificate metadata to the active participant.
-
-        true_api_read.json is local operator metadata, not an identity proof.
-        Every runtime/auth construction therefore re-resolves the thumbprint
-        through the Windows certificate store and requires the discovered
-        certificate INN to match the active participant exactly before any
-        signer or network transport is constructed.
-        """
-        settings = self._settings()
-        thumbprint = settings.get("thumbprint")
-        if not thumbprint:
-            raise LocalTrueApiUnavailable(
-                "CERTIFICATE_SELECTION_REQUIRED",
-                "Select an eligible local UKEP certificate first",
-            )
-
-        inventory = self.discover(participant_inn)
-        candidate = next(
-            (
-                item
-                for item in inventory.get("candidates", [])
-                if item.get("thumbprint") == thumbprint
-            ),
-            None,
-        )
-        if candidate is None or not candidate.get("eligible"):
-            self._clear_runtime()
-            raise LocalTrueApiUnavailable(
-                "CERTIFICATE_NOT_ELIGIBLE",
-                "Persisted certificate is not eligible for the active participant",
-            )
-
-        try:
-            WindowsCryptoProCertificateInspector(
-                thumbprint, cryptcp_path=self.cryptcp_path
-            ).inspect()
-        except Exception as exc:
-            self._clear_runtime()
-            raise LocalTrueApiUnavailable(
-                "CERTIFICATE_NOT_ELIGIBLE",
-                "Persisted certificate failed current local CryptoPro validation",
-            ) from exc
-        return thumbprint
-
-    def select_certificate(self, participant_inn: str, thumbprint: str) -> dict[str, Any]:
+    def _eligible_candidate(
+        self, participant_inn: str, thumbprint: str
+    ) -> dict[str, Any]:
         normalized = thumbprint.replace(" ", "").upper()
         inventory = self.discover(participant_inn)
         candidate = next(
             (
                 item
-                for item in inventory["candidates"]
+                for item in inventory.get("candidates", [])
                 if item.get("thumbprint") == normalized
             ),
             None,
         )
-        if candidate is None:
-            raise LocalTrueApiUnavailable(
-                "CERTIFICATE_NOT_FOUND", "Selected UKEP certificate was not found"
-            )
-        if not candidate.get("eligible"):
+        if candidate is None or not candidate.get("eligible"):
             raise LocalTrueApiUnavailable(
                 "CERTIFICATE_NOT_ELIGIBLE",
-                "Selected certificate is not an eligible CryptoPro GOST UKEP",
+                "Selected browser certificate is not eligible for the active participant",
             )
-        try:
-            WindowsCryptoProCertificateInspector(
-                normalized, cryptcp_path=self.cryptcp_path
-            ).inspect()
-        except Exception as exc:
-            raise LocalTrueApiUnavailable(
-                "CERTIFICATE_VALIDATION_FAILED",
-                "Selected UKEP certificate failed local validation",
-            ) from exc
-        with self._lock:
-            self._clear_runtime()
-            self._write_settings(
-                thumbprint=normalized, participant_inn=participant_inn
-            )
-        return self.status(participant_inn)
+        return candidate
 
-    def _build_runtime(
-        self, participant_inn: str, thumbprint: str
-    ) -> LocalTrueApiReadRuntime:
+    def _selected_certificate_for_read(self, participant_inn: str) -> str:
+        settings = self._settings()
+        thumbprint = settings.get("thumbprint")
+        if not thumbprint or settings.get("participant_inn") != participant_inn:
+            raise LocalTrueApiUnavailable(
+                "CERTIFICATE_SELECTION_REQUIRED",
+                "Complete Browser CAdES authentication first",
+            )
+        self._eligible_candidate(participant_inn, thumbprint)
+        return thumbprint
+
+    def _build_runtime(self, participant_inn: str) -> LocalTrueApiReadRuntime:
         audit = JsonlLiveAudit(self.audit_log_path)
         tunnel = CryptoProGostTlsTunnel(self.stunnel_path)
         transport = ReadOnlyTrueApiTransport(audit=audit, tunnel=tunnel)
-        inspector = WindowsCryptoProCertificateInspector(
-            thumbprint, cryptcp_path=self.cryptcp_path
-        )
-        signer = WindowsCryptoProAuthSigner(
-            thumbprint,
-            cryptcp_path=self.cryptcp_path,
-            inspector=inspector,
-        )
         return LocalTrueApiReadRuntime(
             participant_inn=participant_inn,
             transport=transport,
-            inspector=inspector,
-            signer=signer,
         )
 
     def _runtime_for(self, participant_inn: str) -> LocalTrueApiReadRuntime:
-        # Do not trust participant_inn/thumbprint persisted in true_api_read.json
-        # as identity proof. Re-resolve and validate the selected certificate
-        # before a signer or GOST transport can be constructed.
-        thumbprint = self._validated_persisted_selection(participant_inn)
-        key = (participant_inn, thumbprint)
         with self._lock:
-            if self._runtime is None or self._runtime_key != key:
+            if self._runtime is None or self._runtime_key != participant_inn:
                 self._clear_runtime()
-                self._runtime = self._build_runtime(participant_inn, thumbprint)
-                self._runtime_key = key
+                self._runtime = self._build_runtime(participant_inn)
+                self._runtime_key = participant_inn
             return self._runtime
 
-    def authenticate(self, participant_inn: str) -> dict[str, Any]:
+    def _prune_attempts(self) -> None:
+        now = datetime.now(timezone.utc)
+        for attempt_id, attempt in list(self._attempts.items()):
+            if attempt.used or attempt.expires_at <= now:
+                self._attempts.pop(attempt_id, None)
+
+    def prepare_auth(self, participant_inn: str, session_id: str) -> dict[str, Any]:
         with self._lock:
+            self._prune_attempts()
+            inventory = self.discover(participant_inn)
+            eligible = frozenset(
+                str(item["thumbprint"])
+                for item in inventory.get("candidates", [])
+                if item.get("eligible") and item.get("thumbprint")
+            )
+            if not eligible:
+                raise LocalTrueApiUnavailable(
+                    "CERTIFICATE_NOT_ELIGIBLE",
+                    "No participant-bound CryptoPro GOST UKEP is available",
+                )
             runtime = self._runtime_for(participant_inn)
             try:
-                return runtime.authenticate()
+                uuid, challenge = runtime.prepare_auth_challenge()
+            except Exception as exc:
+                raise LocalTrueApiUnavailable(
+                    "GOST_TRANSPORT_NOT_READY",
+                    "True API GOST transport is not ready",
+                ) from exc
+            attempt_id = secrets.token_urlsafe(32)
+            expires_at = datetime.now(timezone.utc) + self._attempt_ttl
+            self._attempts[attempt_id] = BrowserAuthAttempt(
+                attempt_id=attempt_id,
+                uuid=uuid,
+                challenge_data=challenge,
+                participant_inn=participant_inn,
+                session_id=session_id,
+                eligible_thumbprints=eligible,
+                expires_at=expires_at,
+            )
+            return {
+                "attempt_id": attempt_id,
+                "challenge_base64": base64.b64encode(
+                    challenge.encode("utf-8")
+                ).decode("ascii"),
+                "participant_inn": participant_inn,
+                "expires_at": expires_at.isoformat(),
+                "read_only": True,
+            }
+
+    def complete_auth(
+        self,
+        participant_inn: str,
+        session_id: str,
+        *,
+        attempt_id: str,
+        signature_base64: str,
+        selected_certificate_thumbprint: str,
+    ) -> dict[str, Any]:
+        normalized = selected_certificate_thumbprint.replace(" ", "").upper()
+        with self._lock:
+            self._prune_attempts()
+            attempt = self._attempts.get(attempt_id)
+            if attempt is None:
+                raise LocalTrueApiUnavailable(
+                    "AUTH_ATTEMPT_INVALID",
+                    "Authentication attempt is missing, expired, or already used",
+                )
+            if (
+                attempt.session_id != session_id
+                or attempt.participant_inn != participant_inn
+            ):
+                raise LocalTrueApiUnavailable(
+                    "AUTH_ATTEMPT_MISMATCH",
+                    "Authentication attempt does not match the active browser session",
+                )
+            if normalized not in attempt.eligible_thumbprints:
+                raise LocalTrueApiUnavailable(
+                    "CERTIFICATE_NOT_ELIGIBLE",
+                    "Selected browser certificate is not bound to this auth attempt",
+                )
+            self._eligible_candidate(participant_inn, normalized)
+
+            # Consume before network completion. A failed/retried completion
+            # cannot replay a CRPT challenge/signature pair.
+            attempt.used = True
+            runtime = self._runtime_for(participant_inn)
+            try:
+                result = runtime.complete_auth(
+                    uuid=attempt.uuid,
+                    signature_base64=signature_base64,
+                )
             except Exception as exc:
                 runtime.clear_session()
                 raise LocalTrueApiUnavailable(
                     "TRUE_API_AUTH_FAILED",
-                    "Local CryptoPro / True API authentication failed",
+                    "Browser CAdES / True API authentication failed",
                 ) from exc
+            self._write_settings(
+                thumbprint=normalized,
+                participant_inn=participant_inn,
+            )
+            self._attempts.pop(attempt_id, None)
+            return result
 
     def read_states(
         self, participant_inn: str, cises: Iterable[str]
     ) -> dict[str, KiState | Exception]:
         with self._lock:
+            self._selected_certificate_for_read(participant_inn)
             runtime = self._runtime_for(participant_inn)
             try:
                 return runtime.read_states(cises)
             except LiveAuthorizationRequired as exc:
                 raise LocalTrueApiUnavailable(
                     "TRUE_API_AUTH_REQUIRED",
-                    "Authenticate with the selected local UKEP first",
+                    "Authenticate with Browser CAdES first",
                 ) from exc
             except (TrueApiError, ValueError) as exc:
                 raise LocalTrueApiUnavailable(
@@ -569,11 +610,7 @@ class LocalTrueApiReadBridge:
             ),
             None,
         )
-        runtime = (
-            self._runtime
-            if self._runtime_key == (participant_inn, selected)
-            else None
-        )
+        runtime = self._runtime if self._runtime_key == participant_inn else None
         error_code = inventory.get("error_code")
         if not error_code and selected:
             if selected_candidate is None:
