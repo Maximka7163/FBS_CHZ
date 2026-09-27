@@ -143,3 +143,49 @@ jobs:
           }
           if (-not $rejected) { throw "Mutated artifact was not rejected." }
           if (Test-Path -LiteralPath $mustNotPublish) { throw "Mutated artifact was published." }
+
+      - name: SignedCms signature-only integrity semantics
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+          $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+          try {
+            $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+              "CN=Sellari Synthetic CI",
+              $rsa,
+              [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+              [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            )
+            $certificate = $request.CreateSelfSigned(
+              [DateTimeOffset]::UtcNow.AddMinutes(-1),
+              [DateTimeOffset]::UtcNow.AddHours(1)
+            )
+            $content = [System.Text.Encoding]::UTF8.GetBytes("synthetic-browser-cades-auth-challenge")
+            $contentInfo = [System.Security.Cryptography.Pkcs.ContentInfo]::new($content)
+            $signed = [System.Security.Cryptography.Pkcs.SignedCms]::new($contentInfo, $false)
+            $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($certificate)
+            $signed.ComputeSignature($signer)
+            $encoded = $signed.Encode()
+
+            $valid = [System.Security.Cryptography.Pkcs.SignedCms]::new()
+            $valid.Decode($encoded)
+            if ($valid.Detached) { throw "Synthetic CMS unexpectedly detached." }
+            if ($valid.SignerInfos.Count -ne 1) { throw "Synthetic CMS signer count mismatch." }
+            # Same semantics used by wbcz_local.bridge: integrity only. Chain
+            # eligibility is a separate participant/certificate policy.
+            $valid.CheckSignature($true)
+
+            $mutated = [byte[]]$encoded.Clone()
+            $mutated[$mutated.Length - 8] = $mutated[$mutated.Length - 8] -bxor 1
+            $rejected = $false
+            try {
+              $invalid = [System.Security.Cryptography.Pkcs.SignedCms]::new()
+              $invalid.Decode($mutated)
+              $invalid.CheckSignature($true)
+            } catch {
+              $rejected = $true
+            }
+            if (-not $rejected) { throw "Tampered CMS unexpectedly passed CheckSignature(true)." }
+          } finally {
+            $rsa.Dispose()
+          }
