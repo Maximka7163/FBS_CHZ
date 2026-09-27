@@ -111,16 +111,19 @@ function Find-SellariCryptoProTool {
 function Find-SellariCryptoPro {
     $candidates = @(
         "$env:ProgramFiles\Crypto Pro\CSP\csptest.exe",
-        "${env:ProgramFiles(x86)}\Crypto Pro\CSP\csptest.exe",
-        "$env:ProgramFiles\Crypto Pro\CSP\cryptcp.exe",
-        "${env:ProgramFiles(x86)}\Crypto Pro\CSP\cryptcp.exe"
+        "${env:ProgramFiles(x86)}\Crypto Pro\CSP\csptest.exe"
     )
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
     }
-    foreach ($name in @("csptest.exe", "cryptcp.exe")) {
-        $command = Get-Command $name -ErrorAction SilentlyContinue
-        if ($command) { return $command.Source }
+    $command = Get-Command "csptest.exe" -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\Crypto Pro\Settings",
+        "HKLM:\SOFTWARE\WOW6432Node\Crypto Pro\Settings"
+    )) {
+        if (Test-Path -LiteralPath $key) { return "registry:$key" }
     }
     return $null
 }
