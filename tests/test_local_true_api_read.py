@@ -257,7 +257,7 @@ def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
     status = bridge.discover(INN)
 
     assert status["cryptcp_available"] is False
-    assert status["candidates"][0]["compatibility"] == "UNSUPPORTED"
+    assert status["candidates"][0]["compatibility"] == "GOST_CRYPTOPRO"
     assert status["candidates"][0]["eligible"] is True
 
 
