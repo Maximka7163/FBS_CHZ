@@ -94,6 +94,72 @@ function Ensure-SellariPostgresService {
     }
 }
 
+function Assert-SellariPinnedSha256 {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$ExpectedSha256
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Pinned artifact not found: $Path"
+    }
+    if ($ExpectedSha256 -notmatch '^[0-9A-Fa-f]{64}    param([Parameter(Mandatory=$true)][string]$FileName)
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "Crypto Pro\CSP\$FileName"),
+        (Join-Path ${env:ProgramFiles(x86)} "Crypto Pro\CSP\$FileName")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    $command = Get-Command $FileName -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
+function Find-SellariCryptoPro {
+    $candidates = @(
+        "$env:ProgramFiles\Crypto Pro\CSP\csptest.exe",
+        "${env:ProgramFiles(x86)}\Crypto Pro\CSP\csptest.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    $command = Get-Command "csptest.exe" -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\Crypto Pro\Settings",
+        "HKLM:\SOFTWARE\WOW6432Node\Crypto Pro\Settings"
+    )) {
+        if (Test-Path -LiteralPath $key) { return "registry:$key" }
+    }
+    return $null
+}
+) {
+        throw "Expected SHA-256 must be exactly 64 hexadecimal characters."
+    }
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $expected = $ExpectedSha256.ToUpperInvariant()
+    if ($actual -ne $expected) {
+        throw "Pinned artifact SHA-256 mismatch for '$Path'. Expected $expected, got $actual."
+    }
+    return $actual
+}
+
+function Publish-SellariPinnedArtifact {
+    param(
+        [Parameter(Mandatory=$true)][string]$CandidatePath,
+        [Parameter(Mandatory=$true)][string]$DestinationPath,
+        [Parameter(Mandatory=$true)][string]$ExpectedSha256
+    )
+    # Never publish executable JS until the candidate has passed an exact
+    # cryptographic hash check. A mismatch leaves DestinationPath untouched.
+    Assert-SellariPinnedSha256 -Path $CandidatePath -ExpectedSha256 $ExpectedSha256 | Out-Null
+    $destinationDirectory = Split-Path -Parent $DestinationPath
+    New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+    Move-Item -LiteralPath $CandidatePath -Destination $DestinationPath -Force
+    Assert-SellariPinnedSha256 -Path $DestinationPath -ExpectedSha256 $ExpectedSha256 | Out-Null
+}
+
 function Find-SellariCryptoProTool {
     param([Parameter(Mandatory=$true)][string]$FileName)
     $candidates = @(
