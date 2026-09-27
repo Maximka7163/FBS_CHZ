@@ -1,3 +1,6 @@
+import { completeLocalBrowserAuth, prepareLocalBrowserAuth } from "./api";
+import type { LocalBrowserAuthComplete, LocalBrowserAuthPrepare } from "./types";
+
 export interface BrowserCadesCertificate {
   thumbprint: string;
   subject: string;
@@ -134,11 +137,24 @@ async function certificateByThumbprint(
   throw new Error("Выбранный сертификат не найден в CurrentUser/My");
 }
 
-export async function signBrowserAuthChallenge(
-  challengeBase64: string,
+function validatePreparedAttempt(prepared: LocalBrowserAuthPrepare): void {
+  if (
+    !prepared
+    || prepared.read_only !== true
+    || !prepared.attempt_id
+    || !prepared.challenge_base64
+    || !prepared.participant_inn
+    || !prepared.expires_at
+  ) {
+    throw new Error("Некорректная typed auth-попытка Честного знака");
+  }
+}
+
+async function signPreparedAuthAttempt(
+  prepared: LocalBrowserAuthPrepare,
   certificateThumbprint: string,
 ): Promise<string> {
-  if (!challengeBase64) throw new Error("Пустой challenge Честного знака");
+  validatePreparedAttempt(prepared);
   const cades = await plugin();
   const certificate = await certificateByThumbprint(cades, certificateThumbprint);
 
@@ -147,15 +163,34 @@ export async function signBrowserAuthChallenge(
   await signer.propset_CheckCertificate(true);
 
   const signedData = await cades.CreateObjectAsync("CAdESCOM.CadesSignedData");
-  // Exact auth content contract: Bridge returns Base64(UTF8(exact CRPT data)).
+  // Typed auth only: prepared.challenge_base64 is Base64(UTF8(exact CRPT data)).
   // ContentEncoding must be configured before assigning Content.
   await signedData.propset_ContentEncoding(cades.CADESCOM_BASE64_TO_BINARY ?? 1);
-  await signedData.propset_Content(challengeBase64);
+  await signedData.propset_Content(prepared.challenge_base64);
   return String(
     await signedData.SignCades(
       signer,
       cades.CADESCOM_CADES_BES ?? 1,
       false,
     ),
+  );
+}
+
+export async function authenticateLocalBrowserCades(
+  certificateThumbprint: string,
+): Promise<LocalBrowserAuthComplete> {
+  // There is intentionally no exported sign(bytes/base64, certificate) API.
+  // Signing is reachable only from this prepare -> sign -> immediate complete
+  // orchestration for one typed backend auth attempt.
+  const prepared = await prepareLocalBrowserAuth();
+  validatePreparedAttempt(prepared);
+  const signatureBase64 = await signPreparedAuthAttempt(
+    prepared,
+    certificateThumbprint,
+  );
+  return completeLocalBrowserAuth(
+    prepared.attempt_id,
+    signatureBase64,
+    certificateThumbprint,
   );
 }
