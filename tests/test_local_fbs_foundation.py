@@ -50,7 +50,10 @@ def test_local_app_is_loopback_fbs_surface_and_serves_frontend(tmp_path: Path) -
     assert "/api/files" in paths
     assert "/api/files/{import_id}/control" in paths
     assert "/api/local/true-api/status" in paths
-    assert "/api/local/true-api/authenticate" in paths
+    assert "/api/local/auth/prepare" in paths
+    assert "/api/local/auth/complete" in paths
+    assert "/api/local/true-api/authenticate" not in paths
+    assert "/api/local/true-api/certificate" not in paths
     assert "/api/local/true-api/cises-info" in paths
     assert "/api/cis-inventory/info" not in paths
     assert "/api/live" in paths
@@ -102,13 +105,17 @@ def test_local_cli_refuses_non_loopback_bind() -> None:
         _loopback_host("192.168.1.10")
 
 
-def test_local_true_api_bridge_exposes_read_auth_but_no_business_signing() -> None:
+def test_local_true_api_bridge_exposes_typed_browser_auth_but_no_signing() -> None:
     bridge = LocalTrueApiBridgeFoundation()
     assert callable(bridge.diagnostics)
-    assert callable(bridge.authenticate)
+    assert callable(bridge.prepare_auth)
+    assert callable(bridge.complete_auth)
     assert callable(bridge.read_states)
     public = {name for name in dir(bridge) if not name.startswith("_")}
+    assert "authenticate" not in public
     assert "sign" not in public
+    assert "sign_bytes" not in public
+    assert "sign_file" not in public
     assert "submit" not in public
     assert "create_document" not in public
     result = bridge.diagnostics()
@@ -138,6 +145,10 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "WBCZ_TRUE_API_REAL_READ_ENABLED=true" in setup
     assert "stunnel_msspi.exe" in setup
     assert "cryptcp.exe" in setup
+    assert 'throw "CryptoPro cryptcp.exe was not detected' not in setup
+    assert 'throw "CryptoPro stunnel_msspi.exe was not detected' not in setup
+    assert "OK for Browser CAdES auth" in setup
+    assert "True API auth/read will remain blocked" in setup
     assert "WBCZ_TRUE_API_WRITE_ENABLED=true" not in setup
 
 
