@@ -29,6 +29,8 @@ CIS = "010460123456789021"
 INN = "1234567890"
 THUMBPRINT = "A" * 40
 TOKEN = "SECRET-UUID-TOKEN-MUST-STAY-IN-MEMORY"
+EXACT_CHALLENGE = " EXACT-CRPT-CHALLENGE\nЮникод "
+EXACT_CHALLENGE_BYTES = EXACT_CHALLENGE.encode("utf-8")
 
 
 class FakeTunnel:
@@ -72,7 +74,7 @@ class FakeTransport:
         if (method, path) == ("GET", "/auth/key"):
             return {
                 "uuid": "challenge-uuid",
-                "data": " EXACT-CRPT-CHALLENGE\nЮникод ",
+                "data": EXACT_CHALLENGE,
             }
         if (method, path) == ("POST", "/auth/simpleSignIn"):
             assert body == {
@@ -136,7 +138,7 @@ def _runtime() -> tuple[LocalTrueApiReadRuntime, FakeTransport]:
 def _browser_auth(runtime: LocalTrueApiReadRuntime) -> dict:
     uuid, challenge = runtime.prepare_auth_challenge()
     assert uuid == "challenge-uuid"
-    assert challenge == " EXACT-CRPT-CHALLENGE\nЮникод "
+    assert challenge == EXACT_CHALLENGE
     return runtime.complete_auth(
         uuid=uuid,
         signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
@@ -148,7 +150,7 @@ def test_local_runtime_preserves_exact_challenge_and_keeps_uuid_token_in_memory(
 
     uuid, challenge = runtime.prepare_auth_challenge()
     assert uuid == "challenge-uuid"
-    assert challenge.encode("utf-8") == " EXACT-CRPT-CHALLENGE\nЮникод ".encode("utf-8")
+    assert challenge.encode("utf-8") == EXACT_CHALLENGE_BYTES
     result = runtime.complete_auth(
         uuid=uuid,
         signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
@@ -241,7 +243,7 @@ def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
@@ -273,7 +275,7 @@ def test_expired_certificate_is_not_eligible_even_without_cryptcp(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=ExpiredDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
@@ -296,7 +298,7 @@ def test_typed_prepare_complete_attempt_keeps_token_server_side_and_is_one_time(
         settings_path=tmp_path / "true_api_read.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -310,7 +312,7 @@ def test_typed_prepare_complete_attempt_keeps_token_server_side_and_is_one_time(
 
     prepared = bridge.prepare_auth(INN, "browser-session-1")
 
-    exact = " EXACT-CRPT-CHALLENGE\nЮникод ".encode("utf-8")
+    exact = EXACT_CHALLENGE_BYTES
     import base64
     assert base64.b64decode(prepared["challenge_base64"]) == exact
     assert "uuid" not in prepared
@@ -357,7 +359,7 @@ def test_auth_attempt_rejects_wrong_session_and_wrong_thumbprint(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -400,7 +402,7 @@ def test_browser_cades_cms_signer_must_match_selected_thumbprint(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: "B" * 40,
+        cms_signature_info=lambda signature: ("B" * 40, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -426,6 +428,44 @@ def test_browser_cades_cms_signer_must_match_selected_thumbprint(
     assert not any(call["path"] == "/auth/simpleSignIn" for call in transport.calls)
 
 
+def test_browser_cades_attached_content_must_match_exact_auth_challenge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, transport = _runtime()
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+        cms_signature_info=lambda signature: (
+            THUMBPRINT,
+            b"DIFFERENT-CONTENT",
+        ),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+    prepared = bridge.prepare_auth(INN, "browser-session-1")
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.complete_auth(
+            INN,
+            "browser-session-1",
+            attempt_id=prepared["attempt_id"],
+            signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+            selected_certificate_thumbprint=THUMBPRINT,
+        )
+
+    assert exc_info.value.code == "AUTH_CHALLENGE_MISMATCH"
+    assert not any(call["path"] == "/auth/simpleSignIn" for call in transport.calls)
+
+
 def test_expired_auth_attempt_is_rejected_before_simple_sign_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -435,7 +475,7 @@ def test_expired_auth_attempt_is_rejected_before_simple_sign_in(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -478,7 +518,7 @@ def test_participant_inn_is_server_side_attempt_state_not_frontend_input(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
@@ -576,7 +616,7 @@ def test_missing_stunnel_is_reported_as_transport_not_ready_not_cryptopro_missin
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: TransportBlockedRuntime())
     monkeypatch.setattr(
@@ -600,7 +640,7 @@ def test_local_bridge_has_no_arbitrary_sign_or_business_mutation_method(tmp_path
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
-        cms_signer_thumbprint=lambda signature: THUMBPRINT,
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
     )
     public = {name for name in dir(bridge) if not name.startswith("_")}
     assert {"prepare_auth", "complete_auth", "read_states", "status"} <= public
