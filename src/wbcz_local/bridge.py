@@ -97,6 +97,25 @@ def _find_optional_cryptopro(filename: str, explicit: str | None = None) -> Path
         return None
 
 
+def _windows_csp_registry_detected() -> bool:
+    if platform.system().lower() != "windows":
+        return False
+    try:
+        import winreg
+    except ImportError:
+        return False
+    for root, path in (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Crypto Pro\Settings"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Crypto Pro\Settings"),
+    ):
+        try:
+            with winreg.OpenKey(root, path):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
     windows = platform.system().lower() == "windows"
     cryptcp = _find_optional_cryptopro("cryptcp.exe", os.getenv("WBCZ_CRYPTOPRO_CRYPTCP"))
@@ -104,9 +123,10 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
         "stunnel_msspi.exe", os.getenv("WBCZ_CRYPTOPRO_STUNNEL")
     )
     csp = _first_existing(_candidate_paths(None, ("csptest.exe", "csptest")))
+    csp_available = bool(windows and (csp or _windows_csp_registry_detected()))
     return CryptoProFoundationStatus(
         windows=windows,
-        csp_available=bool(windows and csp),
+        csp_available=csp_available,
         # Browser plug-in state is authoritative only inside Chromium/Yandex.
         browser_cades_available=None,
         ukep_available=None,
@@ -429,8 +449,13 @@ class LocalTrueApiReadBridge:
         try:
             inventory = self.discovery.discover()
         except Exception:
+            components = inspect_local_cryptopro_foundation()
             return {
-                "cryptopro_available": False,
+                "cryptopro_available": components.csp_available,
+                "csp_available": components.csp_available,
+                "browser_cades_available": None,
+                "gost_transport_available": components.gost_transport_available,
+                "cryptcp_available": components.cryptcp_available,
                 "candidates": [],
                 "error_code": "CRYPTOPRO_CERTIFICATE_DISCOVERY_FAILED",
             }
