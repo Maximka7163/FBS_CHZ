@@ -63,7 +63,7 @@ async function plugin(): Promise<CadesPlugin> {
   if (typeof raw.CreateObjectAsync !== "function") {
     throw new Error("CryptoPro Browser plug-in недоступен");
   }
-  return raw;
+  return raw as CadesPlugin;
 }
 
 function normalizedThumbprint(value: unknown): string {
