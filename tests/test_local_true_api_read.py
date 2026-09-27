@@ -31,29 +31,6 @@ THUMBPRINT = "A" * 40
 TOKEN = "SECRET-UUID-TOKEN-MUST-STAY-IN-MEMORY"
 
 
-class FakeInspector:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def inspect(self) -> dict:
-        self.calls += 1
-        return {
-            "certificate_found": True,
-            "has_private_key": True,
-            "gost_compatible": True,
-            "cryptopro_provider": True,
-        }
-
-
-class FakeSigner:
-    def __init__(self) -> None:
-        self.challenges: list[str] = []
-
-    def sign_auth_challenge(self, challenge: str) -> str:
-        self.challenges.append(challenge)
-        return "SIGNED-EXACT-CHALLENGE"
-
-
 class FakeTunnel:
     def __init__(self) -> None:
         self.closed = False
@@ -93,11 +70,14 @@ class FakeTransport:
             "cis_count": cis_count,
         })
         if (method, path) == ("GET", "/auth/key"):
-            return {"uuid": "challenge-uuid", "data": "EXACT-CRPT-CHALLENGE"}
+            return {
+                "uuid": "challenge-uuid",
+                "data": " EXACT-CRPT-CHALLENGE\nЮникод ",
+            }
         if (method, path) == ("POST", "/auth/simpleSignIn"):
             assert body == {
                 "uuid": "challenge-uuid",
-                "data": "SIGNED-EXACT-CHALLENGE",
+                "data": "BROWSER-CADES-ATTACHED-SIGNATURE",
                 "inn": INN,
                 "unitedToken": True,
             }
@@ -111,25 +91,25 @@ class FakeTransport:
                 self.fail_next_info_status = None
                 raise TrueApiHttpError(status, "synthetic")
             assert params == {"pg": "lp"}
-            assert body == [CIS]
             assert bearer_token == TOKEN
-            assert cis_count == 1
+            if body == [CIS]:
+                assert cis_count == 1
             return [{
                 "cisInfo": {
-                    "requestedCis": CIS,
+                    "requestedCis": cis,
                     "status": "INTRODUCED",
                     "statusEx": "EMPTY",
                     "ownerInn": INN,
                     "productGroup": "lp",
                 }
-            }]
+            } for cis in body]
         raise AssertionError(f"unexpected request: {method} {path}")
 
 
 class FakeDiscovery:
     def discover(self) -> dict:
         return {
-            "cryptopro_available": True,
+            "cryptopro_available": False,  # cryptcp is deliberately absent.
             "candidates": [{
                 "thumbprint": THUMBPRINT,
                 "subject": f"CN=Test, INN={INN}",
@@ -137,53 +117,57 @@ class FakeDiscovery:
                 "valid_from": "2026-01-01T00:00:00+00:00",
                 "valid_to": "2027-01-01T00:00:00+00:00",
                 "has_private_key": True,
-                "compatibility": "GOST_CRYPTOPRO",
+                "compatibility": "UNSUPPORTED",
                 "crypto_provider": "Crypto-Pro GOST R 34.10-2012",
+                "public_key_oid": "1.2.643.7.1.1.1.1",
             }],
         }
 
 
-def _runtime() -> tuple[LocalTrueApiReadRuntime, FakeTransport, FakeSigner, FakeInspector]:
+def _runtime() -> tuple[LocalTrueApiReadRuntime, FakeTransport]:
     transport = FakeTransport()
-    signer = FakeSigner()
-    inspector = FakeInspector()
     runtime = LocalTrueApiReadRuntime(
         participant_inn=INN,
         transport=transport,  # type: ignore[arg-type]
-        inspector=inspector,
-        signer=signer,
     )
-    return runtime, transport, signer, inspector
+    return runtime, transport
 
 
-def test_local_auth_signs_exact_crpt_challenge_once_and_keeps_uuid_token_in_memory() -> None:
-    runtime, transport, signer, inspector = _runtime()
+def _browser_auth(runtime: LocalTrueApiReadRuntime) -> dict:
+    uuid, challenge = runtime.prepare_auth_challenge()
+    assert uuid == "challenge-uuid"
+    assert challenge == " EXACT-CRPT-CHALLENGE\nЮникод "
+    return runtime.complete_auth(
+        uuid=uuid,
+        signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+    )
 
-    result = runtime.authenticate()
+
+def test_local_runtime_preserves_exact_challenge_and_keeps_uuid_token_in_memory() -> None:
+    runtime, transport = _runtime()
+
+    uuid, challenge = runtime.prepare_auth_challenge()
+    assert uuid == "challenge-uuid"
+    assert challenge.encode("utf-8") == " EXACT-CRPT-CHALLENGE\nЮникод ".encode("utf-8")
+    result = runtime.complete_auth(
+        uuid=uuid,
+        signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+    )
 
     assert [(item["method"], item["path"]) for item in transport.calls] == [
         ("GET", "/auth/key"),
         ("POST", "/auth/simpleSignIn"),
     ]
-    assert signer.challenges == ["EXACT-CRPT-CHALLENGE"]
-    assert inspector.calls == 1
     assert runtime.authenticated is True
     assert runtime._session is not None
     assert runtime._session.uuid_token == TOKEN
     assert TOKEN not in repr(result)
-    assert set(result) == {
-        "authenticated",
-        "expire_date",
-        "read_only",
-        "business_write_enabled",
-        "tls",
-    }
     assert result["business_write_enabled"] is False
 
 
 def test_local_cises_info_uses_in_memory_bearer_and_normalizes_fresh_state() -> None:
-    runtime, transport, _, _ = _runtime()
-    runtime.authenticate()
+    runtime, transport = _runtime()
+    _browser_auth(runtime)
 
     result = runtime.read_states([CIS])
 
@@ -191,10 +175,8 @@ def test_local_cises_info_uses_in_memory_bearer_and_normalizes_fresh_state() -> 
     assert isinstance(state, KiState)
     assert state.status == "IN_CIRCULATION"
     assert state.ownerInn == INN
-    assert state.productGroup == "lp"
     call = transport.calls[-1]
     assert call["path"] == "/cises/info"
-    assert call["body"] == [CIS]
     assert call["bearer_token"] == TOKEN
 
 
@@ -203,41 +185,22 @@ class BatchTransport(FakeTransport):
         super().__init__()
         self.batch_sizes: list[int] = []
 
-    def request_json(
-        self,
-        method: str,
-        path: str,
-        *,
-        params=None,
-        body=None,
-        bearer_token=None,
-        cis_count=0,
-    ):
+    def request_json(self, method: str, path: str, **kwargs):
         if (method, path) != ("POST", "/cises/info"):
-            return super().request_json(
-                method,
-                path,
-                params=params,
-                body=body,
-                bearer_token=bearer_token,
-                cis_count=cis_count,
-            )
-        assert params == {"pg": "lp"}
-        assert bearer_token == TOKEN
-        assert isinstance(body, list)
+            return super().request_json(method, path, **kwargs)
+        body = kwargs["body"]
+        assert kwargs["params"] == {"pg": "lp"}
+        assert kwargs["bearer_token"] == TOKEN
         self.batch_sizes.append(len(body))
-        return [
-            {
-                "cisInfo": {
-                    "requestedCis": cis,
-                    "status": "INTRODUCED",
-                    "statusEx": "EMPTY",
-                    "ownerInn": INN,
-                    "productGroup": "lp",
-                }
+        return [{
+            "cisInfo": {
+                "requestedCis": cis,
+                "status": "INTRODUCED",
+                "statusEx": "EMPTY",
+                "ownerInn": INN,
+                "productGroup": "lp",
             }
-            for cis in body
-        ]
+        } for cis in body]
 
 
 def test_local_cises_info_batches_more_than_1000_codes() -> None:
@@ -245,10 +208,8 @@ def test_local_cises_info_batches_more_than_1000_codes() -> None:
     runtime = LocalTrueApiReadRuntime(
         participant_inn=INN,
         transport=transport,  # type: ignore[arg-type]
-        inspector=FakeInspector(),
-        signer=FakeSigner(),
     )
-    runtime.authenticate()
+    _browser_auth(runtime)
     cises = [f"010460123456{index:06d}" for index in range(1001)]
 
     result = runtime.read_states(cises)
@@ -261,8 +222,8 @@ def test_local_cises_info_batches_more_than_1000_codes() -> None:
 def test_local_auth_is_cleared_after_true_api_unauthorized_response(
     http_status: int,
 ) -> None:
-    runtime, transport, _, _ = _runtime()
-    runtime.authenticate()
+    runtime, transport = _runtime()
+    _browser_auth(runtime)
     transport.fail_next_info_status = http_status
 
     with pytest.raises(TrueApiHttpError):
@@ -272,81 +233,207 @@ def test_local_auth_is_cleared_after_true_api_unauthorized_response(
     assert runtime._session is None
 
 
-def test_local_bridge_persists_only_certificate_selection_not_uuid_token(
+def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeCertificateInspector:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        def inspect(self) -> dict:
-            return {"ok": True}
-
-    monkeypatch.setattr(
-        "wbcz_local.bridge.WindowsCryptoProCertificateInspector",
-        FakeCertificateInspector,
-    )
-
-    runtime, _, _, _ = _runtime()
-    bridge = LocalTrueApiReadBridge(
-        settings_path=tmp_path / "true_api_read.json",
-        audit_log_path=tmp_path / "true_api_audit.jsonl",
-        discovery=FakeDiscovery(),
-    )
-    bridge.select_certificate(INN, THUMBPRINT)
-    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn, thumbprint: runtime)
-
-    auth = bridge.authenticate(INN)
-    status = bridge.status(INN)
-
-    stored = (tmp_path / "true_api_read.json").read_text(encoding="utf-8")
-    assert THUMBPRINT in stored
-    assert INN in stored
-    assert TOKEN not in stored
-    assert TOKEN not in repr(auth)
-    assert TOKEN not in repr(status)
-    assert status["authenticated"] is True
-    assert status["gost_session_verified"] is True
-    assert status["business_write_enabled"] is False
-    assert status["uuid_token_persisted"] is False
-    assert status["pin_persisted"] is False
-    assert not (tmp_path / "true_api_audit.jsonl").exists()
-
-
-def test_local_certificate_selection_requires_exact_participant_inn(tmp_path: Path) -> None:
-    class UnknownInnDiscovery:
-        def discover(self) -> dict:
-            return {
-                "cryptopro_available": True,
-                "candidates": [{
-                    "thumbprint": THUMBPRINT,
-                    "subject": "CN=Test Without INN",
-                    "certificate_inn": None,
-                    "valid_from": "2026-01-01T00:00:00+00:00",
-                    "valid_to": "2027-01-01T00:00:00+00:00",
-                    "has_private_key": True,
-                    "compatibility": "GOST_CRYPTOPRO",
-                    "crypto_provider": "Crypto-Pro GOST R 34.10-2012",
-                }],
-            }
-
     bridge = LocalTrueApiReadBridge(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
-        discovery=UnknownInnDiscovery(),
+        discovery=FakeDiscovery(),
+    )
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
     )
 
     status = bridge.discover(INN)
 
-    assert status["candidates"][0]["eligible"] is False
+    assert status["cryptcp_available"] is False
+    assert status["candidates"][0]["compatibility"] == "UNSUPPORTED"
+    assert status["candidates"][0]["eligible"] is True
+
+
+def test_typed_prepare_complete_attempt_keeps_token_server_side_and_is_one_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _ = _runtime()
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "true_api_read.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+
+    prepared = bridge.prepare_auth(INN, "browser-session-1")
+
+    exact = " EXACT-CRPT-CHALLENGE\nЮникод ".encode("utf-8")
+    import base64
+    assert base64.b64decode(prepared["challenge_base64"]) == exact
+    assert "uuid" not in prepared
+    assert TOKEN not in repr(prepared)
+    assert set(prepared) == {
+        "attempt_id",
+        "challenge_base64",
+        "participant_inn",
+        "expires_at",
+        "read_only",
+    }
+
+    completed = bridge.complete_auth(
+        INN,
+        "browser-session-1",
+        attempt_id=prepared["attempt_id"],
+        signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+        selected_certificate_thumbprint=THUMBPRINT,
+    )
+    assert completed["authenticated"] is True
+    assert TOKEN not in repr(completed)
+
+    stored = (tmp_path / "true_api_read.json").read_text(encoding="utf-8")
+    assert THUMBPRINT in stored and INN in stored
+    assert TOKEN not in stored
+
     with pytest.raises(LocalTrueApiUnavailable) as exc_info:
-        bridge.select_certificate(INN, THUMBPRINT)
-    assert exc_info.value.code == "CERTIFICATE_NOT_ELIGIBLE"
-    assert not (tmp_path / "settings.json").exists()
+        bridge.complete_auth(
+            INN,
+            "browser-session-1",
+            attempt_id=prepared["attempt_id"],
+            signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+            selected_certificate_thumbprint=THUMBPRINT,
+        )
+    assert exc_info.value.code == "AUTH_ATTEMPT_INVALID"
 
 
-def test_tampered_persisted_certificate_is_rebound_to_active_participant_before_runtime(
+def test_auth_attempt_rejects_wrong_session_and_wrong_thumbprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _ = _runtime()
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+    prepared = bridge.prepare_auth(INN, "browser-session-1")
+
+    with pytest.raises(LocalTrueApiUnavailable) as wrong_session:
+        bridge.complete_auth(
+            INN,
+            "browser-session-2",
+            attempt_id=prepared["attempt_id"],
+            signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+            selected_certificate_thumbprint=THUMBPRINT,
+        )
+    assert wrong_session.value.code == "AUTH_ATTEMPT_MISMATCH"
+
+    with pytest.raises(LocalTrueApiUnavailable) as wrong_cert:
+        bridge.complete_auth(
+            INN,
+            "browser-session-1",
+            attempt_id=prepared["attempt_id"],
+            signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+            selected_certificate_thumbprint="B" * 40,
+        )
+    assert wrong_cert.value.code == "CERTIFICATE_NOT_ELIGIBLE"
+
+
+def test_expired_auth_attempt_is_rejected_before_simple_sign_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, transport = _runtime()
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+    prepared = bridge.prepare_auth(INN, "browser-session-1")
+    bridge._attempts[prepared["attempt_id"]].expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.complete_auth(
+            INN,
+            "browser-session-1",
+            attempt_id=prepared["attempt_id"],
+            signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+            selected_certificate_thumbprint=THUMBPRINT,
+        )
+
+    assert exc_info.value.code == "AUTH_ATTEMPT_INVALID"
+    assert not any(call["path"] == "/auth/simpleSignIn" for call in transport.calls)
+
+
+def test_participant_inn_is_server_side_attempt_state_not_frontend_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = (Path(__file__).parents[1] / "src" / "wbcz_local" / "routes.py").read_text(
+        encoding="utf-8"
+    )
+    assert "class BrowserAuthCompleteRequest" in source
+    request_block = source.split("class BrowserAuthCompleteRequest", 1)[1].split("def _bridge", 1)[0]
+    assert "participant_inn" not in request_block
+
+    runtime, transport = _runtime()
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+    prepared = bridge.prepare_auth(INN, "browser-session-1")
+    bridge.complete_auth(
+        INN,
+        "browser-session-1",
+        attempt_id=prepared["attempt_id"],
+        signature_base64="BROWSER-CADES-ATTACHED-SIGNATURE",
+        selected_certificate_thumbprint=THUMBPRINT,
+    )
+    auth_call = next(call for call in transport.calls if call["path"] == "/auth/simpleSignIn")
+    assert auth_call["body"]["inn"] == INN
+
+
+def test_persisted_wrong_participant_certificate_blocks_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -360,7 +447,7 @@ def test_tampered_persisted_certificate_is_rebound_to_active_participant_before_
     class OtherParticipantDiscovery:
         def discover(self) -> dict:
             return {
-                "cryptopro_available": True,
+                "cryptopro_available": False,
                 "candidates": [{
                     "thumbprint": other_thumbprint,
                     "subject": "CN=Other Participant, INN=9999999999",
@@ -368,50 +455,53 @@ def test_tampered_persisted_certificate_is_rebound_to_active_participant_before_
                     "valid_from": "2026-01-01T00:00:00+00:00",
                     "valid_to": "2027-01-01T00:00:00+00:00",
                     "has_private_key": True,
-                    "compatibility": "GOST_CRYPTOPRO",
+                    "compatibility": "UNSUPPORTED",
                     "crypto_provider": "Crypto-Pro GOST R 34.10-2012",
+                    "public_key_oid": "1.2.643.7.1.1.1.1",
                 }],
             }
-
-    class ForbiddenInspector:
-        def __init__(self, *args, **kwargs) -> None:
-            raise AssertionError("certificate inspector must not run for INN mismatch")
 
     bridge = LocalTrueApiReadBridge(
         settings_path=settings,
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=OtherParticipantDiscovery(),
     )
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
     build_calls = 0
 
-    def forbidden_build(participant_inn: str, thumbprint: str):
+    def forbidden_build(participant_inn: str):
         nonlocal build_calls
         build_calls += 1
-        raise AssertionError("signer/transport runtime must not be constructed")
+        raise AssertionError("transport runtime must not be constructed")
 
-    monkeypatch.setattr(
-        "wbcz_local.bridge.WindowsCryptoProCertificateInspector",
-        ForbiddenInspector,
-    )
     monkeypatch.setattr(bridge, "_build_runtime", forbidden_build)
 
     with pytest.raises(LocalTrueApiUnavailable) as exc_info:
-        bridge.authenticate(INN)
+        bridge.read_states(INN, [CIS])
 
     assert exc_info.value.code == "CERTIFICATE_NOT_ELIGIBLE"
     assert build_calls == 0
-    assert bridge._runtime is None
 
 
-def test_local_bridge_has_no_document_sign_or_business_mutation_method(tmp_path: Path) -> None:
+def test_local_bridge_has_no_arbitrary_sign_or_business_mutation_method(tmp_path: Path) -> None:
     bridge = LocalTrueApiReadBridge(
         settings_path=tmp_path / "settings.json",
         audit_log_path=tmp_path / "audit.jsonl",
         discovery=FakeDiscovery(),
     )
     public = {name for name in dir(bridge) if not name.startswith("_")}
-    assert {"authenticate", "read_states", "select_certificate", "status"} <= public
+    assert {"prepare_auth", "complete_auth", "read_states", "status"} <= public
+    assert "authenticate" not in public
     assert "sign" not in public
+    assert "sign_bytes" not in public
+    assert "sign_file" not in public
     assert "sign_document" not in public
     assert "submit" not in public
     assert "create_document" not in public
