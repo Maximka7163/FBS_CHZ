@@ -108,3 +108,15 @@ test("Browser auth exposes no generic arbitrary signing helper", async () => {
   assert.equal(source.includes("signFile"), false);
   assert.equal(source.includes("CachePin"), false);
 });
+
+test("local Browser auth never persists token/signature state in web storage", async () => {
+  const fs = await import("node:fs/promises");
+  const apiSource = await fs.readFile(new URL("../src/api.ts", import.meta.url), "utf8");
+  const mainSource = await fs.readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const cadesSource = await fs.readFile(new URL("../src/local_cades.ts", import.meta.url), "utf8");
+  const authSource = apiSource + "\n" + mainSource + "\n" + cadesSource;
+  assert.equal(authSource.includes("localStorage"), false);
+  assert.equal(authSource.includes("sessionStorage"), false);
+  assert.equal(apiSource.includes("uuidToken"), false);
+  assert.equal(apiSource.includes("uuid_token"), false);
+});
