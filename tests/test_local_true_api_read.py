@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
+import base64
+import json
 import os
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,8 +16,19 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from wbcz.models import Decision, Event, KiState, Operation
-from wbcz_ui.live_true_api import ProductionMutationDisabled, ReadOnlyTrueApiTransport, TrueApiHttpError
-from wbcz_local.bridge import LocalTrueApiReadBridge, LocalTrueApiReadRuntime, LocalTrueApiUnavailable
+from wbcz_ui.live_true_api import (
+    GostTlsUnavailable,
+    ProductionMutationDisabled,
+    ReadOnlyTrueApiTransport,
+    TrueApiError,
+    TrueApiHttpError,
+)
+from wbcz_local.bridge import (
+    LocalTrueApiReadBridge,
+    LocalTrueApiReadRuntime,
+    LocalTrueApiUnavailable,
+    _browser_cades_signature_info,
+)
 from wbcz_local.control import LocalTrueApiControlService
 from wbcz_web.models import AgentJobRecord, Base, CheckRecord, ControlRun, WriteOperationRecord
 from wbcz_web.repositories import ImportRepository
@@ -235,6 +249,93 @@ def test_local_auth_is_cleared_after_true_api_unauthorized_response(
     assert runtime._session is None
 
 
+def test_browser_cades_cms_cryptographic_verification_precedes_signer_and_content_trust() -> None:
+    captured: dict[str, str] = {}
+
+    def runner(args, **kwargs):
+        script = args[-1]
+        captured["script"] = script
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps({
+                "thumbprint": THUMBPRINT,
+                "contentBase64": base64.b64encode(EXACT_CHALLENGE_BYTES).decode("ascii"),
+            }),
+            stderr="",
+        )
+
+    thumbprint, content = _browser_cades_signature_info(
+        "SYNTHETIC-ATTACHED-CMS",
+        runner=runner,
+    )
+
+    script = captured["script"]
+    verify_index = script.index("$cms.CheckSignature($true)")
+    certificate_index = script.index("$cert=$cms.SignerInfos[0].Certificate")
+    output_index = script.index("[pscustomobject]@{")
+    assert verify_index < certificate_index < output_index
+    assert thumbprint == THUMBPRINT
+    assert content == EXACT_CHALLENGE_BYTES
+
+
+def test_browser_cades_invalid_or_tampered_cms_is_rejected_by_local_crypto_check() -> None:
+    def runner(args, **kwargs):
+        script = args[-1]
+        assert "$cms.CheckSignature($true)" in script
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr="Exception calling CheckSignature: invalid signature",
+        )
+
+    with pytest.raises(TrueApiError, match="invalid signature"):
+        _browser_cades_signature_info(
+            "CORRUPTED-CMS",
+            runner=runner,
+        )
+
+
+def test_invalid_cms_never_reaches_true_api_simple_sign_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, transport = _runtime()
+
+    def invalid_cms(_signature: str):
+        raise TrueApiError("synthetic cryptographic CMS verification failure")
+
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+        cms_signature_info=invalid_cms,
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+    prepared = bridge.prepare_auth(INN, "browser-session-1")
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.complete_auth(
+            INN,
+            "browser-session-1",
+            attempt_id=prepared["attempt_id"],
+            signature_base64="CORRUPTED-CMS",
+            selected_certificate_thumbprint=THUMBPRINT,
+        )
+
+    assert exc_info.value.code == "CADES_SIGNER_VALIDATION_FAILED"
+    assert not any(call["path"] == "/auth/simpleSignIn" for call in transport.calls)
+
+
 def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -313,7 +414,6 @@ def test_typed_prepare_complete_attempt_keeps_token_server_side_and_is_one_time(
     prepared = bridge.prepare_auth(INN, "browser-session-1")
 
     exact = EXACT_CHALLENGE_BYTES
-    import base64
     assert base64.b64decode(prepared["challenge_base64"]) == exact
     assert "uuid" not in prepared
     assert TOKEN not in repr(prepared)
@@ -596,6 +696,54 @@ def test_persisted_wrong_participant_certificate_blocks_read(
 
     assert exc_info.value.code == "CERTIFICATE_NOT_ELIGIBLE"
     assert build_calls == 0
+
+
+def test_missing_gost_transport_on_authenticated_read_preserves_transport_error_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps({"thumbprint": THUMBPRINT, "participant_inn": INN}),
+        encoding="utf-8",
+    )
+
+    class ReadTransportBlockedRuntime:
+        authenticated = True
+        expire_date = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        def __init__(self) -> None:
+            self.read_calls = 0
+
+        def read_states(self, cises):
+            self.read_calls += 1
+            raise GostTlsUnavailable("stunnel_msspi unavailable")
+
+        def close(self):
+            pass
+
+    runtime = ReadTransportBlockedRuntime()
+    bridge = LocalTrueApiReadBridge(
+        settings_path=settings,
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": False,
+            "cryptcp_available": False,
+        })(),
+    )
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.read_states(INN, [CIS])
+
+    assert exc_info.value.code == "GOST_TRANSPORT_NOT_READY"
+    assert runtime.read_calls == 1
 
 
 def test_missing_stunnel_is_reported_as_transport_not_ready_not_cryptopro_missing(
