@@ -494,6 +494,22 @@ class LocalTrueApiReadBridge:
         for item in inventory.get("candidates") or []:
             if not isinstance(item, dict):
                 continue
+            provider = str(item.get("crypto_provider") or "")
+            provider_key = provider.casefold().replace("-", " ")
+            public_key_oid = str(item.get("public_key_oid") or "")
+            local_compatibility = (
+                "GOST_CRYPTOPRO"
+                if (
+                    bool(item.get("has_private_key"))
+                    and public_key_oid in {
+                        "1.2.643.2.2.19",
+                        "1.2.643.7.1.1.1.1",
+                        "1.2.643.7.1.1.1.2",
+                    }
+                    and ("crypto pro" in provider_key or "cryptopro" in provider_key)
+                )
+                else "UNSUPPORTED"
+            )
             safe = {
                 "thumbprint": str(item.get("thumbprint") or ""),
                 "subject": item.get("subject"),
@@ -501,9 +517,9 @@ class LocalTrueApiReadBridge:
                 "valid_from": item.get("valid_from"),
                 "valid_to": item.get("valid_to"),
                 "has_private_key": bool(item.get("has_private_key")),
-                "compatibility": item.get("compatibility"),
-                "crypto_provider": item.get("crypto_provider"),
-                "public_key_oid": item.get("public_key_oid"),
+                "compatibility": local_compatibility,
+                "crypto_provider": provider or None,
+                "public_key_oid": public_key_oid or None,
             }
             safe["eligible"] = self._eligible(item, participant_inn)
             candidates.append(safe)
