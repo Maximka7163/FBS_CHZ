@@ -159,7 +159,11 @@ def _browser_cades_signer_thumbprint(
         raise TrueApiError("Browser CAdES signer inspection requires Windows")
     script = r'''
 $ErrorActionPreference='Stop'
-Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+try {
+  Add-Type -AssemblyName System.Security.Cryptography.Pkcs -ErrorAction Stop
+} catch {
+  Add-Type -AssemblyName System.Security -ErrorAction Stop
+}
 $raw=[Console]::In.ReadToEnd()
 $bytes=[Convert]::FromBase64String($raw)
 $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms
