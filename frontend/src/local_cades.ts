@@ -14,14 +14,56 @@ type CadesPlugin = AsyncCadesObject & {
   CADESCOM_CADES_BES?: number;
 };
 
+let activationScriptPromise: Promise<void> | null = null;
+
+async function ensureActivationScript(): Promise<void> {
+  const target = globalThis as typeof globalThis & { cadesplugin?: unknown };
+  if (target.cadesplugin) return;
+  if (typeof document === "undefined") {
+    throw new Error("CryptoPro Browser activation script недоступен");
+  }
+  if (!activationScriptPromise) {
+    activationScriptPromise = new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector<HTMLScriptElement>(
+        'script[data-sellari-cadesplugin="true"]',
+      );
+      if (existing) {
+        existing.addEventListener("load", () => resolve(), { once: true });
+        existing.addEventListener(
+          "error",
+          () => reject(new Error("Не удалось загрузить cadesplugin_api.js")),
+          { once: true },
+        );
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "/cadesplugin_api.js";
+      script.async = true;
+      script.dataset.sellariCadesplugin = "true";
+      script.addEventListener("load", () => resolve(), { once: true });
+      script.addEventListener(
+        "error",
+        () => reject(new Error("Не удалось загрузить cadesplugin_api.js")),
+        { once: true },
+      );
+      document.head.appendChild(script);
+    });
+  }
+  await activationScriptPromise;
+}
+
 async function plugin(): Promise<CadesPlugin> {
-  const raw = (globalThis as typeof globalThis & { cadesplugin?: unknown }).cadesplugin;
+  await ensureActivationScript();
+  const raw = (globalThis as typeof globalThis & { cadesplugin?: unknown })
+    .cadesplugin as (CadesPlugin & PromiseLike<unknown>) | undefined;
   if (!raw) throw new Error("CryptoPro Browser plug-in не обнаружен");
-  const resolved = await Promise.resolve(raw as CadesPlugin);
-  if (!resolved || typeof resolved.CreateObjectAsync !== "function") {
+  if (typeof raw.then === "function") {
+    await raw;
+  }
+  if (typeof raw.CreateObjectAsync !== "function") {
     throw new Error("CryptoPro Browser plug-in недоступен");
   }
-  return resolved;
+  return raw;
 }
 
 function normalizedThumbprint(value: unknown): string {
