@@ -20,6 +20,7 @@ from wbcz_ui.live_true_api import (
     AuthSession,
     CryptoProGostTlsTunnel,
     JsonlLiveAudit,
+    GostTlsUnavailable,
     LiveAuthorizationRequired,
     ReadOnlyTrueApiTransport,
     TrueApiCisesInfoAdapter,
@@ -171,6 +172,10 @@ $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms
 $cms.Decode($bytes)
 if ($cms.Detached) { throw 'Detached CMS is not allowed for True API auth' }
 if ($cms.SignerInfos.Count -ne 1) { throw 'Expected exactly one CMS signer' }
+# verifySignatureOnly=true checks cryptographic signature integrity without
+# imposing a separate Windows certificate trust-chain policy. Certificate
+# eligibility/participant-INN binding is enforced independently by Sellari.
+$cms.CheckSignature($true)
 $cert=$cms.SignerInfos[0].Certificate
 if ($null -eq $cert) { throw 'CMS signer certificate is missing' }
 [pscustomobject]@{
@@ -731,6 +736,11 @@ class LocalTrueApiReadBridge:
                 raise LocalTrueApiUnavailable(
                     "TRUE_API_AUTH_REQUIRED",
                     "Authenticate with Browser CAdES first",
+                ) from exc
+            except GostTlsUnavailable as exc:
+                raise LocalTrueApiUnavailable(
+                    "GOST_TRANSPORT_NOT_READY",
+                    "True API GOST transport is not ready",
                 ) from exc
             except (TrueApiError, ValueError) as exc:
                 raise LocalTrueApiUnavailable(
