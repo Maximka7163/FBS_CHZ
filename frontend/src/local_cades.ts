@@ -1,5 +1,5 @@
 import { completeLocalBrowserAuth, prepareLocalBrowserAuth } from "./api.ts";
-import type { LocalBrowserAuthComplete, LocalBrowserAuthPrepare } from "./types";
+import type { LocalBrowserAuthComplete, LocalBrowserAuthPrepare } from "./types.ts";
 
 export interface BrowserCadesCertificate {
   thumbprint: string;
