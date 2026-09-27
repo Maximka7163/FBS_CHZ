@@ -15,6 +15,12 @@ import type {
   LocalTrueApiStatus,
 } from "./types";
 import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
+import {
+  detectBrowserCades,
+  enumerateBrowserCertificates,
+  signBrowserAuthChallenge,
+  type BrowserCadesCertificate,
+} from "./local_cades";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const LOCAL_FBS_ONLY = import.meta.env.VITE_SELLARI_LOCAL_FBS_ONLY === "true";
@@ -35,6 +41,9 @@ let enrollmentIntent: EnrollmentIntent | null = null;
 let kiLookupMessage = "";
 let localTrueApiStatus: LocalTrueApiStatus | null = null;
 let localTrueApiBusy = false;
+let browserCadesAvailable: boolean | null = null;
+let browserCertificates: BrowserCadesCertificate[] = [];
+let selectedBrowserThumbprint = "";
 let viewToken = 0;
 
 const icons = {
@@ -186,26 +195,54 @@ function localTrueApiBlock(): string {
   if (!localTrueApiStatus) {
     return `<section class="ki-lookup-card"><div><strong>Честный знак / CryptoPro</strong><span>Проверяем локальную УКЭП…</span></div></section>`;
   }
+
   const status = localTrueApiStatus;
-  const selected = status.candidates.find((item) => item.thumbprint === status.selected_thumbprint);
-  const candidates = status.candidates.filter((item) => item.eligible);
-  const candidateRows = !status.selected_thumbprint
-    ? candidates.map((candidate) => `<div class="certificate-row">
-        <div><b>${esc(candidate.subject || candidate.thumbprint)}</b><small>${esc(candidate.certificate_inn || "ИНН не извлечён")} · до ${esc(candidate.valid_to || "—")}</small></div>
-        <button class="quiet-button" data-local-cert="${esc(candidate.thumbprint)}">Выбрать</button>
-      </div>`).join("")
-    : "";
+  const backendEligible = new Map(
+    status.candidates
+      .filter((item) => item.eligible)
+      .map((item) => [item.thumbprint, item]),
+  );
+  const candidates = browserCertificates.filter((item) => backendEligible.has(item.thumbprint));
+  const selected = candidates.find((item) => item.thumbprint === selectedBrowserThumbprint);
+  const rows = candidates.map((certificate) => {
+    const server = backendEligible.get(certificate.thumbprint)!;
+    const isSelected = certificate.thumbprint === selectedBrowserThumbprint;
+    return `<div class="certificate-row">
+      <div>
+        <b>${esc(certificate.subject || server.subject || certificate.thumbprint)}</b>
+        <small>ИНН ${esc(server.certificate_inn || "не извлечён")} · до ${esc(server.valid_to || certificate.validTo || "—")}</small>
+      </div>
+      <button class="quiet-button" data-browser-cert="${esc(certificate.thumbprint)}">
+        ${isSelected ? "Выбрано" : "Выбрать"}
+      </button>
+    </div>`;
+  }).join("");
+
+  const pluginText = browserCadesAvailable === true
+    ? "CryptoPro Browser plug-in обнаружен"
+    : browserCadesAvailable === false
+      ? "CryptoPro Browser plug-in не обнаружен"
+      : "Проверяем CryptoPro Browser plug-in…";
+  const transportText = status.gost_transport_available
+    ? "GOST transport готов"
+    : "GOST transport не готов: нужен stunnel_msspi для True API";
+
   const connection = status.authenticated
-    ? `<span>Подключено · только чтение · GOST TLS ${status.gost_session_verified ? "подтверждён" : "не подтверждён"}${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
-    : status.selected_thumbprint
-      ? `<button id="local-true-api-auth" class="secondary-button" ${localTrueApiBusy ? "disabled" : ""}>${localTrueApiBusy ? "Подключаем…" : "Войти через CryptoPro / УКЭП"}</button>`
-      : candidateRows || '<span>Подходящая УКЭП не найдена. Проверьте CryptoPro и сертификат.</span>';
+    ? `<strong>Честный знак подключён · только чтение</strong>
+       <span>GOST TLS ${status.gost_session_verified ? "подтверждён" : "ожидает подтверждения"}${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
+    : `${rows || '<span>Подходящая УКЭП в CurrentUser/My не найдена.</span>'}
+       <button id="local-true-api-auth" class="secondary-button"
+         ${localTrueApiBusy || !selected || !status.gost_transport_available ? "disabled" : ""}>
+         ${localTrueApiBusy ? "Подключаем…" : "Подключить Честный знак"}
+       </button>`;
+
   return `<section class="ki-lookup-card">
-    <div><strong>Честный знак / CryptoPro</strong><span>${status.authenticated ? "Real read-only включён" : "Business writes отключены"}</span></div>
-    ${selected ? `<p class="integration-note">Сертификат: ${esc(selected.subject || selected.thumbprint)}</p>` : ""}
+    <div><strong>Честный знак / CryptoPro</strong><span>Business writes отключены</span></div>
+    <p class="integration-note">${esc(pluginText)} · ${esc(transportText)}</p>
+    ${selected ? `<p class="integration-note">Выбрана УКЭП: ${esc(selected.subject || selected.thumbprint)}</p>` : ""}
     ${connection}
     ${status.error_code ? `<p class="login-error">${esc(status.error_code)}</p>` : ""}
-    <p class="integration-note">PIN запрашивает CryptoPro локально; Sellari не сохраняет PIN, ключ или uuidToken.</p>
+    <p class="integration-note">PIN обрабатывает CryptoPro/токен. Sellari не получает и не хранит PIN, private key или uuidToken. cryptcp.exe для Browser CAdES не требуется.</p>
   </section>`;
 }
 
@@ -217,40 +254,63 @@ function rerenderCurrentSurface(): void {
 async function refreshLocalTrueApiStatus(): Promise<void> {
   if (!LOCAL_FBS_ONLY || !user) return;
   try {
-    localTrueApiStatus = await api.localTrueApiStatus();
+    const [status, pluginDetected] = await Promise.all([
+      api.localTrueApiStatus(),
+      detectBrowserCades(),
+    ]);
+    localTrueApiStatus = status;
+    browserCadesAvailable = pluginDetected;
+    browserCertificates = pluginDetected ? await enumerateBrowserCertificates() : [];
+
+    const eligible = new Set(
+      status.candidates.filter((item) => item.eligible).map((item) => item.thumbprint),
+    );
+    if (!selectedBrowserThumbprint && status.selected_thumbprint) {
+      selectedBrowserThumbprint = status.selected_thumbprint;
+    }
+    if (
+      selectedBrowserThumbprint
+      && (!eligible.has(selectedBrowserThumbprint)
+        || !browserCertificates.some((item) => item.thumbprint === selectedBrowserThumbprint))
+    ) {
+      selectedBrowserThumbprint = "";
+    }
   } catch (error) {
     localTrueApiStatus = null;
+    browserCertificates = [];
     showToast(readError(error), "error");
   }
 }
 
 function bindLocalTrueApi(): void {
   if (!LOCAL_FBS_ONLY) return;
-  document.querySelectorAll<HTMLButtonElement>("[data-local-cert]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const thumbprint = button.dataset.localCert || "";
+
+  document.querySelectorAll<HTMLButtonElement>("[data-browser-cert]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const thumbprint = button.dataset.browserCert || "";
       if (!thumbprint || localTrueApiBusy) return;
-      localTrueApiBusy = true;
+      selectedBrowserThumbprint = thumbprint;
       rerenderCurrentSurface();
-      try {
-        localTrueApiStatus = await api.selectLocalTrueApiCertificate(thumbprint);
-        showToast("УКЭП выбрана");
-      } catch (error) {
-        showToast(readError(error), "error");
-      } finally {
-        localTrueApiBusy = false;
-        rerenderCurrentSurface();
-      }
     });
   });
+
   document.querySelector<HTMLButtonElement>("#local-true-api-auth")?.addEventListener("click", async () => {
-    if (localTrueApiBusy) return;
+    if (localTrueApiBusy || !selectedBrowserThumbprint) return;
     localTrueApiBusy = true;
     rerenderCurrentSurface();
     try {
-      await api.authenticateLocalTrueApi();
+      const prepared = await api.prepareLocalBrowserAuth();
+      const signatureBase64 = await signBrowserAuthChallenge(
+        prepared.challenge_base64,
+        selectedBrowserThumbprint,
+      );
+      await api.completeLocalBrowserAuth(
+        prepared.attempt_id,
+        signatureBase64,
+        selectedBrowserThumbprint,
+      );
       await refreshLocalTrueApiStatus();
-      showToast("True API подключён в режиме только чтения");
+      showToast("Честный знак подключён · только чтение");
     } catch (error) {
       await refreshLocalTrueApiStatus();
       showToast(readError(error), "error");
@@ -607,7 +667,7 @@ function schedulePollIfNeeded(token: number): void {
 async function runCheck(): Promise<void> {
   if (!current || checking) return;
   if (LOCAL_FBS_ONLY && !localTrueApiStatus?.authenticated) {
-    showToast("Сначала выберите УКЭП и войдите в True API через CryptoPro", "warn");
+    showToast("Сначала подключите Честный знак через Browser CAdES", "warn");
     return;
   }
   checking = true;
