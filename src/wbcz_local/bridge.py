@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import base64
 import json
 import os
 from pathlib import Path
 import platform
+import secrets
 import shutil
 import threading
 from typing import Any, Iterable
@@ -19,14 +21,11 @@ from wbcz_ui.live_true_api import (
     JsonlLiveAudit,
     LiveAuthorizationRequired,
     ReadOnlyTrueApiTransport,
-    TrueApiAuthenticator,
     TrueApiCisesInfoAdapter,
     TrueApiError,
     TrueApiHttpError,
     TrueApiProtocolError,
-    WindowsCryptoProAuthSigner,
     WindowsCryptoProCertificateDiscovery,
-    WindowsCryptoProCertificateInspector,
     _find_cryptopro_binary,
 )
 
@@ -40,14 +39,25 @@ class LocalTrueApiUnavailable(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class CryptoProFoundationStatus:
     windows: bool
-    cryptopro_csp_detected: bool
+    csp_available: bool
+    browser_cades_available: bool | None
+    ukep_available: bool | None
+    gost_transport_available: bool
+    cryptcp_available: bool
     cryptcp_path: str | None
     stunnel_path: str | None
     real_read_enabled: bool
     business_write_enabled: bool = False
 
+    @property
+    def cryptopro_csp_detected(self) -> bool:
+        # Compatibility field for existing local diagnostics only.
+        return self.csp_available
+
     def safe_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        value["cryptopro_csp_detected"] = self.csp_available
+        return value
 
 
 def _candidate_paths(explicit: str | None, names: Iterable[str]) -> list[Path]:
@@ -95,7 +105,12 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
     csp = _first_existing(_candidate_paths(None, ("csptest.exe", "csptest")))
     return CryptoProFoundationStatus(
         windows=windows,
-        cryptopro_csp_detected=bool(windows and (csp or cryptcp)),
+        csp_available=bool(windows and csp),
+        # Browser plug-in state is authoritative only inside Chromium/Yandex.
+        browser_cades_available=None,
+        ukep_available=None,
+        gost_transport_available=bool(stunnel),
+        cryptcp_available=bool(cryptcp),
         cryptcp_path=str(cryptcp) if cryptcp else None,
         stunnel_path=str(stunnel) if stunnel else None,
         real_read_enabled=bool(
@@ -107,26 +122,16 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
 
 
 class LocalTrueApiReadRuntime:
-    """In-process read-only True API session.
-
-    Authentication is exactly one /auth/key challenge, local CryptoPro signing of
-    the returned data, then /auth/simpleSignIn. The resulting uuidToken exists
-    only in this object and is never serialized.
-    """
+    """Read-only True API transport/session owner for typed Browser CAdES auth."""
 
     def __init__(
         self,
         *,
         participant_inn: str,
         transport: ReadOnlyTrueApiTransport,
-        inspector: Any,
-        signer: Any,
     ) -> None:
         self.participant_inn = participant_inn
         self.transport = transport
-        self.inspector = inspector
-        self.signer = signer
-        self.authenticator = TrueApiAuthenticator(transport, signer, participant_inn)
         self.adapter = TrueApiCisesInfoAdapter()
         self.rate_limiter = SharedRateLimiter(max_rps=50)
         self._session: AuthSession | None = None
@@ -142,10 +147,47 @@ class LocalTrueApiReadRuntime:
     def expire_date(self) -> datetime | None:
         return self._session.expire_date if self.authenticated and self._session else None
 
-    def authenticate(self) -> dict[str, Any]:
-        # Local certificate validation performs no network I/O and exports no key.
-        self.inspector.inspect()
-        self._session = self.authenticator.authenticate()
+    def prepare_auth_challenge(self) -> tuple[str, str]:
+        payload = self.transport.request_json("GET", "/auth/key")
+        if not isinstance(payload, dict):
+            raise TrueApiProtocolError("/auth/key returned an unexpected payload")
+        uuid = payload.get("uuid")
+        data = payload.get("data")
+        if not isinstance(uuid, str) or not uuid or not isinstance(data, str) or not data:
+            raise TrueApiProtocolError("/auth/key response misses uuid/data")
+        return uuid, data
+
+    def complete_auth(self, *, uuid: str, signature_base64: str) -> dict[str, Any]:
+        if not uuid or not signature_base64:
+            raise ValueError("Typed authentication completion is incomplete")
+        response = self.transport.request_json(
+            "POST",
+            "/auth/simpleSignIn",
+            body={
+                "uuid": uuid,
+                "data": signature_base64,
+                "inn": self.participant_inn,
+                "unitedToken": True,
+            },
+        )
+        if not isinstance(response, dict):
+            raise TrueApiProtocolError("/auth/simpleSignIn returned an unexpected payload")
+        token = response.get("uuidToken")
+        expire = response.get("expireDate")
+        if not isinstance(token, str) or not token:
+            raise TrueApiProtocolError("UUID authentication response misses uuidToken")
+        if not isinstance(expire, str) or not expire:
+            raise TrueApiProtocolError("UUID authentication response misses expireDate")
+        try:
+            expire_date = datetime.fromisoformat(expire.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise TrueApiProtocolError("Invalid expireDate in authentication response") from exc
+        if expire_date.tzinfo is None or expire_date.utcoffset() is None:
+            raise TrueApiProtocolError("expireDate must include an explicit timezone")
+        self._session = AuthSession(
+            uuid_token=token,
+            expire_date=expire_date.astimezone(timezone.utc),
+        )
         return {
             "authenticated": True,
             "expire_date": self._session.expire_date.isoformat(),
@@ -176,7 +218,6 @@ class LocalTrueApiReadRuntime:
             raise ValueError("cises/info batch must contain at least one CIS")
         bearer = self._bearer()
         result: dict[str, KiState | Exception] = {}
-
         for offset in range(0, len(requested), MAX_BATCH):
             batch = requested[offset : offset + MAX_BATCH]
             self.rate_limiter.acquire()
@@ -193,7 +234,6 @@ class LocalTrueApiReadRuntime:
                 if exc.status in {401, 403}:
                     self.clear_session()
                 raise
-
             if isinstance(payload, dict) and isinstance(payload.get("results"), list):
                 items = payload["results"]
             elif isinstance(payload, list):
@@ -202,7 +242,6 @@ class LocalTrueApiReadRuntime:
                 raise TrueApiProtocolError(
                     "cises/info returned an unexpected top-level payload"
                 )
-
             by_requested: dict[str, Any] = {}
             for item in items:
                 if not isinstance(item, dict):
@@ -212,19 +251,28 @@ class LocalTrueApiReadRuntime:
                     key = info.get("requestedCis") or info.get("cis")
                     if isinstance(key, str):
                         by_requested[key] = item
-
             for cis in batch:
                 item = by_requested.get(cis)
                 if item is None:
-                    result[cis] = TrueApiProtocolError(
-                        "cises/info omitted requested KI"
-                    )
+                    result[cis] = TrueApiProtocolError("cises/info omitted requested KI")
                     continue
                 try:
                     result[cis] = self.adapter.normalize(cis, item)
                 except Exception as exc:
                     result[cis] = exc
         return result
+
+
+@dataclass(slots=True)
+class BrowserAuthAttempt:
+    attempt_id: str
+    uuid: str
+    challenge_data: str
+    participant_inn: str
+    session_id: str
+    eligible_thumbprints: frozenset[str]
+    expires_at: datetime
+    used: bool = False
 
 
 class LocalTrueApiReadBridge:
