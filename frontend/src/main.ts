@@ -218,11 +218,14 @@ function localTrueApiBlock(): string {
     </div>`;
   }).join("");
 
+  const cspText = status.csp_available
+    ? "CryptoPro CSP обнаружен"
+    : "CryptoPro CSP не обнаружен";
   const pluginText = browserCadesAvailable === true
-    ? "CryptoPro Browser plug-in обнаружен"
+    ? "Browser CAdES обнаружен"
     : browserCadesAvailable === false
-      ? "CryptoPro Browser plug-in не обнаружен"
-      : "Проверяем CryptoPro Browser plug-in…";
+      ? "Browser CAdES не обнаружен"
+      : "Проверяем Browser CAdES…";
   const transportText = status.gost_transport_available
     ? "GOST transport готов"
     : "GOST transport не готов: нужен stunnel_msspi для True API";
@@ -238,7 +241,7 @@ function localTrueApiBlock(): string {
 
   return `<section class="ki-lookup-card">
     <div><strong>Честный знак / CryptoPro</strong><span>Business writes отключены</span></div>
-    <p class="integration-note">${esc(pluginText)} · ${esc(transportText)}</p>
+    <p class="integration-note">${esc(cspText)} · ${esc(pluginText)} · ${esc(transportText)}</p>
     ${selected ? `<p class="integration-note">Выбрана УКЭП: ${esc(selected.subject || selected.thumbprint)}</p>` : ""}
     ${connection}
     ${status.error_code ? `<p class="login-error">${esc(status.error_code)}</p>` : ""}
