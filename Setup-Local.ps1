@@ -66,18 +66,26 @@ if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
 
 $cadesPublicDir = Join-Path $repo "frontend\public"
 $cadesApiPath = Join-Path $cadesPublicDir "cadesplugin_api.js"
+$cadesApiUri = "https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js"
+# Audited CryptoPro cadesplugin_api.js 2.4.5. A changed upstream artifact is
+# intentionally rejected until this pinned SHA-256 is reviewed and updated.
+$cadesApiExpectedSha256 = "D54CFE9186C4B6DBE9ED73D83F289D31DA7B50000B48BA3E7C278E820578086B"
 New-Item -ItemType Directory -Force -Path $cadesPublicDir | Out-Null
-if (-not (Test-Path -LiteralPath $cadesApiPath)) {
-    Write-Host "Downloading official CryptoPro cadesplugin_api.js for local Browser CAdES activation..."
+
+if (Test-Path -LiteralPath $cadesApiPath) {
+    Assert-SellariPinnedSha256 -Path $cadesApiPath -ExpectedSha256 $cadesApiExpectedSha256 | Out-Null
+} else {
+    $cadesApiTemp = Join-Path $cadesPublicDir (".cadesplugin_api.js.download." + [Guid]::NewGuid().ToString("N"))
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri "https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js" -OutFile $cadesApiPath
+        Write-Host "Downloading pinned CryptoPro cadesplugin_api.js for local Browser CAdES activation..."
+        Invoke-WebRequest -UseBasicParsing -Uri $cadesApiUri -OutFile $cadesApiTemp
+        Publish-SellariPinnedArtifact -CandidatePath $cadesApiTemp -DestinationPath $cadesApiPath -ExpectedSha256 $cadesApiExpectedSha256
     } catch {
-        throw "Cannot download official CryptoPro cadesplugin_api.js. Download it from the CryptoPro CAdES downloads page and place it at '$cadesApiPath', then rerun setup."
+        Remove-Item -LiteralPath $cadesApiTemp -Force -ErrorAction SilentlyContinue
+        throw "CryptoPro cadesplugin_api.js download/hash verification failed. Sellari will not publish or execute an unverified activation script. $($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $cadesApiTemp -Force -ErrorAction SilentlyContinue
     }
-}
-$cadesApiText = Get-Content -LiteralPath $cadesApiPath -Raw -Encoding UTF8
-if (($cadesApiText.Length -lt 1000) -or ($cadesApiText -notmatch "CreateObjectAsync") -or ($cadesApiText -notmatch "cadesplugin")) {
-    throw "Local cadesplugin_api.js failed activation-script sanity checks. Replace it with the official CryptoPro file."
 }
 
 Push-Location (Join-Path $repo "frontend")
