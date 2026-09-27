@@ -234,6 +234,7 @@ export interface LocalTrueApiStatus {
   cryptopro_available: boolean;
   csp_available: boolean;
   browser_cades_available: boolean | null;
+  ukep_available: boolean;
   gost_transport_available: boolean;
   cryptcp_available: boolean;
   candidates: LocalTrueApiCandidate[];
