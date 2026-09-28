@@ -518,6 +518,11 @@ def test_structural_probe_fails_closed_when_null_client_cert_option_cannot_be_se
 
 
 if os.name == "nt":
+    def test_real_windows_cadescom_license_probe_is_safe_tristate() -> None:
+        status, metadata = _probe_cadescom_license()
+        assert status in {LICENSE_VALID, LICENSE_INVALID, LICENSE_UNKNOWN}
+        assert "serial" not in repr(metadata).casefold()
+
     def test_real_windows_structural_probe_is_no_network_and_accepts_null_client_cert() -> None:
         native = _WinHttpNative()
 
