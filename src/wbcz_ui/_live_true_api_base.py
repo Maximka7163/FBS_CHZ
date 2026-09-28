@@ -568,7 +568,7 @@ class ReadOnlyTrueApiTransport:
 
 
 class WindowsCryptoProCertificateDiscovery:
-    """Enumerate safe CurrentUser\\My certificate metadata without signing or exporting keys."""
+    """Enumerate safe CurrentUser\\My metadata without cryptcp or private-key export."""
 
     def __init__(
         self,
@@ -577,16 +577,11 @@ class WindowsCryptoProCertificateDiscovery:
         powershell: str = "powershell.exe",
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
+        # Kept for constructor compatibility only. LOCAL discovery deliberately
+        # does not require or execute cryptcp.exe.
         self._explicit_cryptcp = Path(cryptcp_path) if cryptcp_path else None
         self.powershell = powershell
         self._runner = runner
-
-    def _cryptcp_available(self) -> bool:
-        try:
-            _find_cryptopro_binary(self._explicit_cryptcp, "cryptcp.exe")
-            return True
-        except Exception:
-            return False
 
     def discover(self) -> dict[str, Any]:
         if os.name != "nt" and self._runner is subprocess.run:
@@ -614,35 +609,48 @@ public static class WbczCertDiscoveryNative {
 "@
 $store=New-Object System.Security.Cryptography.X509Certificates.X509Store('My','CurrentUser')
 $items=@()
+$skipped=0
 try {
   $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
   foreach ($cert in $store.Certificates) {
-    $provider=$null
-    $size=[uint32]0
-    if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,[IntPtr]::Zero,[ref]$size) -and $size -gt 0) {
-      $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal([int]$size)
-      try {
-        if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,$ptr,[ref]$size)) {
-          $info=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[type][WbczCertDiscoveryNative+CRYPT_KEY_PROV_INFO])
-          $provider=[Runtime.InteropServices.Marshal]::PtrToStringUni($info.pwszProvName)
+    try {
+      $provider=$null
+      $size=[uint32]0
+      if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,[IntPtr]::Zero,[ref]$size) -and $size -gt 0) {
+        $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal([int]$size)
+        try {
+          if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,$ptr,[ref]$size)) {
+            $info=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[type][WbczCertDiscoveryNative+CRYPT_KEY_PROV_INFO])
+            $provider=[Runtime.InteropServices.Marshal]::PtrToStringUni($info.pwszProvName)
+          }
+        } finally {
+          [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
         }
-      } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }
-    }
-    $items += [pscustomobject]@{
-      thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
-      subject=$cert.Subject
-      issuer=$cert.Issuer
-      serial=$cert.GetSerialNumberString()
-      hasPrivateKey=$cert.HasPrivateKey
-      notBefore=$cert.NotBefore.ToUniversalTime().ToString('o')
-      notAfter=$cert.NotAfter.ToUniversalTime().ToString('o')
-      publicKeyOid=$cert.PublicKey.Oid.Value
-      signatureOid=$cert.SignatureAlgorithm.Value
-      providerName=$provider
+      }
+      # GetKeyAlgorithm reads the certificate algorithm OID without requiring
+      # .NET to construct a GOST PublicKey implementation.
+      $items += [pscustomobject]@{
+        thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
+        subject=$cert.Subject
+        issuer=$cert.Issuer
+        serial=$cert.GetSerialNumberString()
+        hasPrivateKey=$cert.HasPrivateKey
+        notBefore=$cert.NotBefore.ToUniversalTime().ToString('o')
+        notAfter=$cert.NotAfter.ToUniversalTime().ToString('o')
+        publicKeyOid=$cert.GetKeyAlgorithm()
+        signatureOid=$cert.SignatureAlgorithm.Value
+        providerName=$provider
+      }
+    } catch {
+      # One unreadable certificate must not make CurrentUser\\My discovery
+      # indistinguishable from a store/API failure.
+      $skipped += 1
     }
   }
-} finally { $store.Close() }
-[pscustomobject]@{certificates=@($items)} | ConvertTo-Json -Compress -Depth 4
+} finally {
+  $store.Close()
+}
+[pscustomobject]@{certificates=@($items);skippedCount=$skipped} | ConvertTo-Json -Compress -Depth 4
 '''
         completed = self._runner(
             [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script],
@@ -652,7 +660,9 @@ try {
             check=False,
         )
         if completed.returncode != 0:
-            raise TrueApiError((completed.stderr.strip() or "Certificate discovery failed")[:1000])
+            raise TrueApiError(
+                (completed.stderr.strip() or "Certificate discovery failed")[:1000]
+            )
         try:
             root = json.loads(completed.stdout.strip())
         except json.JSONDecodeError as exc:
@@ -660,12 +670,15 @@ try {
         rows = root.get("certificates") if isinstance(root, dict) else None
         if not isinstance(rows, list):
             raise TrueApiError("Certificate discovery response misses certificates")
-        cryptcp_available = self._cryptcp_available()
+
         candidates: list[dict[str, Any]] = []
+        cryptopro_visible = False
         for raw in rows:
             if not isinstance(raw, dict):
                 continue
-            thumbprint = re.sub(r"[^0-9A-F]", "", str(raw.get("thumbprint") or "").upper())
+            thumbprint = re.sub(
+                r"[^0-9A-F]", "", str(raw.get("thumbprint") or "").upper()
+            )
             if not thumbprint:
                 continue
             subject = str(raw.get("subject") or "")[:2000]
@@ -673,12 +686,12 @@ try {
             provider_key = provider.casefold().replace("-", " ")
             public_key_oid = str(raw.get("publicKeyOid") or "")[:128]
             compatible = (
-                cryptcp_available
-                and public_key_oid in _GOST_PUBLIC_KEY_OIDS
+                public_key_oid in _GOST_PUBLIC_KEY_OIDS
                 and ("crypto pro" in provider_key or "cryptopro" in provider_key)
             )
+            cryptopro_visible = cryptopro_visible or compatible
             match = re.search(
-                r"(?:OID\.1\.2\.643\.100\.4|INN|ИНН)\s*[=:]\s*(\d{10}|\d{12})",
+                r"(?:OID\.1\.2\.643\.100\.4|OID\.1\.2\.643\.3\.131\.1\.1|INN|ИНН)\s*[=:]\s*(\d{10}|\d{12})",
                 subject,
                 re.IGNORECASE,
             )
@@ -696,7 +709,13 @@ try {
                 "crypto_provider": provider or None,
                 "compatibility": "GOST_CRYPTOPRO" if compatible else "UNSUPPORTED",
             })
-        return {"cryptopro_available": cryptcp_available, "candidates": candidates}
+        return {
+            "cryptopro_available": cryptopro_visible,
+            "cryptcp_available": False,
+            "candidates": candidates,
+            "skipped_certificate_count": int(root.get("skippedCount") or 0),
+            "discovery_state": "OK",
+        }
 
 
 class WindowsCryptoProCertificateInspector:
