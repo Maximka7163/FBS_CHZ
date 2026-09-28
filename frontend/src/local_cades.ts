@@ -181,7 +181,7 @@ async function plugin(): Promise<CadesPlugin> {
   while (Date.now() < deadline) {
     try {
       await Promise.resolve(raw.CreateObjectAsync("CAdESCOM.About"));
-      return raw;
+      return raw as CadesPlugin;
     } catch (error) {
       lastCreateError = error;
       await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 100));
