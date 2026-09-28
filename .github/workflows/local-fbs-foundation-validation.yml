@@ -107,12 +107,13 @@ jobs:
         shell: pwsh
         run: python -m pip install -e ".[web,test]"
 
-      - name: Real Windows WinHTTP no-network structural probe
+      - name: Real Windows CryptoPro and WinHTTP structural probes
         shell: pwsh
         run: >-
           python -m pytest -q
           tests/test_local_winhttp_gost.py
-          -k real_windows_structural_probe_is_no_network_and_accepts_null_client_cert
+          tests/test_local_true_api_read.py
+          -k real_windows_
 
       - name: Parse local PowerShell scripts
         shell: pwsh
