@@ -24,6 +24,21 @@ type CadesPluginGlobal = CadesPlugin & {
   ) => unknown;
 };
 
+function nonThenableFacade(raw: CadesPluginGlobal): CadesPlugin {
+  // Never let the official Promise-like cadesplugin escape from an async
+  // function. Promise resolution would assimilate raw.then and the resolved
+  // value may be undefined. Keep CreateObjectAsync bound to the actual global
+  // object because the CryptoPro wrapper may depend on its receiver.
+  return {
+    CreateObjectAsync: raw.CreateObjectAsync.bind(raw),
+    CAPICOM_CURRENT_USER_STORE: raw.CAPICOM_CURRENT_USER_STORE,
+    CAPICOM_MY_STORE: raw.CAPICOM_MY_STORE,
+    CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED: raw.CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED,
+    CADESCOM_BASE64_TO_BINARY: raw.CADESCOM_BASE64_TO_BINARY,
+    CADESCOM_CADES_BES: raw.CADESCOM_CADES_BES,
+  };
+}
+
 export type BrowserCadesErrorCode =
   | "SCRIPT_NOT_LOADED"
   | "PLUGIN_INIT_FAILED"
@@ -239,7 +254,7 @@ async function plugin(): Promise<CadesPlugin> {
   while (Date.now() < deadline) {
     try {
       await Promise.resolve(raw.CreateObjectAsync("CAdESCOM.About"));
-      return raw as CadesPlugin;
+      return nonThenableFacade(raw);
     } catch (error) {
       lastCreateError = error;
       await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 100));
@@ -281,6 +296,12 @@ export async function probeBrowserCades(): Promise<BrowserCadesProbe> {
 
 export async function detectBrowserCades(): Promise<boolean> {
   return (await probeBrowserCades()).ready;
+}
+
+// Test seam only: not used by application code and does not expose signing.
+// It proves the async initializer returns a real non-thenable API facade.
+export async function __testBrowserCadesApi(): Promise<CadesPlugin> {
+  return plugin();
 }
 
 function normalizedThumbprint(value: unknown): string {
