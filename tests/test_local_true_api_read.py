@@ -375,6 +375,17 @@ def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
     assert status["candidates"][0]["eligible"] is True
 
 
+if os.name == "nt":
+    def test_real_windows_certificate_discovery_reads_current_user_my_without_cryptcp() -> None:
+        discovery = WindowsCryptoProCertificateDiscovery(
+            cryptcp_path="C:/missing/cryptcp.exe",
+        )
+        inventory = discovery.discover()
+        assert isinstance(inventory["candidates"], list)
+        assert inventory["cryptcp_available"] is False
+        assert inventory["discovery_state"] == "OK"
+
+
 def test_windows_certificate_discovery_enumerates_current_user_my_without_cryptcp() -> None:
     captured: dict[str, str] = {}
 
