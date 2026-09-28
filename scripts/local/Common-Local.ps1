@@ -172,12 +172,11 @@ function Invoke-SellariPsqlNative {
     try {
         $ErrorActionPreference = "Continue"
         try {
-            $LASTEXITCODE = $null
             $stdout = & $PsqlPath @Arguments 2> $stderrPath
+            # Capture immediately. Do not pre-assign $LASTEXITCODE in this
+            # function: on Windows PowerShell 5.1 that shadows the automatic
+            # variable and prevents the native process from updating it.
             $exitCode = $LASTEXITCODE
-            if ($null -eq $exitCode) {
-                throw "PostgreSQL client process did not return an exit code."
-            }
         } catch {
             # Process launch/runtime failures are not an expected psql result.
             # Preserve them instead of converting them to readiness=false.
