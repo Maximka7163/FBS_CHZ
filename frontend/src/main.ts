@@ -112,8 +112,7 @@ function shell(content: string): void {
         ${LOCAL_FBS_ONLY ? "" : '<button id="nav-settings" class="quiet-button">Настройки</button>'}
         <span class="safety-indicator"><i></i>DRY RUN</span>
         <span class="safety-indicator"><i></i>Отправка в ЧЗ отключена</span>
-        <span class="profile" title="${esc(user?.username || "")}">${esc(initials)}</span>
-        <button id="logout" class="quiet-button">Выйти</button>
+        ${LOCAL_FBS_ONLY ? "" : `<span class="profile" title="${esc(user?.username || "")}">${esc(initials)}</span><button id="logout" class="quiet-button">Выйти</button>`}
       </div>
     </header>
     <aside class="rail" aria-label="Навигация"><button id="rail-workspace" class="rail-mark" title="WB FBS">${icons.mark}</button></aside>
@@ -139,7 +138,22 @@ function shell(content: string): void {
   });
 }
 
+function renderLocalStartupError(error: string): void {
+  stopPolling();
+  app.innerHTML = `<main class="login-page"><section class="login-card">
+    <div class="login-brand">${BRAND_NAME}</div>
+    <h1>Маркировка</h1>
+    <p>Локальный OWNER недоступен</p>
+    <div class="login-error">${esc(error)}</div>
+    <p>Проверьте локальную установку через Check-Local.ps1. Вход по логину и паролю в локальном режиме не используется.</p>
+  </section></main>`;
+}
+
 function renderLogin(error = ""): void {
+  if (LOCAL_FBS_ONLY) {
+    renderLocalStartupError(error || "Локальный OWNER не найден или определён неоднозначно.");
+    return;
+  }
   stopPolling();
   app.innerHTML = `<main class="login-page"><form id="login" class="login-card">
     <div class="login-brand">${BRAND_NAME}</div>
@@ -939,7 +953,8 @@ window.addEventListener("popstate", () => {
     user = await api.me();
     await refreshLocalTrueApiStatus();
     await restoreInitialView();
-  } catch {
-    renderLogin();
+  } catch (error) {
+    if (LOCAL_FBS_ONLY) renderLocalStartupError(readError(error));
+    else renderLogin();
   }
 })();
