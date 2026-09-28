@@ -44,9 +44,11 @@ The setup:
 6. creates per-user config/data/log/run folders under `%LOCALAPPDATA%\SellariMarking\`;
 7. provisions/reuses local PostgreSQL database `sellari_local`;
 8. runs existing Alembic migrations;
-9. bootstraps one local OWNER + participant on first run;
+9. bootstraps one local OWNER + participant on first run without an application login/password prompt;
 10. writes only local paths/configuration and closed mutation gates;
 11. runs the local preflight.
+
+The local-only runtime resolves exactly one active bootstrapped OWNER internally. Missing or multiple valid OWNER identities fail closed; an existing OWNER, organisation, participant and any existing password hash are preserved unchanged. The normal session/password authentication path remains unchanged outside the local-only runtime.
 
 The PostgreSQL administrator password is used only for local database provisioning and is not written to the repository or local.env.
 
