@@ -39,15 +39,62 @@ export class BrowserCadesError extends Error {
   }
 }
 
+export interface BrowserCadesDiagnostics {
+  globalPresent: boolean;
+  globalType: string;
+  activationScriptState:
+    | "NO_DOCUMENT"
+    | "NOT_IN_DOM"
+    | "LOADING"
+    | "LOADED"
+    | "ERROR"
+    | "GLOBAL_PRESENT";
+  createObjectAsyncType: string;
+  lastErrorCode: BrowserCadesErrorCode | null;
+  lastErrorMessage: string | null;
+  lastErrorStack: string | null;
+}
+
 export interface BrowserCadesProbe {
   ready: boolean;
   errorCode: BrowserCadesErrorCode | null;
   message: string | null;
+  diagnostics: BrowserCadesDiagnostics;
 }
 
 const PLUGIN_INIT_TIMEOUT_MS = 20000;
 const CREATE_OBJECT_RETRY_MS = 1500;
 let activationScriptPromise: Promise<void> | null = null;
+let lastBrowserCadesError: BrowserCadesError | null = null;
+
+function activationScriptState(): BrowserCadesDiagnostics["activationScriptState"] {
+  const target = globalThis as typeof globalThis & { cadesplugin?: unknown };
+  if (typeof document === "undefined") return "NO_DOCUMENT";
+  const script = document.querySelector<HTMLScriptElement>(
+    'script[data-sellari-cadesplugin="true"]',
+  );
+  if (!script) return target.cadesplugin ? "GLOBAL_PRESENT" : "NOT_IN_DOM";
+  const state = script.dataset.sellariCadespluginState;
+  if (state === "loaded") return "LOADED";
+  if (state === "error") return "ERROR";
+  return target.cadesplugin ? "GLOBAL_PRESENT" : "LOADING";
+}
+
+export function getBrowserCadesDiagnostics(): BrowserCadesDiagnostics {
+  const raw = (globalThis as typeof globalThis & { cadesplugin?: unknown }).cadesplugin;
+  const createObjectAsync = raw && (typeof raw === "object" || typeof raw === "function")
+    ? (raw as Record<string, unknown>).CreateObjectAsync
+    : undefined;
+  return {
+    globalPresent: raw !== undefined && raw !== null,
+    globalType: typeof raw,
+    activationScriptState: activationScriptState(),
+    createObjectAsyncType: typeof createObjectAsync,
+    lastErrorCode: lastBrowserCadesError?.code ?? null,
+    lastErrorMessage: lastBrowserCadesError?.message ?? null,
+    lastErrorStack: lastBrowserCadesError?.stack ?? null,
+  };
+}
 
 function withTimeout<T>(
   promise: Promise<T>,
@@ -87,6 +134,7 @@ async function ensureActivationScript(): Promise<void> {
         'script[data-sellari-cadesplugin="true"]',
       );
       const onLoad = () => {
+        if (existing) existing.dataset.sellariCadespluginState = "loaded";
         if (target.cadesplugin) resolve();
         else reject(
           new BrowserCadesError(
@@ -95,12 +143,15 @@ async function ensureActivationScript(): Promise<void> {
           ),
         );
       };
-      const onError = () => reject(
-        new BrowserCadesError(
-          "SCRIPT_NOT_LOADED",
-          "Не удалось загрузить cadesplugin_api.js",
-        ),
-      );
+      const onError = () => {
+        if (existing) existing.dataset.sellariCadespluginState = "error";
+        reject(
+          new BrowserCadesError(
+            "SCRIPT_NOT_LOADED",
+            "Не удалось загрузить cadesplugin_api.js",
+          ),
+        );
+      };
       if (existing) {
         existing.addEventListener("load", onLoad, { once: true });
         existing.addEventListener("error", onError, { once: true });
@@ -110,8 +161,15 @@ async function ensureActivationScript(): Promise<void> {
       script.src = "/cadesplugin_api.js";
       script.async = true;
       script.dataset.sellariCadesplugin = "true";
-      script.addEventListener("load", onLoad, { once: true });
-      script.addEventListener("error", onError, { once: true });
+      script.dataset.sellariCadespluginState = "loading";
+      script.addEventListener("load", () => {
+        script.dataset.sellariCadespluginState = "loaded";
+        onLoad();
+      }, { once: true });
+      script.addEventListener("error", () => {
+        script.dataset.sellariCadespluginState = "error";
+        onError();
+      }, { once: true });
       document.head.appendChild(script);
     });
   }
@@ -197,15 +255,26 @@ async function plugin(): Promise<CadesPlugin> {
 export async function probeBrowserCades(): Promise<BrowserCadesProbe> {
   try {
     await plugin();
-    return { ready: true, errorCode: null, message: null };
+    lastBrowserCadesError = null;
+    return {
+      ready: true,
+      errorCode: null,
+      message: null,
+      diagnostics: getBrowserCadesDiagnostics(),
+    };
   } catch (error) {
-    if (error instanceof BrowserCadesError) {
-      return { ready: false, errorCode: error.code, message: error.message };
-    }
+    lastBrowserCadesError = error instanceof BrowserCadesError
+      ? error
+      : new BrowserCadesError(
+          "PLUGIN_INIT_FAILED",
+          error instanceof Error ? error.message : String(error),
+          error,
+        );
     return {
       ready: false,
-      errorCode: "PLUGIN_INIT_FAILED",
-      message: error instanceof Error ? error.message : String(error),
+      errorCode: lastBrowserCadesError.code,
+      message: lastBrowserCadesError.message,
+      diagnostics: getBrowserCadesDiagnostics(),
     };
   }
 }
