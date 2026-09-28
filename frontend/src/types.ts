@@ -235,9 +235,14 @@ export interface LocalTrueApiStatus {
   csp_available: boolean;
   csp_version: string | null;
   csp_version_supported: boolean;
+  csp_technical_supported: boolean;
+  csp_compliance_status: "CERTIFIED" | "UNCERTIFIED" | "UNKNOWN";
   csp_license_valid: boolean;
+  license_status: "VALID" | "INVALID" | "UNKNOWN";
+  sspi_diagnostic_status: "AVAILABLE" | "UNAVAILABLE" | "UNKNOWN";
   browser_cades_available: boolean | null;
   ukep_available: boolean;
+  ukep_state: "VISIBLE" | "NOT_VISIBLE" | "DISCOVERY_FAILED";
   gost_transport_available: boolean;
   native_winhttp_gost_transport_ready: boolean;
   winhttp_available: boolean;
