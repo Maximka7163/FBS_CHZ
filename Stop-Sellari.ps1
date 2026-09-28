@@ -9,7 +9,7 @@ if (-not (Test-Path -LiteralPath $paths.PidFile)) {
     exit 0
 }
 
-$raw = (Get-Content -LiteralPath $paths.PidFile -Raw).Trim()
+$raw = ([string](Get-Content -LiteralPath $paths.PidFile -Raw)).Trim()
 if ($raw -notmatch '^\d+$') {
     Remove-Item -LiteralPath $paths.PidFile -Force
     throw "Invalid Sellari PID file removed."
