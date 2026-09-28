@@ -384,18 +384,18 @@ def test_structural_probe_fails_closed_when_null_client_cert_option_cannot_be_se
     assert winhttp.receive_calls == 0
 
 
-@pytest.mark.skipif(os.name != "nt", reason="real WinHTTP API check runs on Windows only")
-def test_real_windows_structural_probe_is_no_network_and_accepts_null_client_cert() -> None:
-    native = _WinHttpNative()
+if os.name == "nt":
+    def test_real_windows_structural_probe_is_no_network_and_accepts_null_client_cert() -> None:
+        native = _WinHttpNative()
 
-    assert native.structural_initializable() is True
+        assert native.structural_initializable() is True
 
-    source = inspect.getsource(_WinHttpNative.structural_initializable)
-    assert "WinHttpConnect" in source
-    assert "WinHttpOpenRequest" in source
-    assert "_configure_request_safety" in source
-    assert "WinHttpSendRequest" not in source
-    assert "WinHttpReceiveResponse" not in source
+        source = inspect.getsource(_WinHttpNative.structural_initializable)
+        assert "WinHttpConnect" in source
+        assert "WinHttpOpenRequest" in source
+        assert "_configure_request_safety" in source
+        assert "WinHttpSendRequest" not in source
+        assert "WinHttpReceiveResponse" not in source
 
 
 @pytest.mark.parametrize(
