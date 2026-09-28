@@ -836,7 +836,10 @@ class LocalTrueApiReadBridge:
             ),
             "true_api_local_ready": None,
             "true_api_local_ready_reasons": list(dict.fromkeys(reasons)),
-            "true_api_live_verified": bool(authenticated and gost_verified),
+            # A successfully negotiated production /auth/key connection is
+            # enough to prove live GOST transport. True API authentication is
+            # reported separately by the authenticated field.
+            "true_api_live_verified": gost_verified,
             "real_read_enabled": True,
             "read_only": True,
             "business_write_enabled": False,
