@@ -164,6 +164,9 @@ jobs:
             if ($_.Exception.Message -eq 'synthetic psql failure') { $exitCodeRejected = $true }
           }
           if (-not $exitCodeRejected) { throw 'Non-zero psql exit code was not rejected.' }
+          # GitHub's Windows PowerShell wrapper propagates LASTEXITCODE at step end.
+          # The non-zero code above was expected and asserted, so clear test-harness state.
+          $global:LASTEXITCODE = 0
 
           $root = Join-Path $env:RUNNER_TEMP 'sellari-psql-discovery-test'
           $fakePsql = Join-Path $root 'PostgreSQL\16\bin\psql.exe'
