@@ -481,6 +481,54 @@ def _probe_csp(
     return True, release, version_ok, license_ok
 
 
+class _SecPkgInfoW(ctypes.Structure):
+    _fields_ = [
+        ("fCapabilities", ctypes.c_uint32),
+        ("wVersion", ctypes.c_uint16),
+        ("wRPCID", ctypes.c_uint16),
+        ("cbMaxToken", ctypes.c_uint32),
+        ("Name", ctypes.c_wchar_p),
+        ("Comment", ctypes.c_wchar_p),
+    ]
+
+
+def _cryptopro_sspi_package_available(secur32: Any) -> bool:
+    """Prove that a CryptoPro SSP/SChannel package is actually registered."""
+
+    try:
+        enumerate_packages = secur32.EnumerateSecurityPackagesW
+        free_context = secur32.FreeContextBuffer
+    except AttributeError:
+        return False
+
+    count = ctypes.c_uint32()
+    packages = ctypes.POINTER(_SecPkgInfoW)()
+    try:
+        enumerate_packages.argtypes = [
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.POINTER(_SecPkgInfoW)),
+        ]
+        enumerate_packages.restype = ctypes.c_long
+        free_context.argtypes = [ctypes.c_void_p]
+        free_context.restype = ctypes.c_long
+    except AttributeError:
+        # Synthetic callables used by tests may not expose ctypes metadata.
+        pass
+
+    status = enumerate_packages(ctypes.byref(count), ctypes.byref(packages))
+    if int(status) != 0 or not packages:
+        return False
+    try:
+        for index in range(int(count.value)):
+            item = packages[index]
+            marker = f"{item.Name or ''} {item.Comment or ''}".casefold()
+            if "cryptopro" in marker or "crypto-pro" in marker:
+                return True
+        return False
+    finally:
+        free_context(packages)
+
+
 def probe_native_gost_transport(
     *,
     system: str | None = None,
@@ -489,6 +537,7 @@ def probe_native_gost_transport(
     csptest_path: Path | None = None,
     cpconfig_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    sspi_probe: Callable[[Any], bool] | None = None,
 ) -> NativeTransportProbe:
     windows = (system or platform.system()).casefold() == "windows"
     build = windows_build
@@ -515,12 +564,13 @@ def probe_native_gost_transport(
         )
 
     available = {"winhttp.dll": False, "secur32.dll": False, "crypt32.dll": False}
+    loaded: dict[str, Any] = {}
     initializable = False
     if windows:
         loader = dll_loader or (lambda name: ctypes.WinDLL(name, use_last_error=True))
         for name in available:
             try:
-                loader(name)
+                loaded[name] = loader(name)
                 available[name] = True
             except Exception:
                 pass
@@ -532,12 +582,18 @@ def probe_native_gost_transport(
             except Exception:
                 initializable = False
 
-    sspi = bool(
+    sspi_detector = sspi_probe or _cryptopro_sspi_package_available
+    sspi = False
+    if (
         available["secur32.dll"]
         and csp_installed
         and csp_version_supported
         and csp_license_valid
-    )
+    ):
+        try:
+            sspi = bool(sspi_detector(loaded["secur32.dll"]))
+        except Exception:
+            sspi = False
     checks = (
         (supported_windows, "UNSUPPORTED_WINDOWS"),
         (csp_installed, "CRYPTOPRO_CSP_NOT_INSTALLED"),
