@@ -13,6 +13,8 @@ from wbcz_local.app import (
 )
 from wbcz_local.bridge import LocalTrueApiBridgeFoundation
 from wbcz_local.__main__ import _loopback_host
+from wbcz_local import preflight as local_preflight_module
+from wbcz_local.preflight import find_local_psql
 
 
 ROOT = Path(__file__).parents[1]
@@ -197,3 +199,113 @@ def test_local_foundation_does_not_modify_production_entrypoint_contract() -> No
     assert 'CMD ["uvicorn","wbcz_web.main:app"' not in compose
     assert 'WBCZ_TRUE_API_WRITE_ENABLED: "false"' in compose
     assert 'WBCZ_FBS_DRY_RUN_ONLY: "true"' in compose
+
+
+def test_preflight_psql_discovery_prefers_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    path_psql = tmp_path / "path" / "psql.exe"
+    path_psql.parent.mkdir(parents=True)
+    path_psql.write_bytes(b"")
+    monkeypatch.setattr(
+        local_preflight_module.shutil,
+        "which",
+        lambda name: str(path_psql) if name == "psql" else None,
+    )
+
+    found = find_local_psql(windows=True, environ={})
+    assert found == str(path_psql.resolve())
+
+
+def test_preflight_psql_discovery_uses_standard_postgresql_16_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    standard_root = tmp_path / "Program Files"
+    standard_psql = standard_root / "PostgreSQL" / "16" / "bin" / "psql.exe"
+    standard_psql.parent.mkdir(parents=True)
+    standard_psql.write_bytes(b"")
+    monkeypatch.setattr(local_preflight_module.shutil, "which", lambda _name: None)
+
+    found = find_local_psql(
+        windows=True,
+        environ={
+            "ProgramW6432": str(standard_root),
+            "ProgramFiles": str(standard_root),
+        },
+    )
+    assert found == str(standard_psql.resolve())
+
+
+def test_preflight_psql_discovery_genuine_miss(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(local_preflight_module.shutil, "which", lambda _name: None)
+
+    found = find_local_psql(
+        windows=True,
+        environ={
+            "ProgramW6432": str(tmp_path / "missing"),
+            "ProgramFiles": str(tmp_path / "missing"),
+            "ProgramFiles(x86)": str(tmp_path / "missing-x86"),
+        },
+    )
+    assert found is None
+
+
+def test_local_postgresql_reachability_is_independent_from_psql_client_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class CryptoStatus:
+        csp_available = True
+        cryptcp_available = False
+        cryptcp_path = None
+        gost_transport_available = False
+        stunnel_path = None
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, _statement):
+            return 1
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+        def dispose(self):
+            pass
+
+    frontend = tmp_path / "dist"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    monkeypatch.setattr(local_preflight_module.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(local_preflight_module, "frontend_dist_from_env", lambda: frontend)
+    monkeypatch.setattr(local_preflight_module, "inspect_local_cryptopro_foundation", lambda: CryptoStatus())
+    monkeypatch.setattr(local_preflight_module, "find_local_psql", lambda **_kwargs: None)
+    monkeypatch.setattr(local_preflight_module.WebConfig, "from_env", staticmethod(lambda: object()))
+    monkeypatch.setattr(local_preflight_module, "assert_local_foundation_safety", lambda _config: None)
+    monkeypatch.setattr(local_preflight_module, "build_engine", lambda _config: Engine())
+
+    result = local_preflight_module.local_preflight()
+    checks = {item["name"]: item for item in result["checks"]}
+
+    assert checks["postgresql_client"]["ok"] is False
+    assert checks["local_postgresql"]["ok"] is True
+    assert checks["local_postgresql"]["detail"] == "reachable"
+    assert result["ok"] is False
+
+
+def test_start_sellari_uses_python_preflight_without_path_only_psql_check() -> None:
+    start = (ROOT / "Start-Sellari.ps1").read_text(encoding="utf-8")
+    preflight = (ROOT / "src" / "wbcz_local" / "preflight.py").read_text(encoding="utf-8")
+
+    assert "-m wbcz_local.preflight --json" in start
+    assert "Get-Command psql" not in start
+    assert 'shutil.which("psql") or shutil.which("psql.exe")' in preflight
+    assert '"PostgreSQL" / "16" / "bin" / "psql.exe"' in preflight
