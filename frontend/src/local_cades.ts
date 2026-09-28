@@ -43,6 +43,7 @@ export interface BrowserCadesProbe {
 }
 
 const PLUGIN_INIT_TIMEOUT_MS = 8000;
+const CREATE_OBJECT_RETRY_MS = 1500;
 let activationScriptPromise: Promise<void> | null = null;
 
 function withTimeout<T>(
@@ -172,7 +173,7 @@ async function plugin(): Promise<CadesPlugin> {
   // exist while its internal native extension object is still being attached.
   // Retry an inert About object for a bounded interval; this closes the
   // pluginObject handshake race without signing or touching private keys.
-  const deadline = Date.now() + PLUGIN_INIT_TIMEOUT_MS;
+  const deadline = Date.now() + CREATE_OBJECT_RETRY_MS;
   let lastCreateError: unknown = null;
   while (Date.now() < deadline) {
     try {
