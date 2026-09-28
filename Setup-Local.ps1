@@ -196,7 +196,8 @@ $envLines = @(
     "SELLARI_LOCAL_LOG_DIR=$($paths.Logs)",
     "WBCZ_LOCAL_DB_PASSWORD=$appPassword"
 )
-[System.IO.File]::WriteAllLines($paths.EnvFile, $envLines, [System.Text.UTF8Encoding]::new($false))
+$utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+[System.IO.File]::WriteAllLines($paths.EnvFile, $envLines, $utf8NoBom)
 
 Import-SellariEnvFile -Path $paths.EnvFile
 Assert-SellariLocalSafety
