@@ -479,7 +479,11 @@ def test_successful_discovery_with_no_eligible_certificate_reports_not_visible(
 
     status = bridge.discover(INN)
     assert status["ukep_state"] == "NOT_VISIBLE"
-    assert status["error_code"] is None
+    assert status["error_code"] == "NO_ELIGIBLE_CERTIFICATE"
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.prepare_auth(INN, "browser-session-1")
+    assert exc_info.value.code == "NO_ELIGIBLE_CERTIFICATE"
 
 
 def test_expired_certificate_is_not_eligible_even_without_cryptcp(
