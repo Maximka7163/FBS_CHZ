@@ -90,31 +90,56 @@ def local_preflight() -> dict:
         "CryptoPro CSP detected" if crypto.csp_available else "CryptoPro CSP not detected",
         true_api_required=True,
     )
+    technical_supported = bool(
+        getattr(
+            crypto,
+            "csp_technical_supported",
+            getattr(crypto, "csp_version_supported", False),
+        )
+    )
+    compliance_status = str(getattr(crypto, "csp_compliance_status", "UNKNOWN"))
+    legacy_license_valid = bool(getattr(crypto, "csp_license_valid", False))
+    license_status = str(
+        getattr(
+            crypto,
+            "license_status",
+            "VALID" if legacy_license_valid else "UNKNOWN",
+        )
+    )
+    sspi_status = str(
+        getattr(
+            crypto,
+            "sspi_diagnostic_status",
+            "AVAILABLE"
+            if getattr(crypto, "cryptopro_tls_sspi_available", False)
+            else "UNKNOWN",
+        )
+    )
     add(
         "cryptopro_csp_version",
-        crypto.csp_technical_supported,
+        technical_supported,
         (
             f"{crypto.csp_version or 'unknown'}; technical="
-            + ("SUPPORTED" if crypto.csp_technical_supported else "UNSUPPORTED")
+            + ("SUPPORTED" if technical_supported else "UNSUPPORTED")
         ),
         true_api_required=True,
     )
     add(
         "cryptopro_csp_compliance",
         True,
-        f"compliance={crypto.csp_compliance_status}; informational only",
+        f"compliance={compliance_status}; informational only",
     )
-    license_ready = crypto.license_status != "INVALID"
+    license_ready = license_status != "INVALID"
     add(
         "cryptopro_csp_license",
         license_ready,
-        f"license={crypto.license_status}",
+        f"license={license_status}",
         true_api_required=True,
     )
     add(
         "cryptopro_tls_sspi",
         True,
-        f"SSPI diagnostic={crypto.sspi_diagnostic_status}; not an offline GOST proof",
+        f"SSPI diagnostic={sspi_status}; not an offline GOST proof",
     )
     add(
         "winhttp",
