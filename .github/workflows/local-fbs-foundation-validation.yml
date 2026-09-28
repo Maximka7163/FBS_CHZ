@@ -122,6 +122,28 @@ jobs:
           if ($PSVersionTable.PSVersion.Major -ne 5) {
             throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
           }
+
+          $files = @(
+            'Setup-Local.ps1',
+            'Start-Sellari.ps1',
+            'Stop-Sellari.ps1',
+            'Check-Local.ps1',
+            'scripts/local/Common-Local.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              throw "Windows PowerShell 5.1 parse failed: $file"
+            }
+          }
+
           . ./scripts/local/Common-Local.ps1
 
           $password = New-SellariSecureHex -ByteCount 24
@@ -135,6 +157,13 @@ jobs:
           $emptyDb = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit 0') -FailureMessage 'synthetic DB query failed'
           if ($emptyRole -ne '') { throw "Missing role output was not normalized to empty string." }
           if ($emptyDb -ne '') { throw "Missing database output was not normalized to empty string." }
+          $exitCodeRejected = $false
+          try {
+            Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit 7') -FailureMessage 'synthetic psql failure' | Out-Null
+          } catch {
+            if ($_.Exception.Message -eq 'synthetic psql failure') { $exitCodeRejected = $true }
+          }
+          if (-not $exitCodeRejected) { throw 'Non-zero psql exit code was not rejected.' }
 
           $root = Join-Path $env:RUNNER_TEMP 'sellari-psql-discovery-test'
           $fakePsql = Join-Path $root 'PostgreSQL\16\bin\psql.exe'
