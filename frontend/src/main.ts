@@ -19,6 +19,7 @@ import {
   authenticateLocalBrowserCades,
   BrowserCadesError,
   enumerateBrowserCertificates,
+  getBrowserCadesDiagnostics,
   probeBrowserCades,
   type BrowserCadesCertificate,
 } from "./local_cades";
@@ -26,6 +27,14 @@ import {
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const LOCAL_FBS_ONLY = import.meta.env.VITE_SELLARI_LOCAL_FBS_ONLY === "true";
 const BRAND_NAME = LOCAL_FBS_ONLY ? "Sellari" : "markflow";
+
+if (LOCAL_FBS_ONLY) {
+  (
+    globalThis as typeof globalThis & {
+      __sellariCadesDiagnostics?: typeof getBrowserCadesDiagnostics;
+    }
+  ).__sellariCadesDiagnostics = getBrowserCadesDiagnostics;
+}
 
 let user: UserInfo | null = null;
 let homeHistory: FileItem[] = [];
