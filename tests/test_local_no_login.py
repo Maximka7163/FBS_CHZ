@@ -344,7 +344,12 @@ def test_forged_local_browser_session_cookie_is_rotated(local_factory, tmp_path)
     attacker_chosen = "A" * 43
 
     with TestClient(app) as client:
-        client.cookies.set(LOCAL_BROWSER_SESSION_COOKIE, attacker_chosen)
+        client.cookies.set(
+            LOCAL_BROWSER_SESSION_COOKIE,
+            attacker_chosen,
+            domain="testserver.local",
+            path="/",
+        )
         response = client.get("/api/me")
         assert response.status_code == 200
         issued = client.cookies.get(LOCAL_BROWSER_SESSION_COOKIE)
