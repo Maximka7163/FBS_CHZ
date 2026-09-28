@@ -92,6 +92,17 @@ def test_non_gost_cipher_fails_closed_without_fallback() -> None:
     assert transport.tls_diagnostics()["gost_session_verified"] is False
 
 
+@pytest.mark.parametrize("cipher_suite", sorted(APPROVED_GOST_CIPHER_SUITES))
+def test_each_approved_gost_cipher_is_accepted(cipher_suite: int) -> None:
+    native = FakeNative(cipher_suite=cipher_suite)
+    transport = WindowsWinHttpGostTransport(native=native)
+
+    result = transport.request_json("GET", "/auth/key")
+
+    assert result == {"uuid": "u", "data": "challenge"}
+    assert transport.tls_diagnostics()["gost_session_verified"] is True
+
+
 def test_approved_gost_cipher_ids_are_explicit_and_narrow() -> None:
     assert APPROVED_GOST_CIPHER_SUITES == {0xC100, 0xC101, 0xC102}
 
@@ -177,6 +188,64 @@ def test_native_wrapper_enforces_secure_request_no_client_cert_and_no_redirects(
     assert winhttp.connect_target == (PRODUCTION_HOST, PRODUCTION_PORT)
     assert winhttp.open_request_flags == 0x00800000
     assert any(option == 88 for _, option, _, _ in winhttp.options)
+    assert any(
+        option == 47 and null_buffer and size == 0
+        for _, option, null_buffer, size in winhttp.options
+    )
+
+
+class MissingSecurityInfoWinHttp(FakeWinHttp):
+    def WinHttpQueryOption(self, _request, option, _buffer, _size):
+        assert option == 151
+        return 0
+
+
+class ClientCertRequiredWinHttp(FakeWinHttp):
+    def WinHttpSendRequest(self, *_args):
+        return 0
+
+
+def test_missing_winhttp_security_info_fails_closed() -> None:
+    winhttp = MissingSecurityInfoWinHttp()
+
+    def loader(name: str):
+        return winhttp if name == "winhttp.dll" else object()
+
+    native = _WinHttpNative(dll_loader=loader)
+    native._error = lambda: 0
+
+    with pytest.raises(GostTlsUnavailable, match="WINHTTP_SECURITY_INFO_FAILED"):
+        native.request(
+            host=PRODUCTION_HOST,
+            port=PRODUCTION_PORT,
+            method="GET",
+            target="/api/v3/true-api/auth/key",
+            headers={"Accept": "application/json"},
+            body=None,
+            timeout_ms=1000,
+        )
+
+
+def test_tls_client_certificate_request_fails_closed_without_ukep() -> None:
+    winhttp = ClientCertRequiredWinHttp()
+
+    def loader(name: str):
+        return winhttp if name == "winhttp.dll" else object()
+
+    native = _WinHttpNative(dll_loader=loader)
+    native._error = lambda: 12044
+
+    with pytest.raises(GostTlsUnavailable, match="TLS_CLIENT_CERT_REQUESTED"):
+        native.request(
+            host=PRODUCTION_HOST,
+            port=PRODUCTION_PORT,
+            method="GET",
+            target="/api/v3/true-api/auth/key",
+            headers={"Accept": "application/json"},
+            body=None,
+            timeout_ms=1000,
+        )
+
     assert any(
         option == 47 and null_buffer and size == 0
         for _, option, null_buffer, size in winhttp.options
