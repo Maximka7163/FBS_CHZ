@@ -243,11 +243,20 @@ test("local True API diagnostics expose native transport readiness and explicit 
   const mainSource = await fs.readFile(new URL("../src/main.ts", import.meta.url), "utf8");
   const typeSource = await fs.readFile(new URL("../src/types.ts", import.meta.url), "utf8");
 
-  assert.equal(mainSource.includes("WinHTTP / CryptoPro GOST transport"), true);
+  assert.equal(mainSource.includes("WinHTTP READY"), true);
+  assert.equal(mainSource.includes("Technical"), true);
+  assert.equal(mainSource.includes("Compliance"), true);
+  assert.equal(mainSource.includes("License"), true);
+  assert.equal(mainSource.includes("SSPI diagnostic"), true);
+  assert.equal(mainSource.includes("DISCOVERY_FAILED"), true);
   assert.equal(mainSource.includes("TRUE_API_LOCAL_READY="), true);
   assert.equal(mainSource.includes("TRUE_API_LIVE_VERIFIED="), true);
   assert.equal(mainSource.includes("localTrueApiStatusError"), true);
   assert.equal(mainSource.includes("нужен stunnel_msspi"), false);
   assert.equal(typeSource.includes("native_winhttp_gost_transport_ready"), true);
+  assert.equal(typeSource.includes("csp_compliance_status"), true);
+  assert.equal(typeSource.includes("license_status"), true);
+  assert.equal(typeSource.includes("sspi_diagnostic_status"), true);
+  assert.equal(typeSource.includes("ukep_state"), true);
   assert.equal(typeSource.includes("true_api_live_verified"), true);
 });
