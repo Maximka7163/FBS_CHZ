@@ -625,7 +625,7 @@ class LocalTrueApiReadBridge:
             "ukep_available": visible,
             "ukep_state": "VISIBLE" if visible else "NOT_VISIBLE",
             "candidates": candidates,
-            "error_code": None,
+            "error_code": None if visible else "NO_ELIGIBLE_CERTIFICATE",
         }
 
     def selected_thumbprint(self, participant_inn: str) -> str | None:
@@ -713,7 +713,7 @@ class LocalTrueApiReadBridge:
             )
             if not eligible:
                 raise LocalTrueApiUnavailable(
-                    "CERTIFICATE_NOT_ELIGIBLE",
+                    "NO_ELIGIBLE_CERTIFICATE",
                     "No participant-bound CryptoPro GOST UKEP is available",
                 )
             runtime = self._runtime_for(participant_inn)
