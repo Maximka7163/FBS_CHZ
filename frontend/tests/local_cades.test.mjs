@@ -5,6 +5,7 @@ import {
   authenticateLocalBrowserCades,
   detectBrowserCades,
   enumerateBrowserCertificates,
+  getBrowserCadesDiagnostics,
   probeBrowserCades,
 } from "../src/local_cades.ts";
 
@@ -93,7 +94,13 @@ test("official thenable shape keeps CreateObjectAsync on global cadesplugin", as
 
   const probe = await probeBrowserCades();
 
-  assert.deepEqual(probe, { ready: true, errorCode: null, message: null });
+  assert.equal(probe.ready, true);
+  assert.equal(probe.errorCode, null);
+  assert.equal(probe.message, null);
+  assert.equal(probe.diagnostics.globalPresent, true);
+  assert.equal(probe.diagnostics.globalType, "object");
+  assert.equal(probe.diagnostics.createObjectAsyncType, "function");
+  assert.equal(probe.diagnostics.lastErrorCode, null);
   assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAdESCOM.About"));
 });
 
@@ -135,6 +142,27 @@ test("native object undefined regression becomes stable CREATE_OBJECT_UNAVAILABL
   assert.equal(probe.ready, false);
   assert.equal(probe.errorCode, "CREATE_OBJECT_UNAVAILABLE");
   assert.match(probe.message, /native object|CreateObjectAsync/i);
+  assert.equal(probe.diagnostics.globalPresent, true);
+  assert.equal(probe.diagnostics.createObjectAsyncType, "function");
+  assert.equal(probe.diagnostics.lastErrorCode, "CREATE_OBJECT_UNAVAILABLE");
+  assert.match(probe.diagnostics.lastErrorStack || "", /BrowserCadesError/);
+});
+
+test("safe Browser CAdES diagnostics expose only local runtime shape", async () => {
+  const log = [];
+  installPlugin(log);
+  const probe = await probeBrowserCades();
+  assert.equal(probe.ready, true);
+
+  const diagnostics = getBrowserCadesDiagnostics();
+  assert.equal(diagnostics.globalPresent, true);
+  assert.equal(diagnostics.globalType, "object");
+  assert.equal(diagnostics.createObjectAsyncType, "function");
+  assert.equal(diagnostics.lastErrorCode, null);
+  assert.equal("thumbprint" in diagnostics, false);
+  assert.equal("certificate" in diagnostics, false);
+  assert.equal("pin" in diagnostics, false);
+  assert.equal("signature" in diagnostics, false);
 });
 
 test("typed Browser auth signs only prepared challenge and immediately completes it", async (t) => {
@@ -223,6 +251,8 @@ test("Browser auth exposes no public arbitrary-content signer primitive", async 
   assert.equal(mainSource.includes("prepareLocalBrowserAuth"), false);
   assert.equal(mainSource.includes("completeLocalBrowserAuth"), false);
   assert.equal(mainSource.includes("authenticateLocalBrowserCades"), true);
+  assert.equal(mainSource.includes("__sellariCadesDiagnostics"), true);
+  assert.equal(mainSource.includes("getBrowserCadesDiagnostics"), true);
 });
 
 test("local Browser auth never persists token/signature state in web storage", async () => {
