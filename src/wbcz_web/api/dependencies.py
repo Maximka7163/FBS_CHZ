@@ -57,7 +57,10 @@ def require_session_user(request:Request,db:Session=Depends(get_db))->SessionIde
 def require_user(request:Request,db:Session=Depends(get_db))->AuthenticatedIdentity:
  local_resolver=getattr(request.app.state,"local_principal_resolver",None)
  if local_resolver is not None:
-  try:identity=local_resolver(db,request.app.state.config)
+  browser_session_id=getattr(request.state,"local_browser_session_id",None)
+  if not isinstance(browser_session_id,str) or not browser_session_id:
+   raise HTTPException(status_code=503,detail={"code":"LOCAL_BROWSER_SESSION_UNAVAILABLE","message":"local browser session is unavailable"})
+  try:identity=local_resolver(db,request.app.state.config,browser_session_id)
   except PermissionError as exc:
    raise HTTPException(status_code=503,detail={"code":"LOCAL_OWNER_IDENTITY_UNAVAILABLE","message":str(exc)}) from exc
   if not isinstance(identity,AuthenticatedIdentity):

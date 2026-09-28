@@ -12,6 +12,8 @@ from sqlalchemy.orm import sessionmaker
 
 import wbcz_web.admin as admin_module
 from wbcz_local.app import create_local_app
+from wbcz_local.bridge import LocalTrueApiReadBridge
+from wbcz_local.browser_session import LOCAL_BROWSER_SESSION_COOKIE
 from wbcz_web.auth import hash_password, verify_password
 from wbcz_web.auth.passwords import MIN_PASSWORD_LENGTH
 from wbcz_web.config import WebConfig
@@ -87,17 +89,21 @@ def _seed_owner(factory, *, password: str = OWNER_PASSWORD):
         return user.id, organisation.id, participant.id, user.password_hash
 
 
-def _local_client(factory, tmp_path) -> TestClient:
+def _local_app(factory, tmp_path, *, true_api_bridge=None):
     (tmp_path / "index.html").write_text(
         "<!doctype html><title>Sellari</title><div id='app'></div>",
         encoding="utf-8",
     )
-    app = create_local_app(
+    return create_local_app(
         _config(DB_URL or "postgresql+psycopg://unused:unused@127.0.0.1:5432/unused"),
         session_factory=factory,
         frontend_dist=tmp_path,
+        true_api_bridge=true_api_bridge,
     )
-    return TestClient(app)
+
+
+def _local_client(factory, tmp_path) -> TestClient:
+    return TestClient(_local_app(factory, tmp_path))
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
@@ -296,3 +302,165 @@ def test_local_network_and_csrf_guards_remain_active(local_factory, tmp_path) ->
 
         csrf_blocked = client.post("/api/local/auth/prepare")
         assert csrf_blocked.status_code == 403
+
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_browser_sessions_are_unique_stable_and_secure(local_factory, tmp_path) -> None:
+    user_id, _, _, _ = _seed_owner(local_factory)
+    app = _local_app(local_factory, tmp_path)
+
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        first_a = client_a.get("/api/me")
+        first_b = client_b.get("/api/me")
+        assert first_a.status_code == 200
+        assert first_b.status_code == 200
+
+        session_a = client_a.cookies.get(LOCAL_BROWSER_SESSION_COOKIE)
+        session_b = client_b.cookies.get(LOCAL_BROWSER_SESSION_COOKIE)
+        assert session_a
+        assert session_b
+        assert session_a != session_b
+        assert session_a != f"local-owner:{user_id}"
+        assert session_b != f"local-owner:{user_id}"
+
+        second_a = client_a.get("/api/me")
+        assert second_a.status_code == 200
+        assert client_a.cookies.get(LOCAL_BROWSER_SESSION_COOKIE) == session_a
+
+        cookie_header = first_a.headers.get("set-cookie", "").lower()
+        assert LOCAL_BROWSER_SESSION_COOKIE.lower() + "=" in cookie_header
+        assert "httponly" in cookie_header
+        assert "samesite=strict" in cookie_header
+        assert "path=/" in cookie_header
+        assert "domain=" not in cookie_header
+        assert "secure" not in cookie_header
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_forged_local_browser_session_cookie_is_rotated(local_factory, tmp_path) -> None:
+    _seed_owner(local_factory)
+    app = _local_app(local_factory, tmp_path)
+    attacker_chosen = "A" * 43
+
+    with TestClient(app) as client:
+        client.cookies.set(LOCAL_BROWSER_SESSION_COOKIE, attacker_chosen)
+        response = client.get("/api/me")
+        assert response.status_code == 200
+        issued = client.cookies.get(LOCAL_BROWSER_SESSION_COOKIE)
+        assert issued
+        assert issued != attacker_chosen
+        assert LOCAL_BROWSER_SESSION_COOKIE.lower() in response.headers.get("set-cookie", "").lower()
+
+
+class _BindingDiscovery:
+    def __init__(self, thumbprint: str) -> None:
+        self.thumbprint = thumbprint
+
+    def discover(self) -> dict:
+        return {
+            "candidates": [{
+                "thumbprint": self.thumbprint,
+                "subject": "CN=Sellari Local Binding Test",
+                "certificate_inn": INN,
+                "valid_from": "2020-01-01T00:00:00+00:00",
+                "valid_to": "2035-01-01T00:00:00+00:00",
+                "has_private_key": True,
+                "crypto_provider": "Crypto-Pro GOST R 34.10-2012",
+                "public_key_oid": "1.2.643.7.1.1.1.1",
+            }]
+        }
+
+
+class _BindingRuntime:
+    def __init__(self, challenge: str) -> None:
+        self.challenge = challenge
+        self.complete_calls = 0
+
+    def prepare_auth_challenge(self):
+        return "local-browser-binding-uuid", self.challenge
+
+    def complete_auth(self, *, uuid: str, signature_base64: str):
+        assert uuid == "local-browser-binding-uuid"
+        assert signature_base64 == "BROWSER-CADES-ATTACHED-SIGNATURE"
+        self.complete_calls += 1
+        return {
+            "authenticated": True,
+            "expire_date": "2030-01-01T00:00:00+00:00",
+            "read_only": True,
+            "business_write_enabled": False,
+            "tls": {"gost_session_verified": True},
+        }
+
+    def clear_session(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_browser_cades_prepare_complete_is_bound_to_same_local_client(
+    local_factory,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_owner(local_factory)
+    thumbprint = "A" * 40
+    challenge = "exact-local-browser-session-challenge"
+    runtime = _BindingRuntime(challenge)
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "true_api_read.json",
+        audit_log_path=tmp_path / "true_api_read_audit.jsonl",
+        discovery=_BindingDiscovery(thumbprint),
+        cms_signature_info=lambda _signature: (thumbprint, challenge.encode("utf-8")),
+    )
+    monkeypatch.setattr(bridge, "_build_runtime", lambda _participant_inn: runtime)
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: SimpleNamespace(
+            csp_available=True,
+            gost_transport_available=True,
+            cryptcp_available=False,
+        ),
+    )
+
+    app = _local_app(local_factory, tmp_path, true_api_bridge=bridge)
+    payload = {
+        "signature_base64": "BROWSER-CADES-ATTACHED-SIGNATURE",
+        "selected_certificate_thumbprint": thumbprint,
+    }
+
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        csrf_a = client_a.get("/api/auth/csrf").json()["csrf_token"]
+        csrf_b = client_b.get("/api/auth/csrf").json()["csrf_token"]
+        session_a = client_a.cookies.get(LOCAL_BROWSER_SESSION_COOKIE)
+        session_b = client_b.cookies.get(LOCAL_BROWSER_SESSION_COOKIE)
+        assert session_a and session_b and session_a != session_b
+
+        prepared_response = client_a.post(
+            "/api/local/auth/prepare",
+            headers={"X-CSRF-Token": csrf_a},
+        )
+        assert prepared_response.status_code == 200
+        prepared = prepared_response.json()
+        attempt_id = prepared["attempt_id"]
+        assert bridge._attempts[attempt_id].session_id == session_a
+
+        cross_client = client_b.post(
+            "/api/local/auth/complete",
+            headers={"X-CSRF-Token": csrf_b},
+            json={"attempt_id": attempt_id, **payload},
+        )
+        assert cross_client.status_code == 409
+        assert cross_client.json()["detail"]["code"] == "AUTH_ATTEMPT_MISMATCH"
+        assert runtime.complete_calls == 0
+
+        same_client = client_a.post(
+            "/api/local/auth/complete",
+            headers={"X-CSRF-Token": csrf_a},
+            json={"attempt_id": attempt_id, **payload},
+        )
+        assert same_client.status_code == 200
+        assert same_client.json()["authenticated"] is True
+        assert runtime.complete_calls == 1

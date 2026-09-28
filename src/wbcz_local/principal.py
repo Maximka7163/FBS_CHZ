@@ -14,6 +14,8 @@ from wbcz_web.models.security import (
 )
 from wbcz_web.services.authorization import ROLE_PERMISSIONS, Role
 
+from .browser_session import is_well_formed_local_browser_session_id
+
 
 class LocalOwnerResolutionError(PermissionError):
     """Local single-user identity is missing, ambiguous, or inconsistent."""
@@ -22,8 +24,11 @@ class LocalOwnerResolutionError(PermissionError):
 def resolve_local_owner_identity(
     db: Session,
     config: WebConfig,
+    browser_session_id: str | None = None,
 ) -> AuthenticatedIdentity:
-    """Resolve exactly one bootstrapped OWNER without password/session auth."""
+    """Resolve one bootstrapped OWNER and bind it to a verified local browser session."""
+    if not is_well_formed_local_browser_session_id(browser_session_id):
+        raise LocalOwnerResolutionError("local browser session is unavailable")
     rows = list(
         db.execute(
             select(User, MembershipRecord, OrganisationRecord)
@@ -81,7 +86,7 @@ def resolve_local_owner_identity(
     return AuthenticatedIdentity(
         user_id=user.id,
         username=user.username,
-        session_id=f"local-owner:{user.id}",
+        session_id=browser_session_id,
         organisation_id=organisation.id,
         participant_id=participant.id,
         participant_inn=participant.inn,

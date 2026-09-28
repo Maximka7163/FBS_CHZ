@@ -16,6 +16,7 @@ from wbcz_web.middleware import RequestContextMiddleware
 from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
 
 from .bridge import LocalTrueApiReadBridge
+from .browser_session import LocalBrowserSessionMiddleware, LocalBrowserSessionStore
 from .principal import resolve_local_owner_identity
 from .routes import local_router
 
@@ -106,12 +107,16 @@ def create_local_app(
     app.state.session_factory = session_factory or build_session_factory(config)
     app.state.local_single_user_no_login = True
     app.state.local_principal_resolver = resolve_local_owner_identity
+    app.state.local_browser_sessions = LocalBrowserSessionStore()
     app.state.integration_secret_provider = ReadOnlySecretProvider()
     app.state.wb_http_adapter = None
     app.state.wb_rate_limiter = StatefulWbRateLimiter()
     app.state.draining = False
     app.state.local_true_api_bridge = true_api_bridge or LocalTrueApiReadBridge.from_env()
 
+    # Keep the browser-session issuer behind TrustedHost while preserving the
+    # existing RequestContext -> TrustedHost ordering for local requests.
+    app.add_middleware(LocalBrowserSessionMiddleware)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.trusted_hosts))
     app.add_middleware(RequestContextMiddleware)
 
