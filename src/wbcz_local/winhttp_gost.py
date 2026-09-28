@@ -40,9 +40,6 @@ _MAX_RESPONSE = 16 * 1024 * 1024
 _WINHTTP_ACCESS_TYPE_NO_PROXY = 1
 _WINHTTP_FLAG_SECURE = 0x00800000
 _WINHTTP_OPTION_CLIENT_CERT_CONTEXT = 47
-# winhttp.h: ((PCCERT_CONTEXT) -1). This sentinel tells WinHTTP not to
-# automatically select/send a client certificate when the server requests one.
-_WINHTTP_NO_CLIENT_CERT_CONTEXT = ctypes.c_void_p(-1)
 _WINHTTP_OPTION_REDIRECT_POLICY = 88
 _WINHTTP_OPTION_REDIRECT_POLICY_NEVER = 0
 _WINHTTP_OPTION_SECURITY_INFO = 151
@@ -236,18 +233,79 @@ class _WinHttpNative:
             raise GostTlsUnavailable("TLS_CLIENT_CERT_REQUESTED")
         raise GostTlsUnavailable(f"{operation}_FAILED:{error}")
 
-    def structural_initializable(self) -> bool:
-        handle = self.winhttp.WinHttpOpen(
-            "SellariMarking/WinHTTP-GOST",
-            _WINHTTP_ACCESS_TYPE_NO_PROXY,
-            None,
-            None,
-            0,
+    def _configure_request_safety(self, request: Any) -> None:
+        # Windows SDK contract for WINHTTP_OPTION_CLIENT_CERT_CONTEXT:
+        # NULL + length 0 explicitly disables automatic client-certificate
+        # selection. The user's UKEP remains available only to Browser CAdES.
+        self._check(
+            self.winhttp.WinHttpSetOption(
+                request,
+                _WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+                None,
+                0,
+            ),
+            "WINHTTP_NO_CLIENT_CERT",
         )
-        if not handle:
+        never_redirect = wintypes.DWORD(_WINHTTP_OPTION_REDIRECT_POLICY_NEVER)
+        self._check(
+            self.winhttp.WinHttpSetOption(
+                request,
+                _WINHTTP_OPTION_REDIRECT_POLICY,
+                ctypes.byref(never_redirect),
+                ctypes.sizeof(never_redirect),
+            ),
+            "WINHTTP_REDIRECT_POLICY",
+        )
+
+    def structural_initializable(self) -> bool:
+        handles: list[Any] = []
+        try:
+            session = self.winhttp.WinHttpOpen(
+                "SellariMarking/WinHTTP-GOST structural probe",
+                _WINHTTP_ACCESS_TYPE_NO_PROXY,
+                None,
+                None,
+                0,
+            )
+            if not session:
+                return False
+            handles.append(session)
+
+            connection = self.winhttp.WinHttpConnect(
+                session,
+                PRODUCTION_HOST,
+                PRODUCTION_PORT,
+                0,
+            )
+            if not connection:
+                return False
+            handles.append(connection)
+
+            request = self.winhttp.WinHttpOpenRequest(
+                connection,
+                "GET",
+                PRODUCTION_BASE_PATH + "/auth/key",
+                None,
+                None,
+                None,
+                _WINHTTP_FLAG_SECURE,
+            )
+            if not request:
+                return False
+            handles.append(request)
+
+            # Structural probe is deliberately no-network: only prove that the
+            # mandatory request options can be configured on this WinHTTP stack.
+            self._configure_request_safety(request)
+            return True
+        except Exception:
             return False
-        self.winhttp.WinHttpCloseHandle(handle)
-        return True
+        finally:
+            for handle in reversed(handles):
+                try:
+                    self.winhttp.WinHttpCloseHandle(handle)
+                except Exception:
+                    pass
 
     def request(
         self,
@@ -283,16 +341,6 @@ class _WinHttpNative:
                 ),
                 "WINHTTP_TIMEOUTS",
             )
-            never_redirect = wintypes.DWORD(_WINHTTP_OPTION_REDIRECT_POLICY_NEVER)
-            self._check(
-                self.winhttp.WinHttpSetOption(
-                    session,
-                    _WINHTTP_OPTION_REDIRECT_POLICY,
-                    ctypes.byref(never_redirect),
-                    ctypes.sizeof(never_redirect),
-                ),
-                "WINHTTP_REDIRECT_POLICY",
-            )
 
             connection = self.winhttp.WinHttpConnect(
                 session, PRODUCTION_HOST, PRODUCTION_PORT, 0
@@ -308,15 +356,7 @@ class _WinHttpNative:
                 self._check(False, "WINHTTP_OPEN_REQUEST")
             handles.append(request)
 
-            self._check(
-                self.winhttp.WinHttpSetOption(
-                    request,
-                    _WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
-                    _WINHTTP_NO_CLIENT_CERT_CONTEXT,
-                    0,
-                ),
-                "WINHTTP_NO_CLIENT_CERT",
-            )
+            self._configure_request_safety(request)
 
             if headers:
                 header_text = "".join(
