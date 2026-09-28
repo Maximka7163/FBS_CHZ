@@ -233,9 +233,17 @@ export interface LocalTrueApiCandidate {
 export interface LocalTrueApiStatus {
   cryptopro_available: boolean;
   csp_available: boolean;
+  csp_version: string | null;
+  csp_version_supported: boolean;
+  csp_license_valid: boolean;
   browser_cades_available: boolean | null;
   ukep_available: boolean;
   gost_transport_available: boolean;
+  native_winhttp_gost_transport_ready: boolean;
+  winhttp_available: boolean;
+  cryptopro_tls_sspi_available: boolean;
+  winhttp_gost_transport_initializable: boolean;
+  transport_reasons: string[];
   cryptcp_available: boolean;
   candidates: LocalTrueApiCandidate[];
   error_code: string | null;
@@ -243,6 +251,10 @@ export interface LocalTrueApiStatus {
   authenticated: boolean;
   expire_date: string | null;
   gost_session_verified: boolean;
+  true_api_local_ready_backend_prerequisites: boolean;
+  true_api_local_ready: boolean | null;
+  true_api_local_ready_reasons: string[];
+  true_api_live_verified: boolean;
   real_read_enabled: boolean;
   read_only: boolean;
   business_write_enabled: boolean;

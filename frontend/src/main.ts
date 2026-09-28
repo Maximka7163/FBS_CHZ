@@ -40,6 +40,7 @@ let pollTimer: number | null = null;
 let enrollmentIntent: EnrollmentIntent | null = null;
 let kiLookupMessage = "";
 let localTrueApiStatus: LocalTrueApiStatus | null = null;
+let localTrueApiStatusError = "";
 let localTrueApiBusy = false;
 let browserCadesAvailable: boolean | null = null;
 let browserCertificates: BrowserCadesCertificate[] = [];
@@ -207,7 +208,10 @@ function kiLookupBlock(): string {
 function localTrueApiBlock(): string {
   if (!LOCAL_FBS_ONLY) return "";
   if (!localTrueApiStatus) {
-    return `<section class="ki-lookup-card"><div><strong>Честный знак / CryptoPro</strong><span>Проверяем локальную УКЭП…</span></div></section>`;
+    const message = localTrueApiStatusError
+      ? `Локальный статус Честного знака недоступен: ${localTrueApiStatusError}`
+      : "Проверяем локальную УКЭП и WinHTTP/CryptoPro transport…";
+    return `<section class="ki-lookup-card"><div><strong>Честный знак / CryptoPro</strong><span>${esc(message)}</span></div></section>`;
   }
 
   const status = localTrueApiStatus;
@@ -218,6 +222,12 @@ function localTrueApiBlock(): string {
   );
   const candidates = browserCertificates.filter((item) => backendEligible.has(item.thumbprint));
   const selected = candidates.find((item) => item.thumbprint === selectedBrowserThumbprint);
+  const browserEligibleVisible = candidates.length > 0;
+  const trueApiLocalReady = Boolean(
+    status.true_api_local_ready_backend_prerequisites
+      && browserCadesAvailable === true
+      && browserEligibleVisible,
+  );
   const rows = candidates.map((certificate) => {
     const server = backendEligible.get(certificate.thumbprint)!;
     const isSelected = certificate.thumbprint === selectedBrowserThumbprint;
@@ -233,33 +243,36 @@ function localTrueApiBlock(): string {
   }).join("");
 
   const cspText = status.csp_available
-    ? "CryptoPro CSP обнаружен"
+    ? `CryptoPro CSP ${status.csp_version || "версия не определена"} · ${status.csp_license_valid ? "лицензия проверена" : "лицензия не подтверждена"}`
     : "CryptoPro CSP не обнаружен";
   const pluginText = browserCadesAvailable === true
-    ? "Browser CAdES обнаружен"
+    ? "Browser CAdES готов"
     : browserCadesAvailable === false
-      ? "Browser CAdES не обнаружен"
+      ? "Browser CAdES не готов"
       : "Проверяем Browser CAdES…";
-  const transportText = status.gost_transport_available
-    ? "GOST transport готов"
-    : "GOST transport не готов: нужен stunnel_msspi для True API";
+  const transportText = status.native_winhttp_gost_transport_ready
+    ? "WinHTTP / CryptoPro GOST transport готов"
+    : `WinHTTP / CryptoPro GOST transport не готов${status.transport_reasons.length ? `: ${status.transport_reasons.join(", ")}` : ""}`;
+  const readinessText = `TRUE_API_LOCAL_READY=${trueApiLocalReady ? "true" : "false"} · TRUE_API_LIVE_VERIFIED=${status.true_api_live_verified ? "true" : "false"}`;
 
   const connection = status.authenticated
     ? `<strong>Честный знак подключён · только чтение</strong>
-       <span>GOST TLS ${status.gost_session_verified ? "подтверждён" : "ожидает подтверждения"}${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
+       <span>GOST TLS ${status.gost_session_verified ? "подтверждён" : "не подтверждён"}${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
     : `${rows || '<span>Подходящая УКЭП в CurrentUser/My не найдена.</span>'}
        <button id="local-true-api-auth" class="secondary-button"
-         ${localTrueApiBusy || !selected || !status.gost_transport_available ? "disabled" : ""}>
+         ${localTrueApiBusy || !selected || !trueApiLocalReady ? "disabled" : ""}>
          ${localTrueApiBusy ? "Подключаем…" : "Подключить Честный знак"}
        </button>`;
 
   return `<section class="ki-lookup-card">
     <div><strong>Честный знак / CryptoPro</strong><span>Business writes отключены</span></div>
     <p class="integration-note">${esc(cspText)} · ${esc(pluginText)} · ${esc(transportText)}</p>
+    <p class="integration-note">${esc(readinessText)}</p>
     ${selected ? `<p class="integration-note">Выбрана УКЭП: ${esc(selected.subject || selected.thumbprint)}</p>` : ""}
     ${connection}
     ${status.error_code ? `<p class="login-error">${esc(status.error_code)}</p>` : ""}
-    <p class="integration-note">PIN обрабатывает CryptoPro/токен. Sellari не получает и не хранит PIN, private key или uuidToken. cryptcp.exe для Browser CAdES не требуется.</p>
+    ${localTrueApiStatusError ? `<p class="login-error">${esc(localTrueApiStatusError)}</p>` : ""}
+    <p class="integration-note">PIN обрабатывает CryptoPro/токен. Sellari не получает и не хранит PIN, private key или uuidToken. cryptcp.exe не требуется.</p>
   </section>`;
 }
 
@@ -270,32 +283,44 @@ function rerenderCurrentSurface(): void {
 
 async function refreshLocalTrueApiStatus(): Promise<void> {
   if (!LOCAL_FBS_ONLY || !user) return;
-  try {
-    const [status, pluginDetected] = await Promise.all([
-      api.localTrueApiStatus(),
-      detectBrowserCades(),
-    ]);
-    localTrueApiStatus = status;
-    browserCadesAvailable = pluginDetected;
-    browserCertificates = pluginDetected ? await enumerateBrowserCertificates() : [];
 
-    const eligible = new Set(
-      status.candidates.filter((item) => item.eligible).map((item) => item.thumbprint),
-    );
-    if (!selectedBrowserThumbprint && status.selected_thumbprint) {
-      selectedBrowserThumbprint = status.selected_thumbprint;
-    }
-    if (
-      selectedBrowserThumbprint
-      && (!eligible.has(selectedBrowserThumbprint)
-        || !browserCertificates.some((item) => item.thumbprint === selectedBrowserThumbprint))
-    ) {
-      selectedBrowserThumbprint = "";
-    }
+  localTrueApiStatusError = "";
+  try {
+    localTrueApiStatus = await api.localTrueApiStatus();
   } catch (error) {
-    localTrueApiStatus = null;
+    localTrueApiStatusError = readError(error);
+    showToast(localTrueApiStatusError, "error");
+  }
+
+  try {
+    browserCadesAvailable = await detectBrowserCades();
+    browserCertificates = browserCadesAvailable
+      ? await enumerateBrowserCertificates()
+      : [];
+  } catch (error) {
+    browserCadesAvailable = false;
     browserCertificates = [];
-    showToast(readError(error), "error");
+    const browserError = readError(error);
+    localTrueApiStatusError = localTrueApiStatusError
+      ? `${localTrueApiStatusError}; ${browserError}`
+      : browserError;
+    showToast(browserError, "error");
+  }
+
+  const status = localTrueApiStatus;
+  if (!status) return;
+  const eligible = new Set(
+    status.candidates.filter((item) => item.eligible).map((item) => item.thumbprint),
+  );
+  if (!selectedBrowserThumbprint && status.selected_thumbprint) {
+    selectedBrowserThumbprint = status.selected_thumbprint;
+  }
+  if (
+    selectedBrowserThumbprint
+    && (!eligible.has(selectedBrowserThumbprint)
+      || !browserCertificates.some((item) => item.thumbprint === selectedBrowserThumbprint))
+  ) {
+    selectedBrowserThumbprint = "";
   }
 }
 

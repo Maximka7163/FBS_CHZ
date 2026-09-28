@@ -148,12 +148,12 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "LOCALAPPDATA" in common
     assert "does **not** redistribute CryptoPro" in readme
     assert "WBCZ_TRUE_API_REAL_READ_ENABLED=true" in setup
-    assert "stunnel_msspi.exe" in setup
+    assert "stunnel_msspi.exe" not in setup
+    assert "WBCZ_CRYPTOPRO_STUNNEL" not in setup
     assert "cryptcp.exe" in setup
     assert 'throw "CryptoPro cryptcp.exe was not detected' not in setup
-    assert 'throw "CryptoPro stunnel_msspi.exe was not detected' not in setup
-    assert "OK for Browser CAdES auth" in setup
-    assert "True API auth/read will remain blocked" in setup
+    assert "local True API does not require it" in setup
+    assert "native Windows WinHTTP / SSPI / CryptoPro" in setup
     assert "WBCZ_TRUE_API_WRITE_ENABLED=true" not in setup
     assert "D54CFE9186C4B6DBE9ED73D83F289D31DA7B50000B48BA3E7C278E820578086B" in setup
     assert "Publish-SellariPinnedArtifact" in setup
@@ -267,10 +267,15 @@ def test_local_postgresql_reachability_is_independent_from_psql_client_discovery
 ) -> None:
     class CryptoStatus:
         csp_available = True
+        csp_version = "5.0.13000"
+        csp_version_supported = True
+        csp_license_valid = True
+        cryptopro_tls_sspi_available = True
+        winhttp_available = True
+        winhttp_gost_transport_initializable = True
         cryptcp_available = False
         cryptcp_path = None
-        gost_transport_available = False
-        stunnel_path = None
+        gost_transport_available = True
 
     class Connection:
         def __enter__(self):
@@ -318,3 +323,14 @@ def test_start_sellari_uses_python_preflight_without_path_only_psql_check() -> N
     assert "Get-Command psql" not in start
     assert 'shutil.which("psql") or shutil.which("psql.exe")' in preflight
     assert '"PostgreSQL" / "16" / "bin" / "psql.exe"' in preflight
+
+
+def test_local_preflight_reports_true_api_readiness_separately_from_app_readiness() -> None:
+    preflight = (ROOT / "src" / "wbcz_local" / "preflight.py").read_text(encoding="utf-8")
+    assert '"true_api_local_ready"' in preflight
+    assert '"true_api_live_verified": False' in preflight
+    assert "APP_READY=" in preflight
+    assert "TRUE_API_LOCAL_READY=" in preflight
+    assert "TRUE_API_LIVE_VERIFIED=false" in preflight
+    assert 'print("READY"' not in preflight
+    assert "stunnel_msspi" not in preflight

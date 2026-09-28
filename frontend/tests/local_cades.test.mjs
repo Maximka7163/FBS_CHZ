@@ -179,3 +179,18 @@ test("local Browser auth never persists token/signature state in web storage", a
   assert.equal(apiSource.includes("uuidToken"), false);
   assert.equal(apiSource.includes("uuid_token"), false);
 });
+
+
+test("local True API diagnostics expose native transport readiness and explicit failures", async () => {
+  const fs = await import("node:fs/promises");
+  const mainSource = await fs.readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const typeSource = await fs.readFile(new URL("../src/types.ts", import.meta.url), "utf8");
+
+  assert.equal(mainSource.includes("WinHTTP / CryptoPro GOST transport"), true);
+  assert.equal(mainSource.includes("TRUE_API_LOCAL_READY="), true);
+  assert.equal(mainSource.includes("TRUE_API_LIVE_VERIFIED="), true);
+  assert.equal(mainSource.includes("localTrueApiStatusError"), true);
+  assert.equal(mainSource.includes("нужен stunnel_msspi"), false);
+  assert.equal(typeSource.includes("native_winhttp_gost_transport_ready"), true);
+  assert.equal(typeSource.includes("true_api_live_verified"), true);
+});

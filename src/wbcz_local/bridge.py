@@ -18,11 +18,9 @@ from wbcz.models import KiState
 from wbcz.true_api import normalize_cis
 from wbcz_ui.live_true_api import (
     AuthSession,
-    CryptoProGostTlsTunnel,
     JsonlLiveAudit,
     GostTlsUnavailable,
     LiveAuthorizationRequired,
-    ReadOnlyTrueApiTransport,
     TrueApiCisesInfoAdapter,
     TrueApiError,
     TrueApiHttpError,
@@ -30,6 +28,8 @@ from wbcz_ui.live_true_api import (
     WindowsCryptoProCertificateDiscovery,
     _find_cryptopro_binary,
 )
+
+from .winhttp_gost import WindowsWinHttpGostTransport, probe_native_gost_transport
 
 
 class LocalTrueApiUnavailable(RuntimeError):
@@ -41,26 +41,32 @@ class LocalTrueApiUnavailable(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class CryptoProFoundationStatus:
     windows: bool
+    windows_build: int | None
     csp_available: bool
+    csp_version: str | None
+    csp_version_supported: bool
+    csp_license_valid: bool
     browser_cades_available: bool | None
     ukep_available: bool | None
     gost_transport_available: bool
+    winhttp_available: bool
+    cryptopro_tls_sspi_available: bool
+    winhttp_gost_transport_initializable: bool
     cryptcp_available: bool
     cryptcp_path: str | None
-    stunnel_path: str | None
+    readiness_reasons: tuple[str, ...]
     real_read_enabled: bool
     business_write_enabled: bool = False
 
     @property
     def cryptopro_csp_detected(self) -> bool:
-        # Compatibility field for existing local diagnostics only.
         return self.csp_available
 
     def safe_dict(self) -> dict:
         value = asdict(self)
         value["cryptopro_csp_detected"] = self.csp_available
+        value["native_winhttp_gost_transport_ready"] = self.gost_transport_available
         return value
-
 
 def _candidate_paths(explicit: str | None, names: Iterable[str]) -> list[Path]:
     result: list[Path] = []
@@ -119,29 +125,41 @@ def _windows_csp_registry_detected() -> bool:
 
 def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
     windows = platform.system().lower() == "windows"
-    cryptcp = _find_optional_cryptopro("cryptcp.exe", os.getenv("WBCZ_CRYPTOPRO_CRYPTCP"))
-    stunnel = _find_optional_cryptopro(
-        "stunnel_msspi.exe", os.getenv("WBCZ_CRYPTOPRO_STUNNEL")
+    native = probe_native_gost_transport()
+    cryptcp = _find_optional_cryptopro(
+        "cryptcp.exe", os.getenv("WBCZ_CRYPTOPRO_CRYPTCP")
     )
     csp = _first_existing(_candidate_paths(None, ("csptest.exe", "csptest")))
-    csp_available = bool(windows and (csp or _windows_csp_registry_detected()))
+    csp_available = bool(
+        windows
+        and (
+            native.csp_installed
+            or csp
+            or _windows_csp_registry_detected()
+        )
+    )
     return CryptoProFoundationStatus(
         windows=windows,
+        windows_build=native.windows_build,
         csp_available=csp_available,
-        # Browser plug-in state is authoritative only inside Chromium/Yandex.
+        csp_version=native.csp_version,
+        csp_version_supported=native.csp_version_supported,
+        csp_license_valid=native.csp_license_valid,
         browser_cades_available=None,
         ukep_available=None,
-        gost_transport_available=bool(stunnel),
+        gost_transport_available=native.backend_ready,
+        winhttp_available=native.winhttp_available,
+        cryptopro_tls_sspi_available=native.cryptopro_tls_sspi_available,
+        winhttp_gost_transport_initializable=native.winhttp_gost_transport_initializable,
         cryptcp_available=bool(cryptcp),
         cryptcp_path=str(cryptcp) if cryptcp else None,
-        stunnel_path=str(stunnel) if stunnel else None,
+        readiness_reasons=native.reasons,
         real_read_enabled=bool(
             os.getenv("WBCZ_TRUE_API_REAL_READ_ENABLED", "false").strip().lower()
             in {"1", "true", "yes", "on"}
         ),
         business_write_enabled=False,
     )
-
 
 def _browser_cades_signature_info(
     signature_base64: str,
@@ -213,7 +231,7 @@ class LocalTrueApiReadRuntime:
         self,
         *,
         participant_inn: str,
-        transport: ReadOnlyTrueApiTransport,
+        transport: Any,
     ) -> None:
         self.participant_inn = participant_inn
         self.transport = transport
@@ -292,8 +310,7 @@ class LocalTrueApiReadRuntime:
 
     def close(self) -> None:
         self.clear_session()
-        tunnel = getattr(self.transport, "tunnel", None)
-        close = getattr(tunnel, "close", None)
+        close = getattr(self.transport, "close", None)
         if callable(close):
             close()
 
@@ -369,7 +386,6 @@ class LocalTrueApiReadBridge:
         settings_path: str | Path | None = None,
         audit_log_path: str | Path | None = None,
         cryptcp_path: str | Path | None = None,
-        stunnel_path: str | Path | None = None,
         discovery: Any | None = None,
         cms_signature_info: Any | None = None,
     ) -> None:
@@ -388,7 +404,6 @@ class LocalTrueApiReadBridge:
         self.settings_path = Path(settings_path) if settings_path else config_dir / "true_api_read.json"
         self.audit_log_path = Path(audit_log_path) if audit_log_path else log_dir / "true_api_read_audit.jsonl"
         self.cryptcp_path = Path(cryptcp_path) if cryptcp_path else None
-        self.stunnel_path = Path(stunnel_path) if stunnel_path else None
         self.discovery = discovery or WindowsCryptoProCertificateDiscovery(
             cryptcp_path=self.cryptcp_path
         )
@@ -414,12 +429,10 @@ class LocalTrueApiReadBridge:
             )
         ).expanduser()
         cryptcp = os.getenv("WBCZ_CRYPTOPRO_CRYPTCP", "").strip() or None
-        stunnel = os.getenv("WBCZ_CRYPTOPRO_STUNNEL", "").strip() or None
         return cls(
             settings_path=config_dir / "true_api_read.json",
             audit_log_path=log_dir / "true_api_read_audit.jsonl",
             cryptcp_path=cryptcp,
-            stunnel_path=stunnel,
         )
 
     def _settings(self) -> dict[str, str]:
@@ -488,9 +501,17 @@ class LocalTrueApiReadBridge:
             return {
                 "cryptopro_available": components.csp_available,
                 "csp_available": components.csp_available,
+                "csp_version": components.csp_version,
+                "csp_version_supported": components.csp_version_supported,
+                "csp_license_valid": components.csp_license_valid,
                 "browser_cades_available": None,
                 "ukep_available": False,
                 "gost_transport_available": components.gost_transport_available,
+                "native_winhttp_gost_transport_ready": components.gost_transport_available,
+                "winhttp_available": components.winhttp_available,
+                "cryptopro_tls_sspi_available": components.cryptopro_tls_sspi_available,
+                "winhttp_gost_transport_initializable": components.winhttp_gost_transport_initializable,
+                "transport_reasons": list(components.readiness_reasons),
                 "cryptcp_available": components.cryptcp_available,
                 "candidates": [],
                 "error_code": "CRYPTOPRO_CERTIFICATE_DISCOVERY_FAILED",
@@ -532,9 +553,17 @@ class LocalTrueApiReadBridge:
         return {
             "cryptopro_available": components.csp_available,
             "csp_available": components.csp_available,
+            "csp_version": components.csp_version,
+            "csp_version_supported": components.csp_version_supported,
+            "csp_license_valid": components.csp_license_valid,
             "browser_cades_available": None,
             "ukep_available": any(item.get("eligible") for item in candidates),
             "gost_transport_available": components.gost_transport_available,
+            "native_winhttp_gost_transport_ready": components.gost_transport_available,
+            "winhttp_available": components.winhttp_available,
+            "cryptopro_tls_sspi_available": components.cryptopro_tls_sspi_available,
+            "winhttp_gost_transport_initializable": components.winhttp_gost_transport_initializable,
+            "transport_reasons": list(components.readiness_reasons),
             "cryptcp_available": components.cryptcp_available,
             "candidates": candidates,
             "error_code": None,
@@ -584,9 +613,12 @@ class LocalTrueApiReadBridge:
         return thumbprint
 
     def _build_runtime(self, participant_inn: str) -> LocalTrueApiReadRuntime:
+        foundation = inspect_local_cryptopro_foundation()
+        if not foundation.gost_transport_available:
+            reason = foundation.readiness_reasons[0] if foundation.readiness_reasons else "WINHTTP_GOST_TRANSPORT_NOT_READY"
+            raise GostTlsUnavailable(reason)
         audit = JsonlLiveAudit(self.audit_log_path)
-        tunnel = CryptoProGostTlsTunnel(self.stunnel_path)
-        transport = ReadOnlyTrueApiTransport(audit=audit, tunnel=tunnel)
+        transport = WindowsWinHttpGostTransport(audit=audit)
         return LocalTrueApiReadRuntime(
             participant_inn=participant_inn,
             transport=transport,
@@ -774,17 +806,37 @@ class LocalTrueApiReadBridge:
                 tls = runtime.transport.tls_diagnostics()
             except Exception:
                 tls = {}
+        authenticated = bool(runtime and runtime.authenticated)
+        gost_verified = bool(tls.get("gost_session_verified"))
+        eligible_visible = bool(inventory.get("ukep_available"))
+        backend_ready = bool(inventory.get("native_winhttp_gost_transport_ready"))
+        reasons = list(inventory.get("transport_reasons") or [])
+        if not eligible_visible:
+            reasons.append("ELIGIBLE_UKEP_NOT_VISIBLE")
+        # Browser CAdES availability is authoritative only inside the browser.
+        # The frontend combines this backend structural state with its plugin
+        # probe; the backend never trusts a browser claim as a TLS substitute.
+        reasons.append("BROWSER_CADES_RUNTIME_CHECK_REQUIRED")
+        if not error_code and not backend_ready:
+            transport_reasons = inventory.get("transport_reasons") or []
+            error_code = transport_reasons[0] if transport_reasons else "WINHTTP_GOST_TRANSPORT_NOT_READY"
         return {
             **inventory,
             "error_code": error_code,
             "selected_thumbprint": selected,
-            "authenticated": bool(runtime and runtime.authenticated),
+            "authenticated": authenticated,
             "expire_date": (
                 runtime.expire_date.isoformat()
                 if runtime and runtime.expire_date is not None
                 else None
             ),
-            "gost_session_verified": bool(tls.get("gost_session_verified")),
+            "gost_session_verified": gost_verified,
+            "true_api_local_ready_backend_prerequisites": bool(
+                backend_ready and eligible_visible
+            ),
+            "true_api_local_ready": None,
+            "true_api_local_ready_reasons": list(dict.fromkeys(reasons)),
+            "true_api_live_verified": bool(authenticated and gost_verified),
             "real_read_enabled": True,
             "read_only": True,
             "business_write_enabled": False,

@@ -47,6 +47,22 @@ EXACT_CHALLENGE = " EXACT-CRPT-CHALLENGE\nЮникод "
 EXACT_CHALLENGE_BYTES = EXACT_CHALLENGE.encode("utf-8")
 
 
+def _foundation_status(gost_ready: bool = True):
+    return type("Status", (), {
+        "csp_available": True,
+        "csp_version": "5.0.13000",
+        "csp_version_supported": True,
+        "csp_license_valid": True,
+        "gost_transport_available": gost_ready,
+        "winhttp_available": gost_ready,
+        "cryptopro_tls_sspi_available": gost_ready,
+        "winhttp_gost_transport_initializable": gost_ready,
+        "cryptcp_available": False,
+        "cryptcp_path": None,
+        "readiness_reasons": () if gost_ready else ("WINHTTP_GOST_TRANSPORT_NOT_INITIALIZABLE",),
+    })()
+
+
 class FakeTunnel:
     def __init__(self) -> None:
         self.closed = False
@@ -315,11 +331,7 @@ def test_invalid_cms_never_reaches_true_api_simple_sign_in(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
     prepared = bridge.prepare_auth(INN, "browser-session-1")
 
@@ -348,11 +360,7 @@ def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
     )
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
 
     status = bridge.discover(INN)
@@ -380,11 +388,7 @@ def test_expired_certificate_is_not_eligible_even_without_cryptcp(
     )
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
 
     assert bridge.discover(INN)["candidates"][0]["eligible"] is False
@@ -404,11 +408,7 @@ def test_typed_prepare_complete_attempt_keeps_token_server_side_and_is_one_time(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
 
     prepared = bridge.prepare_auth(INN, "browser-session-1")
@@ -464,11 +464,7 @@ def test_auth_attempt_rejects_wrong_session_and_wrong_thumbprint(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
     prepared = bridge.prepare_auth(INN, "browser-session-1")
 
@@ -507,11 +503,7 @@ def test_browser_cades_cms_signer_must_match_selected_thumbprint(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
     prepared = bridge.prepare_auth(INN, "browser-session-1")
 
@@ -545,11 +537,7 @@ def test_browser_cades_attached_content_must_match_exact_auth_challenge(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
     prepared = bridge.prepare_auth(INN, "browser-session-1")
 
@@ -580,11 +568,7 @@ def test_expired_auth_attempt_is_rejected_before_simple_sign_in(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
     prepared = bridge.prepare_auth(INN, "browser-session-1")
     bridge._attempts[prepared["attempt_id"]].expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -623,11 +607,7 @@ def test_participant_inn_is_server_side_attempt_state_not_frontend_input(
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
     prepared = bridge.prepare_auth(INN, "browser-session-1")
     bridge.complete_auth(
@@ -676,11 +656,7 @@ def test_persisted_wrong_participant_certificate_blocks_read(
     )
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": True,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(True),
     )
     build_calls = 0
 
@@ -717,7 +693,7 @@ def test_missing_gost_transport_on_authenticated_read_preserves_transport_error_
 
         def read_states(self, cises):
             self.read_calls += 1
-            raise GostTlsUnavailable("stunnel_msspi unavailable")
+            raise GostTlsUnavailable("native WinHTTP unavailable")
 
         def close(self):
             pass
@@ -732,11 +708,7 @@ def test_missing_gost_transport_on_authenticated_read_preserves_transport_error_
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: runtime)
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": False,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(False),
     )
 
     with pytest.raises(LocalTrueApiUnavailable) as exc_info:
@@ -746,7 +718,7 @@ def test_missing_gost_transport_on_authenticated_read_preserves_transport_error_
     assert runtime.read_calls == 1
 
 
-def test_missing_stunnel_is_reported_as_transport_not_ready_not_cryptopro_missing(
+def test_missing_native_winhttp_is_reported_as_transport_not_ready_not_cryptopro_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -755,7 +727,7 @@ def test_missing_stunnel_is_reported_as_transport_not_ready_not_cryptopro_missin
         expire_date = None
 
         def prepare_auth_challenge(self):
-            raise RuntimeError("stunnel missing")
+            raise RuntimeError("native WinHTTP missing")
 
         def close(self):
             pass
@@ -769,11 +741,7 @@ def test_missing_stunnel_is_reported_as_transport_not_ready_not_cryptopro_missin
     monkeypatch.setattr(bridge, "_build_runtime", lambda participant_inn: TransportBlockedRuntime())
     monkeypatch.setattr(
         "wbcz_local.bridge.inspect_local_cryptopro_foundation",
-        lambda: type("Status", (), {
-            "csp_available": True,
-            "gost_transport_available": False,
-            "cryptcp_available": False,
-        })(),
+        lambda: _foundation_status(False),
     )
 
     with pytest.raises(LocalTrueApiUnavailable) as exc_info:

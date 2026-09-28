@@ -75,6 +75,7 @@ jobs:
           tests/test_local_fbs_foundation.py
           tests/test_local_no_login.py
           tests/test_local_true_api_read.py
+          tests/test_local_winhttp_gost.py
           tests/test_fbs_control_policy.py
           tests/test_control.py
 
