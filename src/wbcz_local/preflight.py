@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import sys
+from pathlib import Path
 
 from sqlalchemy import text
 
@@ -13,6 +15,38 @@ from wbcz_web.db import build_engine
 
 from .app import assert_local_foundation_safety, frontend_dist_from_env
 from .bridge import inspect_local_cryptopro_foundation
+
+
+def find_local_psql(
+    *,
+    windows: bool | None = None,
+    environ: dict[str, str] | None = None,
+) -> str | None:
+    """Find psql using the same Windows discovery contract as Setup-Local.ps1."""
+
+    path_hit = shutil.which("psql") or shutil.which("psql.exe")
+    if path_hit:
+        return str(Path(path_hit).resolve())
+
+    is_windows = platform.system().lower() == "windows" if windows is None else windows
+    if not is_windows:
+        return None
+
+    env = os.environ if environ is None else environ
+    roots: list[str] = []
+    for key in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        value = env.get(key)
+        if value and value not in roots:
+            roots.append(value)
+    default_program_files = r"C:\Program Files"
+    if default_program_files not in roots:
+        roots.append(default_program_files)
+
+    for root in roots:
+        candidate = Path(root) / "PostgreSQL" / "16" / "bin" / "psql.exe"
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return None
 
 
 def local_preflight() -> dict:
@@ -74,11 +108,11 @@ def local_preflight() -> dict:
         "required": False,
     })
 
-    psql = shutil.which("psql")
+    psql = find_local_psql(windows=windows)
     checks.append({
         "name": "postgresql_client",
         "ok": bool(psql),
-        "detail": psql or "psql not found in PATH",
+        "detail": psql or "psql not found in PATH or standard PostgreSQL 16 Windows locations",
         "required": True,
     })
 
