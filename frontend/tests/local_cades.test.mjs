@@ -5,6 +5,7 @@ import {
   authenticateLocalBrowserCades,
   detectBrowserCades,
   enumerateBrowserCertificates,
+  probeBrowserCades,
 } from "../src/local_cades.ts";
 
 function installPlugin(log) {
@@ -59,6 +60,7 @@ function installPlugin(log) {
     CADESCOM_CADES_BES: 1,
     async CreateObjectAsync(name) {
       log.push(["CreateObjectAsync", name]);
+      if (name === "CAdESCOM.About") return {};
       if (name === "CAPICOM.Store") return store;
       if (name === "CAdESCOM.CPSigner") return signer;
       if (name === "CAdESCOM.CadesSignedData") return signedData;
@@ -78,6 +80,38 @@ test("Browser CAdES plugin detection and certificate enumeration use CurrentUser
   assert.equal(certs[0].thumbprint, "AABBCC");
   assert.equal(certs[0].subject, "CN=Test, INN=1234567890");
   assert.ok(log.some((entry) => entry[0] === "Open" && entry[1] === 2 && entry[2] === "My"));
+});
+
+
+test("official thenable shape keeps CreateObjectAsync on global cadesplugin", async () => {
+  const log = [];
+  installPlugin(log);
+  const raw = globalThis.cadesplugin;
+  raw.then = (resolve) => {
+    queueMicrotask(() => resolve(undefined));
+  };
+
+  const probe = await probeBrowserCades();
+
+  assert.deepEqual(probe, { ready: true, errorCode: null, message: null });
+  assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAdESCOM.About"));
+});
+
+test("native object undefined regression becomes stable CREATE_OBJECT_UNAVAILABLE", async () => {
+  globalThis.cadesplugin = {
+    then(resolve) {
+      queueMicrotask(() => resolve(undefined));
+    },
+    async CreateObjectAsync() {
+      throw new TypeError("Cannot read properties of undefined (reading 'CreateObjectAsync')");
+    },
+  };
+
+  const probe = await probeBrowserCades();
+
+  assert.equal(probe.ready, false);
+  assert.equal(probe.errorCode, "CREATE_OBJECT_UNAVAILABLE");
+  assert.match(probe.message, /native object|CreateObjectAsync/i);
 });
 
 test("typed Browser auth signs only prepared challenge and immediately completes it", async (t) => {
