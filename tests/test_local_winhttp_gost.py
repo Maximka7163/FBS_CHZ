@@ -12,11 +12,19 @@ import pytest
 import wbcz_local.winhttp_gost as native_module
 from wbcz_local.winhttp_gost import (
     APPROVED_GOST_CIPHER_SUITES,
+    COMPLIANCE_UNCERTIFIED,
+    LICENSE_INVALID,
+    LICENSE_UNKNOWN,
+    LICENSE_VALID,
+    SSPI_UNAVAILABLE,
     NativeHttpResponse,
     PRODUCTION_HOST,
     PRODUCTION_PORT,
     WindowsWinHttpGostTransport,
     _WinHttpNative,
+    _probe_cadescom_license,
+    _probe_csp,
+    _sspi_structural_status,
     evaluate_true_api_local_readiness,
     probe_native_gost_transport,
 )
@@ -301,27 +309,30 @@ class ClientCertOptionFailureWinHttp(ProbeWinHttp):
         return 1
 
 
-def _successful_probe(tmp_path: Path, *, winhttp: FakeWinHttp | None = None):
+def _successful_probe(
+    tmp_path: Path,
+    *,
+    winhttp: FakeWinHttp | None = None,
+    release: str = "5.0.13000",
+    license_status: str = LICENSE_VALID,
+    sspi_status: bool | str = True,
+):
     csptest = tmp_path / "csptest.exe"
     cpconfig = tmp_path / "cpconfig.exe"
     csptest.write_bytes(b"synthetic")
     cpconfig.write_bytes(b"synthetic")
 
     def runner(command, **_kwargs):
-        if Path(command[0]) == csptest:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    "CSP (Type:80) v5.0.10013 KC1 Release Ver:5.0.13000 "
-                    "OS:Windows CPU:AMD64 FastCode:READY:AVX,AVX2.\n"
-                    "AcquireContext: OK.\n[ErrorCode: 0x00000000]\n"
-                ),
-                stderr="",
-            )
-        assert Path(command[0]) == cpconfig
+        assert Path(command[0]) == csptest, "cpconfig/other CLI must not decide readiness"
         return subprocess.CompletedProcess(
-            command, 0, stdout="License: permanent; status: valid\n", stderr=""
+            command,
+            0,
+            stdout=(
+                f"CSP (Type:80) KC1 Release Ver:{release} "
+                "OS:Windows CPU:AMD64 FastCode:READY:AVX,AVX2.\n"
+                "[ErrorCode: 0x00000000]\n"
+            ),
+            stderr="",
         )
 
     winhttp = winhttp or ProbeWinHttp()
@@ -340,7 +351,8 @@ def _successful_probe(tmp_path: Path, *, winhttp: FakeWinHttp | None = None):
         csptest_path=csptest,
         cpconfig_path=cpconfig,
         runner=runner,
-        sspi_probe=lambda _secur32: True,
+        license_probe=lambda: license_status,
+        sspi_probe=lambda _secur32: sspi_status,
     )
 
 
@@ -351,7 +363,8 @@ def test_structural_probe_accepts_supported_windows_csp_and_native_dlls(
     probe = _successful_probe(tmp_path, winhttp=winhttp)
     assert probe.backend_ready is True
     assert probe.csp_version == "5.0.13000"
-    assert probe.csp_version_supported is True
+    assert probe.csp_technical_supported is True
+    assert probe.license_status == LICENSE_VALID
     assert probe.csp_license_valid is True
     assert probe.cryptopro_tls_sspi_available is True
     assert probe.winhttp_gost_transport_initializable is True
@@ -365,6 +378,126 @@ def test_structural_probe_accepts_supported_windows_csp_and_native_dlls(
     assert any(option == 88 for _, option, _, _ in winhttp.options)
     assert winhttp.send_calls == 0
     assert winhttp.receive_calls == 0
+
+
+def test_csp_5_0_13455_is_technically_supported_but_uncertified(
+    tmp_path: Path,
+) -> None:
+    probe = _successful_probe(tmp_path, release="5.0.13455")
+
+    assert probe.csp_version == "5.0.13455"
+    assert probe.csp_technical_supported is True
+    assert probe.csp_compliance_status == COMPLIANCE_UNCERTIFIED
+    assert probe.backend_ready is True
+
+
+def test_genuinely_old_csp_build_is_technically_unsupported(tmp_path: Path) -> None:
+    probe = _successful_probe(tmp_path, release="5.0.12000")
+
+    assert probe.csp_technical_supported is False
+    assert probe.backend_ready is False
+    assert "UNSUPPORTED_CRYPTOPRO_VERSION" in probe.reasons
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "expected"),
+    [
+        ('{"isValid":true}', 0, LICENSE_VALID),
+        ('{"isValid":false}', 0, LICENSE_INVALID),
+        ("", 3, LICENSE_UNKNOWN),
+        ("непредвиденный локализованный вывод", 0, LICENSE_UNKNOWN),
+    ],
+)
+def test_cadescom_license_is_tristate(
+    stdout: str,
+    returncode: int,
+    expected: str,
+) -> None:
+    def runner(command, **_kwargs):
+        assert command[0] == "powershell.exe"
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
+
+    status, metadata = _probe_cadescom_license(runner=runner)
+
+    assert status == expected
+    if expected in {LICENSE_VALID, LICENSE_INVALID}:
+        assert metadata == {"source": "CAdESCOM.CPLicense"}
+    else:
+        assert metadata == {}
+
+
+def test_cadescom_license_probe_never_requests_or_logs_full_serial() -> None:
+    source = inspect.getsource(_probe_cadescom_license)
+    assert "CAdESCOM.CPLicense" in source
+    assert "IsValid" in source
+    assert "SerialNumber" not in source
+
+
+def test_cpconfig_stdout_is_not_a_license_or_readiness_verdict(tmp_path: Path) -> None:
+    csptest = tmp_path / "csptest.exe"
+    cpconfig = tmp_path / "cpconfig.exe"
+    csptest.write_bytes(b"synthetic")
+    cpconfig.write_bytes(b"synthetic")
+    calls = []
+
+    def runner(command, **_kwargs):
+        calls.append(command)
+        if Path(command[0]) != csptest:
+            raise AssertionError("cpconfig must not be executed by CSP compatibility probe")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="Release Ver:5.0.13455\n",
+            stderr="",
+        )
+
+    installed, version, technical, compliance = _probe_csp(
+        csptest_path=csptest,
+        cpconfig_path=cpconfig,
+        runner=runner,
+    )
+
+    assert installed is True
+    assert version == "5.0.13455"
+    assert technical is True
+    assert compliance == COMPLIANCE_UNCERTIFIED
+    assert len(calls) == 1
+
+
+def test_license_unknown_and_sspi_unavailable_do_not_block_offline_readiness(
+    tmp_path: Path,
+) -> None:
+    probe = _successful_probe(
+        tmp_path,
+        license_status=LICENSE_UNKNOWN,
+        sspi_status=False,
+    )
+
+    assert probe.license_status == LICENSE_UNKNOWN
+    assert probe.sspi_diagnostic_status == SSPI_UNAVAILABLE
+    assert probe.cryptopro_tls_sspi_available is False
+    assert probe.backend_ready is True
+    assert "CRYPTOPRO_CSP_LICENSE_INVALID" not in probe.reasons
+
+
+def test_only_explicit_invalid_license_blocks_offline_readiness(tmp_path: Path) -> None:
+    probe = _successful_probe(tmp_path, license_status=LICENSE_INVALID)
+
+    assert probe.backend_ready is False
+    assert "CRYPTOPRO_CSP_LICENSE_INVALID" in probe.reasons
+
+
+def test_sspi_probe_is_api_diagnostic_not_literal_cryptopro_package_match() -> None:
+    class Secur32:
+        def InitSecurityInterfaceW(self):
+            return 1
+
+    assert _sspi_structural_status(Secur32()) == "AVAILABLE"
+    assert _sspi_structural_status(object()) == "UNAVAILABLE"
+
+    source = Path(native_module.__file__).read_text(encoding="utf-8")
+    assert "EnumerateSecurityPackagesW" not in source
+    assert "_cryptopro_sspi_package_available" not in source
 
 
 def test_structural_probe_fails_closed_when_null_client_cert_option_cannot_be_set(
@@ -399,32 +532,30 @@ if os.name == "nt":
 
 
 @pytest.mark.parametrize(
-    ("field", "reason"),
+    ("field", "value", "reason"),
     [
-        ("windows_supported", "UNSUPPORTED_WINDOWS"),
-        ("winhttp_available", "WINHTTP_UNAVAILABLE"),
-        ("secur32_available", "SSPI_UNAVAILABLE"),
-        ("crypt32_available", "CRYPT32_UNAVAILABLE"),
-        ("csp_installed", "CRYPTOPRO_CSP_NOT_INSTALLED"),
-        ("csp_version_supported", "UNSUPPORTED_CRYPTOPRO_VERSION"),
-        ("csp_license_valid", "CRYPTOPRO_CSP_LICENSE_NOT_VALID"),
-        ("cryptopro_tls_sspi_available", "CRYPTOPRO_TLS_SSPI_UNAVAILABLE"),
+        ("windows_supported", False, "UNSUPPORTED_WINDOWS"),
+        ("winhttp_available", False, "WINHTTP_UNAVAILABLE"),
+        ("csp_installed", False, "CRYPTOPRO_CSP_NOT_INSTALLED"),
+        ("csp_technical_supported", False, "UNSUPPORTED_CRYPTOPRO_VERSION"),
         (
             "winhttp_gost_transport_initializable",
+            False,
             "WINHTTP_GOST_TRANSPORT_NOT_INITIALIZABLE",
         ),
     ],
 )
-def test_readiness_fails_closed_for_each_backend_prerequisite(
+def test_readiness_fails_closed_for_each_hard_backend_prerequisite(
     tmp_path: Path,
     field: str,
+    value: object,
     reason: str,
 ) -> None:
     probe = _successful_probe(tmp_path)
     broken = replace(
         probe,
         **{
-            field: False,
+            field: value,
             "reasons": tuple(dict.fromkeys((*probe.reasons, reason))),
         },
     )
@@ -435,6 +566,20 @@ def test_readiness_fails_closed_for_each_backend_prerequisite(
     )
     assert result.true_api_local_ready is False
     assert reason in result.reasons
+
+
+def test_diagnostic_dll_or_sspi_status_does_not_become_hard_readiness_gate(
+    tmp_path: Path,
+) -> None:
+    probe = _successful_probe(tmp_path)
+    diagnostic_only = replace(
+        probe,
+        secur32_available=False,
+        crypt32_available=False,
+        sspi_diagnostic_status=SSPI_UNAVAILABLE,
+    )
+
+    assert diagnostic_only.backend_ready is True
 
 
 def test_readiness_requires_browser_cades_and_visible_eligible_ukep(
@@ -467,7 +612,7 @@ def test_readiness_requires_browser_cades_and_visible_eligible_ukep(
 
 
 def test_legacy_optional_tools_are_not_readiness_inputs(tmp_path: Path) -> None:
-    probe = _successful_probe(tmp_path)
+    probe = _successful_probe(tmp_path, license_status=LICENSE_UNKNOWN, sspi_status=False)
     assert evaluate_true_api_local_readiness(
         probe,
         browser_cades_available=True,
@@ -476,55 +621,3 @@ def test_legacy_optional_tools_are_not_readiness_inputs(tmp_path: Path) -> None:
     source = Path(native_module.__file__).read_text(encoding="utf-8")
     assert "cryptcp.exe" not in source
     assert "stunnel_msspi.exe" not in source
-
-
-
-def test_structural_probe_rejects_missing_cryptopro_sspi_package(
-    tmp_path: Path,
-) -> None:
-    csptest = tmp_path / "csptest.exe"
-    cpconfig = tmp_path / "cpconfig.exe"
-    csptest.write_bytes(b"synthetic")
-    cpconfig.write_bytes(b"synthetic")
-
-    def runner(command, **_kwargs):
-        if Path(command[0]) == csptest:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    "CSP (Type:80) v5.0.10013 KC1 Release Ver:5.0.13000 "
-                    "OS:Windows CPU:AMD64 FastCode:READY:AVX,AVX2.\n"
-                    "AcquireContext: OK.\n[ErrorCode: 0x00000000]\n"
-                ),
-                stderr="",
-            )
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout="License: permanent; status: valid\n",
-            stderr="",
-        )
-
-    winhttp = ProbeWinHttp()
-
-    def loader(name: str):
-        if name == "winhttp.dll":
-            return winhttp
-        if name in {"secur32.dll", "crypt32.dll"}:
-            return object()
-        raise OSError(name)
-
-    probe = probe_native_gost_transport(
-        system="Windows",
-        windows_build=26100,
-        dll_loader=loader,
-        csptest_path=csptest,
-        cpconfig_path=cpconfig,
-        runner=runner,
-        sspi_probe=lambda _secur32: False,
-    )
-
-    assert probe.cryptopro_tls_sspi_available is False
-    assert probe.backend_ready is False
-    assert "CRYPTOPRO_TLS_SSPI_UNAVAILABLE" in probe.reasons
