@@ -158,6 +158,18 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "Get-FileHash" in common
     assert "SHA256" in common
     assert "CreateObjectAsync" not in setup
+    assert "RandomNumberGenerator]::Fill" not in setup
+    assert "[Convert]::ToHexString" not in setup
+    assert "New-SellariSecureHex -ByteCount 24" in setup
+    assert "$psql = Find-SellariPsql" in setup
+    assert setup.count("Invoke-SellariPsqlScalar") >= 3
+    assert "function New-SellariSecureHex" in common
+    assert "RandomNumberGenerator]::Create()" in common
+    assert "$rng.GetBytes($bytes)" in common
+    assert "[System.BitConverter]::ToString($bytes)" in common
+    assert "function Find-SellariPsql" in common
+    assert "PostgreSQL\\16\\bin\\psql.exe" in common
+    assert "function Invoke-SellariPsqlScalar" in common
 
 
 def test_local_frontend_build_hides_non_fbs_settings_without_changing_default_build() -> None:
