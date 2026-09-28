@@ -269,7 +269,11 @@ def test_local_postgresql_reachability_is_independent_from_psql_client_discovery
         csp_available = True
         csp_version = "5.0.13000"
         csp_version_supported = True
+        csp_technical_supported = True
+        csp_compliance_status = "UNKNOWN"
         csp_license_valid = True
+        license_status = "VALID"
+        sspi_diagnostic_status = "AVAILABLE"
         cryptopro_tls_sspi_available = True
         winhttp_available = True
         winhttp_gost_transport_initializable = True
