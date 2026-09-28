@@ -158,6 +158,10 @@ function Invoke-SellariPsqlNative {
         [Parameter(Mandatory=$true)][string[]]$Arguments
     )
 
+    if (-not (Test-Path -LiteralPath $PsqlPath -PathType Leaf)) {
+        throw "PostgreSQL client executable is unavailable: $PsqlPath"
+    }
+
     # Windows PowerShell 5.1 promotes native stderr to NativeCommandError when
     # ErrorActionPreference=Stop. psql legitimately writes authentication and
     # SQL errors to stderr, including the expected first-install readiness
@@ -168,8 +172,12 @@ function Invoke-SellariPsqlNative {
     try {
         $ErrorActionPreference = "Continue"
         try {
+            $LASTEXITCODE = $null
             $stdout = & $PsqlPath @Arguments 2> $stderrPath
             $exitCode = $LASTEXITCODE
+            if ($null -eq $exitCode) {
+                throw "PostgreSQL client process did not return an exit code."
+            }
         } catch {
             # Process launch/runtime failures are not an expected psql result.
             # Preserve them instead of converting them to readiness=false.
