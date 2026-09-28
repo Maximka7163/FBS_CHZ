@@ -10,6 +10,10 @@ export interface BrowserCadesCertificate {
 type AsyncCadesObject = Record<string, any>;
 type CadesPlugin = AsyncCadesObject & {
   CreateObjectAsync(name: string): Promise<AsyncCadesObject>;
+  then?: (
+    onfulfilled?: ((value?: unknown) => unknown) | null,
+    onrejected?: ((reason?: unknown) => unknown) | null,
+  ) => unknown;
   CAPICOM_CURRENT_USER_STORE?: number;
   CAPICOM_MY_STORE?: string;
   CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED?: number;
@@ -17,69 +21,195 @@ type CadesPlugin = AsyncCadesObject & {
   CADESCOM_CADES_BES?: number;
 };
 
+export type BrowserCadesErrorCode =
+  | "SCRIPT_NOT_LOADED"
+  | "PLUGIN_INIT_FAILED"
+  | "CREATE_OBJECT_UNAVAILABLE";
+
+export class BrowserCadesError extends Error {
+  readonly code: BrowserCadesErrorCode;
+
+  constructor(code: BrowserCadesErrorCode, message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "BrowserCadesError";
+    this.code = code;
+  }
+}
+
+export interface BrowserCadesProbe {
+  ready: boolean;
+  errorCode: BrowserCadesErrorCode | null;
+  message: string | null;
+}
+
+const PLUGIN_INIT_TIMEOUT_MS = 8000;
 let activationScriptPromise: Promise<void> | null = null;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  code: BrowserCadesErrorCode,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = globalThis.setTimeout(
+      () => reject(new BrowserCadesError(code, message)),
+      PLUGIN_INIT_TIMEOUT_MS,
+    );
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        globalThis.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 async function ensureActivationScript(): Promise<void> {
   const target = globalThis as typeof globalThis & { cadesplugin?: unknown };
   if (target.cadesplugin) return;
   if (typeof document === "undefined") {
-    throw new Error("CryptoPro Browser activation script недоступен");
+    throw new BrowserCadesError(
+      "SCRIPT_NOT_LOADED",
+      "CryptoPro cadesplugin_api.js недоступен",
+    );
   }
   if (!activationScriptPromise) {
     activationScriptPromise = new Promise<void>((resolve, reject) => {
       const existing = document.querySelector<HTMLScriptElement>(
         'script[data-sellari-cadesplugin="true"]',
       );
-      if (existing) {
-        existing.addEventListener("load", () => resolve(), { once: true });
-        existing.addEventListener(
-          "error",
-          () => reject(new Error("Не удалось загрузить cadesplugin_api.js")),
-          { once: true },
+      const onLoad = () => {
+        if (target.cadesplugin) resolve();
+        else reject(
+          new BrowserCadesError(
+            "PLUGIN_INIT_FAILED",
+            "cadesplugin_api.js загружен, но globalThis.cadesplugin не создан",
+          ),
         );
+      };
+      const onError = () => reject(
+        new BrowserCadesError(
+          "SCRIPT_NOT_LOADED",
+          "Не удалось загрузить cadesplugin_api.js",
+        ),
+      );
+      if (existing) {
+        existing.addEventListener("load", onLoad, { once: true });
+        existing.addEventListener("error", onError, { once: true });
         return;
       }
       const script = document.createElement("script");
       script.src = "/cadesplugin_api.js";
       script.async = true;
       script.dataset.sellariCadesplugin = "true";
-      script.addEventListener("load", () => resolve(), { once: true });
-      script.addEventListener(
-        "error",
-        () => reject(new Error("Не удалось загрузить cadesplugin_api.js")),
-        { once: true },
-      );
+      script.addEventListener("load", onLoad, { once: true });
+      script.addEventListener("error", onError, { once: true });
       document.head.appendChild(script);
     });
   }
-  await activationScriptPromise;
+  try {
+    await withTimeout(
+      activationScriptPromise,
+      "SCRIPT_NOT_LOADED",
+      "Таймаут загрузки cadesplugin_api.js",
+    );
+  } catch (error) {
+    activationScriptPromise = null;
+    if (error instanceof BrowserCadesError) throw error;
+    throw new BrowserCadesError(
+      "SCRIPT_NOT_LOADED",
+      "Не удалось загрузить cadesplugin_api.js",
+      error,
+    );
+  }
 }
 
 async function plugin(): Promise<CadesPlugin> {
   await ensureActivationScript();
   const raw = (globalThis as typeof globalThis & { cadesplugin?: unknown })
-    .cadesplugin as (CadesPlugin & PromiseLike<unknown>) | undefined;
-  if (!raw) throw new Error("CryptoPro Browser plug-in не обнаружен");
+    .cadesplugin as CadesPlugin | undefined;
+  if (!raw) {
+    throw new BrowserCadesError(
+      "PLUGIN_INIT_FAILED",
+      "CryptoPro Browser plug-in не обнаружен",
+    );
+  }
+
+  // Official cadesplugin_api.js exposes window.cadesplugin as a thenable whose
+  // methods remain on the global object. Ignore the resolved value entirely:
+  // it may be undefined and is not the API object.
   if (typeof raw.then === "function") {
-    await raw;
+    try {
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          raw.then?.(() => resolve(), (reason) => reject(reason));
+        }),
+        "PLUGIN_INIT_FAILED",
+        "Таймаут инициализации CryptoPro Browser plug-in",
+      );
+    } catch (error) {
+      if (error instanceof BrowserCadesError) throw error;
+      throw new BrowserCadesError(
+        "PLUGIN_INIT_FAILED",
+        "CryptoPro Browser plug-in не инициализирован",
+        error,
+      );
+    }
   }
+
   if (typeof raw.CreateObjectAsync !== "function") {
-    throw new Error("CryptoPro Browser plug-in недоступен");
+    throw new BrowserCadesError(
+      "CREATE_OBJECT_UNAVAILABLE",
+      "CryptoPro CreateObjectAsync недоступен",
+    );
   }
-  return raw as CadesPlugin;
+
+  // Method presence alone is insufficient: in Chromium/Yandex the wrapper can
+  // exist while its internal native extension object is still unavailable.
+  // CAdESCOM.About is an inert capability probe and performs no signing.
+  try {
+    await withTimeout(
+      Promise.resolve(raw.CreateObjectAsync("CAdESCOM.About")),
+      "CREATE_OBJECT_UNAVAILABLE",
+      "Таймаут CreateObjectAsync",
+    );
+  } catch (error) {
+    if (error instanceof BrowserCadesError) throw error;
+    throw new BrowserCadesError(
+      "CREATE_OBJECT_UNAVAILABLE",
+      "CryptoPro native object недоступен для CreateObjectAsync",
+      error,
+    );
+  }
+  return raw;
+}
+
+export async function probeBrowserCades(): Promise<BrowserCadesProbe> {
+  try {
+    await plugin();
+    return { ready: true, errorCode: null, message: null };
+  } catch (error) {
+    if (error instanceof BrowserCadesError) {
+      return { ready: false, errorCode: error.code, message: error.message };
+    }
+    return {
+      ready: false,
+      errorCode: "PLUGIN_INIT_FAILED",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function detectBrowserCades(): Promise<boolean> {
+  return (await probeBrowserCades()).ready;
 }
 
 function normalizedThumbprint(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, "").toUpperCase();
-}
-
-export async function detectBrowserCades(): Promise<boolean> {
-  try {
-    await plugin();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export async function enumerateBrowserCertificates(): Promise<BrowserCadesCertificate[]> {
