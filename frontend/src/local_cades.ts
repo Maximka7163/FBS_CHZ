@@ -45,7 +45,7 @@ export interface BrowserCadesProbe {
   message: string | null;
 }
 
-const PLUGIN_INIT_TIMEOUT_MS = 8000;
+const PLUGIN_INIT_TIMEOUT_MS = 20000;
 const CREATE_OBJECT_RETRY_MS = 1500;
 let activationScriptPromise: Promise<void> | null = null;
 
