@@ -153,21 +153,52 @@ jobs:
 
           # psql -Atq can legitimately return no stdout for a missing role/DB.
           # The shared scalar helper must normalize that to an empty string.
-          $emptyRole = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit 0') -FailureMessage 'synthetic role query failed'
-          $emptyDb = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit 0') -FailureMessage 'synthetic DB query failed'
+          $emptyRole = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit /b 0') -FailureMessage 'synthetic role query failed'
+          $emptyDb = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit /b 0') -FailureMessage 'synthetic DB query failed'
           if ($emptyRole -ne '') { throw "Missing role output was not normalized to empty string." }
           if ($emptyDb -ne '') { throw "Missing database output was not normalized to empty string." }
-          $exitCodeRejected = $false
-          try {
-            Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit 7') -FailureMessage 'synthetic psql failure' | Out-Null
-          } catch {
-            if ($_.Exception.Message -eq 'synthetic psql failure') { $exitCodeRejected = $true }
-          }
-          if (-not $exitCodeRejected) { throw 'Non-zero psql exit code was not rejected.' }
-          # GitHub's Windows PowerShell wrapper propagates LASTEXITCODE at step end.
-          # The non-zero code above was expected and asserted, so clear test-harness state.
-          $global:LASTEXITCODE = 0
 
+          # Reproduce the real first-install case: native stderr + non-zero under
+          # global ErrorActionPreference=Stop must become ready=false, not a
+          # terminating NativeCommandError.
+          $beforeProbeEap = $ErrorActionPreference
+          $ready = Test-SellariPsqlReady -PsqlPath $env:ComSpec -Arguments @(
+            '/d', '/c', 'echo expected-auth-failure 1>&2 & exit /b 7'
+          )
+          if ($ready) { throw 'Expected failed psql-like readiness probe returned true.' }
+          if ($ErrorActionPreference -ne $beforeProbeEap) { throw 'Readiness probe did not restore ErrorActionPreference.' }
+
+          # stderr must never contaminate scalar stdout. Exit 0 still returns
+          # only the successful stdout value.
+          $scalar = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @(
+            '/d', '/c', 'echo scalar-ok & echo benign-stderr 1>&2 & exit /b 0'
+          ) -FailureMessage 'synthetic scalar success unexpectedly failed'
+          if ($scalar -ne 'scalar-ok') { throw "Scalar stdout was contaminated or parsed incorrectly: '$scalar'" }
+
+          # Non-zero scalar/native SQL commands must reach controlled exit-code
+          # handling instead of surfacing PowerShell NativeCommandError.
+          $scalarRejected = $false
+          try {
+            Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @(
+              '/d', '/c', 'echo scalar-failure 1>&2 & exit /b 8'
+            ) -FailureMessage 'controlled scalar failure' | Out-Null
+          } catch {
+            if ($_.Exception.Message -eq 'controlled scalar failure') { $scalarRejected = $true }
+          }
+          if (-not $scalarRejected) { throw 'Non-zero scalar command did not return the controlled FailureMessage.' }
+
+          $requiredRejected = $false
+          try {
+            Invoke-SellariPsqlRequired -PsqlPath $env:ComSpec -Arguments @(
+              '/d', '/c', 'echo required-sql-failure 1>&2 & exit /b 9'
+            ) -FailureMessage 'controlled required SQL failure' | Out-Null
+          } catch {
+            if ($_.Exception.Message -eq 'controlled required SQL failure') { $requiredRejected = $true }
+          }
+          if (-not $requiredRejected) { throw 'Required SQL failure was not fail-closed with the controlled message.' }
+
+          # Expected synthetic non-zero native exits above were asserted.
+          $global:LASTEXITCODE = 0
           $root = Join-Path $env:RUNNER_TEMP 'sellari-psql-discovery-test'
           $fakePsql = Join-Path $root 'PostgreSQL\16\bin\psql.exe'
           New-Item -ItemType Directory -Force -Path (Split-Path -Parent $fakePsql) | Out-Null
