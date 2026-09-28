@@ -125,85 +125,12 @@ jobs:
           . ./scripts/local/Common-Local.ps1
 
           $password = New-SellariSecureHex -ByteCount 24
-          if ($password -notmatch '^[0-9a-f]{48}        shell: pwsh
-        run: |
-          . ./scripts/local/Common-Local.ps1
-          $root = Join-Path $env:RUNNER_TEMP "sellari-pinned-cades-test"
-          Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $root | Out-Null
-
-          $good = Join-Path $root "good.js"
-          $published = Join-Path $root "published.js"
-          [System.IO.File]::WriteAllBytes($good, [System.Text.Encoding]::UTF8.GetBytes("audited-cades-artifact"))
-          $expected = (Get-FileHash -LiteralPath $good -Algorithm SHA256).Hash
-          Publish-SellariPinnedArtifact -CandidatePath $good -DestinationPath $published -ExpectedSha256 $expected
-          if (-not (Test-Path -LiteralPath $published)) { throw "Verified artifact was not published." }
-          Assert-SellariPinnedSha256 -Path $published -ExpectedSha256 $expected | Out-Null
-
-          $mutated = Join-Path $root "mutated.js"
-          $mustNotPublish = Join-Path $root "must-not-publish.js"
-          [System.IO.File]::WriteAllBytes($mutated, [System.Text.Encoding]::UTF8.GetBytes("mutated-cades-artifact"))
-          $rejected = $false
-          try {
-            Publish-SellariPinnedArtifact -CandidatePath $mutated -DestinationPath $mustNotPublish -ExpectedSha256 $expected
-          } catch {
-            $rejected = $true
-          }
-          if (-not $rejected) { throw "Mutated artifact was not rejected." }
-          if (Test-Path -LiteralPath $mustNotPublish) { throw "Mutated artifact was published." }
-
-      - name: SignedCms signature-only integrity semantics
-        shell: pwsh
-        run: |
-          Add-Type -AssemblyName System.Security.Cryptography.Pkcs
-          $rsa = [System.Security.Cryptography.RSA]::Create(2048)
-          try {
-            $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-              "CN=Sellari Synthetic CI",
-              $rsa,
-              [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-              [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
-            )
-            $certificate = $request.CreateSelfSigned(
-              [DateTimeOffset]::UtcNow.AddMinutes(-1),
-              [DateTimeOffset]::UtcNow.AddHours(1)
-            )
-            $content = [System.Text.Encoding]::UTF8.GetBytes("synthetic-browser-cades-auth-challenge")
-            $contentInfo = [System.Security.Cryptography.Pkcs.ContentInfo]::new($content)
-            $signed = [System.Security.Cryptography.Pkcs.SignedCms]::new($contentInfo, $false)
-            $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($certificate)
-            $signed.ComputeSignature($signer)
-            $encoded = $signed.Encode()
-
-            $valid = [System.Security.Cryptography.Pkcs.SignedCms]::new()
-            $valid.Decode($encoded)
-            if ($valid.Detached) { throw "Synthetic CMS unexpectedly detached." }
-            if ($valid.SignerInfos.Count -ne 1) { throw "Synthetic CMS signer count mismatch." }
-            # Same semantics used by wbcz_local.bridge: integrity only. Chain
-            # eligibility is a separate participant/certificate policy.
-            $valid.CheckSignature($true)
-
-            $mutated = [byte[]]$encoded.Clone()
-            $mutated[$mutated.Length - 8] = $mutated[$mutated.Length - 8] -bxor 1
-            $rejected = $false
-            try {
-              $invalid = [System.Security.Cryptography.Pkcs.SignedCms]::new()
-              $invalid.Decode($mutated)
-              $invalid.CheckSignature($true)
-            } catch {
-              $rejected = $true
-            }
-            if (-not $rejected) { throw "Tampered CMS unexpectedly passed CheckSignature(true)." }
-          } finally {
-            $rsa.Dispose()
-          }
-) {
+          if ($password -notmatch '^[0-9a-f]{48}$') {
             throw "Secure local DB password must be exactly 48 lowercase hex characters."
           }
 
           # psql -Atq can legitimately return no stdout for a missing role/DB.
-          # The shared scalar helper must turn that into an empty string, not
-          # call Trim() on $null.
+          # The shared scalar helper must normalize that to an empty string.
           $emptyRole = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit 0') -FailureMessage 'synthetic role query failed'
           $emptyDb = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit 0') -FailureMessage 'synthetic DB query failed'
           if ($emptyRole -ne '') { throw "Missing role output was not normalized to empty string." }
