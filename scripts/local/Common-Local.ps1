@@ -94,6 +94,77 @@ function Ensure-SellariPostgresService {
     }
 }
 
+function New-SellariSecureHex {
+    param([int]$ByteCount = 24)
+    if ($ByteCount -lt 1) {
+        throw "ByteCount must be greater than zero."
+    }
+
+    # Windows PowerShell 5.1 / .NET Framework compatible CSPRNG.
+    # Do not use RandomNumberGenerator.Fill (not available on stock .NET Framework).
+    $bytes = New-Object byte[] $ByteCount
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        if ($null -ne $rng) { $rng.Dispose() }
+    }
+
+    # Convert.ToHexString is .NET 5+; BitConverter works on Windows PowerShell 5.1.
+    return ([System.BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
+}
+
+function Find-SellariPsql {
+    foreach ($name in @("psql.exe", "psql")) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command) {
+            return $command.Source
+        }
+    }
+
+    # PostgreSQL's Windows installer does not always add bin to PATH.
+    $roots = @(
+        $env:ProgramW6432,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)},
+        "C:\Program Files"
+    ) | Where-Object { $_ } | Select-Object -Unique
+
+    foreach ($root in $roots) {
+        $candidate = Join-Path $root "PostgreSQL\16\bin\psql.exe"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+    return $null
+}
+
+function ConvertTo-SellariPsqlScalar {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return "" }
+
+    $lines = @(
+        @($Value) | ForEach-Object {
+            if ($null -ne $_) { ([string]$_).Trim() }
+        } | Where-Object { $_ -ne "" }
+    )
+    if ($lines.Count -eq 0) { return "" }
+    return [string]$lines[0]
+}
+
+function Invoke-SellariPsqlScalar {
+    param(
+        [Parameter(Mandatory=$true)][string]$PsqlPath,
+        [Parameter(Mandatory=$true)][string[]]$Arguments,
+        [Parameter(Mandatory=$true)][string]$FailureMessage
+    )
+    $output = & $PsqlPath @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw $FailureMessage
+    }
+    return ConvertTo-SellariPsqlScalar -Value $output
+}
 function Assert-SellariPinnedSha256 {
     param(
         [Parameter(Mandatory=$true)][string]$Path,
