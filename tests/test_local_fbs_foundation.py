@@ -170,6 +170,15 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "function Find-SellariPsql" in common
     assert "PostgreSQL\\16\\bin\\psql.exe" in common
     assert "function Invoke-SellariPsqlScalar" in common
+    assert "function Invoke-SellariPsqlNative" in common
+    assert "function Test-SellariPsqlReady" in common
+    assert "function Invoke-SellariPsqlRequired" in common
+    assert '$ErrorActionPreference = "Continue"' in common
+    assert "$ErrorActionPreference = $previousErrorActionPreference" in common
+    assert "2> $stderrPath" in common
+    assert "& $psql " not in setup
+    assert "Test-SellariPsqlReady -PsqlPath $psql" in setup
+    assert setup.count("Invoke-SellariPsqlRequired -PsqlPath $psql") == 4
 
 
 def test_local_frontend_build_hides_non_fbs_settings_without_changing_default_build() -> None:
