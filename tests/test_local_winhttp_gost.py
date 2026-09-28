@@ -130,7 +130,8 @@ class FakeWinHttp:
         return 1
 
     def WinHttpSetOption(self, handle, option, buffer, size):
-        self.options.append((handle, option, buffer is None, size))
+        pointer = None if buffer is None else ctypes.cast(buffer, ctypes.c_void_p).value
+        self.options.append((handle, option, pointer, size))
         return 1
 
     def WinHttpAddRequestHeaders(self, *_args):
@@ -189,8 +190,8 @@ def test_native_wrapper_enforces_secure_request_no_client_cert_and_no_redirects(
     assert winhttp.open_request_flags == 0x00800000
     assert any(option == 88 for _, option, _, _ in winhttp.options)
     assert any(
-        option == 47 and null_buffer and size == 0
-        for _, option, null_buffer, size in winhttp.options
+        option == 47 and pointer == ctypes.c_void_p(-1).value and size == 0
+        for _, option, pointer, size in winhttp.options
     )
 
 
