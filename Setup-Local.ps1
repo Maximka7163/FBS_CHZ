@@ -247,9 +247,8 @@ try {
         "-Atqc", "SELECT count(*) FROM security_bootstrap;"
     ) -FailureMessage "Cannot verify local Sellari bootstrap state."
     if ($bootstrapCount -eq "0") {
-        if (-not $OwnerUsername) { $OwnerUsername = Read-Host "Local owner username" }
-        Write-Host "Create the local Sellari owner password. It is stored only as a password hash in local PostgreSQL."
-        & $paths.Python -m wbcz_web.admin bootstrap-owner $OwnerUsername --organisation $OrganisationName --inn $ParticipantInn --participant-name "WB FBS"
+        if (-not $OwnerUsername) { $OwnerUsername = "owner" }
+        & $paths.Python -m wbcz_web.admin bootstrap-local-owner $OwnerUsername --organisation $OrganisationName --inn $ParticipantInn --participant-name "WB FBS"
         if ($LASTEXITCODE -ne 0) { throw "Local OWNER bootstrap failed." }
     } else {
         Write-Host "Local OWNER already bootstrapped; keeping existing account."
