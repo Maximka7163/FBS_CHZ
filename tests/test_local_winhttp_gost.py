@@ -258,6 +258,7 @@ def _successful_probe(tmp_path: Path):
         csptest_path=csptest,
         cpconfig_path=cpconfig,
         runner=runner,
+        sspi_probe=lambda _secur32: True,
     )
 
 
@@ -352,3 +353,55 @@ def test_legacy_optional_tools_are_not_readiness_inputs(tmp_path: Path) -> None:
     source = Path(native_module.__file__).read_text(encoding="utf-8")
     assert "cryptcp.exe" not in source
     assert "stunnel_msspi.exe" not in source
+
+
+
+def test_structural_probe_rejects_missing_cryptopro_sspi_package(
+    tmp_path: Path,
+) -> None:
+    csptest = tmp_path / "csptest.exe"
+    cpconfig = tmp_path / "cpconfig.exe"
+    csptest.write_bytes(b"synthetic")
+    cpconfig.write_bytes(b"synthetic")
+
+    def runner(command, **_kwargs):
+        if Path(command[0]) == csptest:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "CSP (Type:80) v5.0.10013 KC1 Release Ver:5.0.13000 "
+                    "OS:Windows CPU:AMD64 FastCode:READY:AVX,AVX2.\n"
+                    "AcquireContext: OK.\n[ErrorCode: 0x00000000]\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="License: permanent; status: valid\n",
+            stderr="",
+        )
+
+    winhttp = ProbeWinHttp()
+
+    def loader(name: str):
+        if name == "winhttp.dll":
+            return winhttp
+        if name in {"secur32.dll", "crypt32.dll"}:
+            return object()
+        raise OSError(name)
+
+    probe = probe_native_gost_transport(
+        system="Windows",
+        windows_build=26100,
+        dll_loader=loader,
+        csptest_path=csptest,
+        cpconfig_path=cpconfig,
+        runner=runner,
+        sspi_probe=lambda _secur32: False,
+    )
+
+    assert probe.cryptopro_tls_sspi_available is False
+    assert probe.backend_ready is False
+    assert "CRYPTOPRO_TLS_SSPI_UNAVAILABLE" in probe.reasons
