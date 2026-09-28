@@ -169,23 +169,25 @@ async function plugin(): Promise<CadesPlugin> {
   }
 
   // Method presence alone is insufficient: in Chromium/Yandex the wrapper can
-  // exist while its internal native extension object is still unavailable.
-  // CAdESCOM.About is an inert capability probe and performs no signing.
-  try {
-    await withTimeout(
-      Promise.resolve(raw.CreateObjectAsync("CAdESCOM.About")),
-      "CREATE_OBJECT_UNAVAILABLE",
-      "Таймаут CreateObjectAsync",
-    );
-  } catch (error) {
-    if (error instanceof BrowserCadesError) throw error;
-    throw new BrowserCadesError(
-      "CREATE_OBJECT_UNAVAILABLE",
-      "CryptoPro native object недоступен для CreateObjectAsync",
-      error,
-    );
+  // exist while its internal native extension object is still being attached.
+  // Retry an inert About object for a bounded interval; this closes the
+  // pluginObject handshake race without signing or touching private keys.
+  const deadline = Date.now() + PLUGIN_INIT_TIMEOUT_MS;
+  let lastCreateError: unknown = null;
+  while (Date.now() < deadline) {
+    try {
+      await Promise.resolve(raw.CreateObjectAsync("CAdESCOM.About"));
+      return raw;
+    } catch (error) {
+      lastCreateError = error;
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 100));
+    }
   }
-  return raw;
+  throw new BrowserCadesError(
+    "CREATE_OBJECT_UNAVAILABLE",
+    "CryptoPro native object недоступен для CreateObjectAsync",
+    lastCreateError,
+  );
 }
 
 export async function probeBrowserCades(): Promise<BrowserCadesProbe> {
