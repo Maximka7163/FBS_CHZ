@@ -152,18 +152,78 @@ function ConvertTo-SellariPsqlScalar {
     return [string]$lines[0]
 }
 
+function Invoke-SellariPsqlNative {
+    param(
+        [Parameter(Mandatory=$true)][string]$PsqlPath,
+        [Parameter(Mandatory=$true)][string[]]$Arguments
+    )
+
+    # Windows PowerShell 5.1 promotes native stderr to NativeCommandError when
+    # ErrorActionPreference=Stop. psql legitimately writes authentication and
+    # SQL errors to stderr, including the expected first-install readiness
+    # failure. Scope EAP relaxation to the one native invocation only, keep
+    # stderr separate from stdout, and always restore the caller's policy.
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        try {
+            $stdout = & $PsqlPath @Arguments 2> $stderrPath
+            $exitCode = $LASTEXITCODE
+        } catch {
+            # Process launch/runtime failures are not an expected psql result.
+            # Preserve them instead of converting them to readiness=false.
+            throw
+        }
+
+        $stderr = ""
+        if (Test-Path -LiteralPath $stderrPath) {
+            $stderr = [string](Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+        }
+        return [pscustomobject]@{
+            ExitCode = [int]$exitCode
+            Stdout = @($stdout)
+            Stderr = $stderr
+        }
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-SellariPsqlReady {
+    param(
+        [Parameter(Mandatory=$true)][string]$PsqlPath,
+        [Parameter(Mandatory=$true)][string[]]$Arguments
+    )
+    $result = Invoke-SellariPsqlNative -PsqlPath $PsqlPath -Arguments $Arguments
+    return $result.ExitCode -eq 0
+}
+
 function Invoke-SellariPsqlScalar {
     param(
         [Parameter(Mandatory=$true)][string]$PsqlPath,
         [Parameter(Mandatory=$true)][string[]]$Arguments,
         [Parameter(Mandatory=$true)][string]$FailureMessage
     )
-    $output = & $PsqlPath @Arguments
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
+    $result = Invoke-SellariPsqlNative -PsqlPath $PsqlPath -Arguments $Arguments
+    if ($result.ExitCode -ne 0) {
         throw $FailureMessage
     }
-    return ConvertTo-SellariPsqlScalar -Value $output
+    return ConvertTo-SellariPsqlScalar -Value $result.Stdout
+}
+
+function Invoke-SellariPsqlRequired {
+    param(
+        [Parameter(Mandatory=$true)][string]$PsqlPath,
+        [Parameter(Mandatory=$true)][string[]]$Arguments,
+        [Parameter(Mandatory=$true)][string]$FailureMessage
+    )
+    $result = Invoke-SellariPsqlNative -PsqlPath $PsqlPath -Arguments $Arguments
+    if ($result.ExitCode -ne 0) {
+        throw $FailureMessage
+    }
+    return $result.Stdout
 }
 function Assert-SellariPinnedSha256 {
     param(
