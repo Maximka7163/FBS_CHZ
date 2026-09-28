@@ -97,6 +97,29 @@ test("official thenable shape keeps CreateObjectAsync on global cadesplugin", as
   assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAdESCOM.About"));
 });
 
+test("Browser CAdES retries bounded native-object handshake race", async () => {
+  let attempts = 0;
+  globalThis.cadesplugin = {
+    then(resolve) {
+      queueMicrotask(() => resolve(undefined));
+    },
+    async CreateObjectAsync(name) {
+      assert.equal(name, "CAdESCOM.About");
+      attempts += 1;
+      if (attempts < 3) {
+        throw new TypeError("Cannot read properties of undefined (reading 'CreateObjectAsync')");
+      }
+      return {};
+    },
+  };
+
+  const probe = await probeBrowserCades();
+
+  assert.equal(probe.ready, true);
+  assert.equal(probe.errorCode, null);
+  assert.equal(attempts, 3);
+});
+
 test("native object undefined regression becomes stable CREATE_OBJECT_UNAVAILABLE", async () => {
   globalThis.cadesplugin = {
     then(resolve) {
