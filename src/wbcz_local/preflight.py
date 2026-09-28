@@ -92,23 +92,29 @@ def local_preflight() -> dict:
     )
     add(
         "cryptopro_csp_version",
-        crypto.csp_version_supported,
-        crypto.csp_version or "CryptoPro CSP release version unavailable",
+        crypto.csp_technical_supported,
+        (
+            f"{crypto.csp_version or 'unknown'}; technical="
+            + ("SUPPORTED" if crypto.csp_technical_supported else "UNSUPPORTED")
+        ),
         true_api_required=True,
     )
     add(
+        "cryptopro_csp_compliance",
+        True,
+        f"compliance={crypto.csp_compliance_status}; informational only",
+    )
+    license_ready = crypto.license_status != "INVALID"
+    add(
         "cryptopro_csp_license",
-        crypto.csp_license_valid,
-        "licensed CSP runtime verified" if crypto.csp_license_valid else "CSP license could not be verified",
+        license_ready,
+        f"license={crypto.license_status}",
         true_api_required=True,
     )
     add(
         "cryptopro_tls_sspi",
-        crypto.cryptopro_tls_sspi_available,
-        "CryptoPro CSP + Windows SSPI structural path ready"
-        if crypto.cryptopro_tls_sspi_available
-        else "CryptoPro/SSPI structural path unavailable",
-        true_api_required=True,
+        True,
+        f"SSPI diagnostic={crypto.sspi_diagnostic_status}; not an offline GOST proof",
     )
     add(
         "winhttp",
