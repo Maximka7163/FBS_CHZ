@@ -17,8 +17,9 @@ import type {
 import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
 import {
   authenticateLocalBrowserCades,
-  detectBrowserCades,
+  BrowserCadesError,
   enumerateBrowserCertificates,
+  probeBrowserCades,
   type BrowserCadesCertificate,
 } from "./local_cades";
 
@@ -43,6 +44,7 @@ let localTrueApiStatus: LocalTrueApiStatus | null = null;
 let localTrueApiStatusError = "";
 let localTrueApiBusy = false;
 let browserCadesAvailable: boolean | null = null;
+let browserCadesErrorCode: string | null = null;
 let browserCertificates: BrowserCadesCertificate[] = [];
 let selectedBrowserThumbprint = "";
 let viewToken = 0;
@@ -243,22 +245,32 @@ function localTrueApiBlock(): string {
   }).join("");
 
   const cspText = status.csp_available
-    ? `CryptoPro CSP ${status.csp_version || "версия не определена"} · ${status.csp_license_valid ? "лицензия проверена" : "лицензия не подтверждена"}`
+    ? `CryptoPro CSP ${status.csp_version || "версия не определена"} · Technical ${status.csp_technical_supported ? "SUPPORTED" : "UNSUPPORTED"} · Compliance ${status.csp_compliance_status} · License ${status.license_status}`
     : "CryptoPro CSP не обнаружен";
   const pluginText = browserCadesAvailable === true
-    ? "Browser CAdES готов"
+    ? "Browser CAdES READY"
     : browserCadesAvailable === false
-      ? "Browser CAdES не готов"
+      ? `Browser CAdES NOT READY${browserCadesErrorCode ? ` (${browserCadesErrorCode})` : ""}`
       : "Проверяем Browser CAdES…";
   const transportText = status.native_winhttp_gost_transport_ready
-    ? "WinHTTP / CryptoPro GOST transport готов"
-    : `WinHTTP / CryptoPro GOST transport не готов${status.transport_reasons.length ? `: ${status.transport_reasons.join(", ")}` : ""}`;
+    ? "WinHTTP READY"
+    : `WinHTTP NOT READY${status.transport_reasons.length ? `: ${status.transport_reasons.join(", ")}` : ""}`;
+  const sspiText = `SSPI diagnostic ${status.sspi_diagnostic_status}`;
+  const ukepState = status.ukep_state === "DISCOVERY_FAILED"
+    ? "DISCOVERY_FAILED"
+    : browserCadesAvailable === true && browserEligibleVisible
+      ? "VISIBLE"
+      : "NOT_VISIBLE";
+  const ukepText = `УКЭП ${ukepState}`;
   const readinessText = `TRUE_API_LOCAL_READY=${trueApiLocalReady ? "true" : "false"} · TRUE_API_LIVE_VERIFIED=${status.true_api_live_verified ? "true" : "false"}`;
 
+  const noCertificateText = status.ukep_state === "DISCOVERY_FAILED"
+    ? '<span>Перечисление CurrentUser/My завершилось ошибкой (DISCOVERY_FAILED).</span>'
+    : '<span>Подходящая УКЭП в CurrentUser/My не обнаружена.</span>';
   const connection = status.authenticated
     ? `<strong>Честный знак подключён · только чтение</strong>
        <span>GOST TLS ${status.gost_session_verified ? "подтверждён" : "не подтверждён"}${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
-    : `${rows || '<span>Подходящая УКЭП в CurrentUser/My не найдена.</span>'}
+    : `${rows || noCertificateText}
        <button id="local-true-api-auth" class="secondary-button"
          ${localTrueApiBusy || !selected || !trueApiLocalReady ? "disabled" : ""}>
          ${localTrueApiBusy ? "Подключаем…" : "Подключить Честный знак"}
@@ -266,7 +278,9 @@ function localTrueApiBlock(): string {
 
   return `<section class="ki-lookup-card">
     <div><strong>Честный знак / CryptoPro</strong><span>Business writes отключены</span></div>
-    <p class="integration-note">${esc(cspText)} · ${esc(pluginText)} · ${esc(transportText)}</p>
+    <p class="integration-note">${esc(cspText)}</p>
+    <p class="integration-note">${esc(sspiText)} · ${esc(pluginText)} · ${esc(transportText)} · ${esc(ukepText)}</p>
+    ${status.csp_compliance_status === "UNCERTIFIED" ? '<p class="integration-note">Compliance: UNCERTIFIED — информационное предупреждение, не технический блокирующий gate.</p>' : ""}
     <p class="integration-note">${esc(readinessText)}</p>
     ${selected ? `<p class="integration-note">Выбрана УКЭП: ${esc(selected.subject || selected.thumbprint)}</p>` : ""}
     ${connection}
@@ -293,17 +307,27 @@ async function refreshLocalTrueApiStatus(): Promise<void> {
   }
 
   try {
-    browserCadesAvailable = await detectBrowserCades();
-    browserCertificates = browserCadesAvailable
+    const browserProbe = await probeBrowserCades();
+    browserCadesAvailable = browserProbe.ready;
+    browserCadesErrorCode = browserProbe.errorCode;
+    browserCertificates = browserProbe.ready
       ? await enumerateBrowserCertificates()
       : [];
+    if (!browserProbe.ready && browserProbe.message) {
+      localTrueApiStatusError = localTrueApiStatusError
+        ? `${localTrueApiStatusError}; ${browserProbe.errorCode}: ${browserProbe.message}`
+        : `${browserProbe.errorCode}: ${browserProbe.message}`;
+    }
   } catch (error) {
     browserCadesAvailable = false;
     browserCertificates = [];
+    browserCadesErrorCode = error instanceof BrowserCadesError
+      ? error.code
+      : "PLUGIN_INIT_FAILED";
     const browserError = readError(error);
     localTrueApiStatusError = localTrueApiStatusError
-      ? `${localTrueApiStatusError}; ${browserError}`
-      : browserError;
+      ? `${localTrueApiStatusError}; ${browserCadesErrorCode}: ${browserError}`
+      : `${browserCadesErrorCode}: ${browserError}`;
     showToast(browserError, "error");
   }
 
