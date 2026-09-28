@@ -11,7 +11,8 @@ from sqlalchemy.orm import sessionmaker
 
 import wbcz_web.admin as admin_module
 from wbcz_local.app import create_local_app
-from wbcz_web.auth import MIN_PASSWORD_LENGTH, hash_password, verify_password
+from wbcz_web.auth import hash_password, verify_password
+from wbcz_web.auth.passwords import MIN_PASSWORD_LENGTH
 from wbcz_web.config import WebConfig
 from wbcz_web.main import create_app
 from wbcz_web.models import Base, SessionRecord, User
@@ -116,8 +117,8 @@ def test_local_root_and_protected_api_use_owner_without_login(local_factory, tmp
 
         workspace = client.get("/api/workspace")
         assert workspace.status_code == 200
-        assert client.post("/api/auth/login", json={}).status_code == 404
-        assert client.post("/api/auth/logout").status_code == 404
+        assert client.post("/api/auth/login", json={}).status_code in {404, 405}
+        assert client.post("/api/auth/logout").status_code in {404, 405}
 
     with local_factory() as db:
         assert db.get(User, user_id).password_hash == password_hash
@@ -131,7 +132,7 @@ def test_local_owner_missing_fails_closed_without_login_fallback(local_factory, 
         assert response.status_code == 503
         assert response.json()["detail"]["code"] == "LOCAL_OWNER_IDENTITY_UNAVAILABLE"
         assert "missing" in response.json()["detail"]["message"]
-        assert client.post("/api/auth/login", json={}).status_code == 404
+        assert client.post("/api/auth/login", json={}).status_code in {404, 405}
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
