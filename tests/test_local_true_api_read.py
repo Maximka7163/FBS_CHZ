@@ -1044,3 +1044,49 @@ def test_local_fbs_control_auth_failure_persists_no_control_result(
         assert db.scalar(select(func.count()).select_from(CheckRecord)) == 0
         assert db.scalar(select(func.count()).select_from(AgentJobRecord)) == 0
         assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
+
+
+
+def test_live_verified_tracks_gost_transport_before_true_api_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Runtime:
+        authenticated = False
+        expire_date = None
+
+        class Transport:
+            @staticmethod
+            def tls_diagnostics():
+                return {
+                    "mechanism": "Windows WinHTTP / SSPI / CryptoPro GOST TLS",
+                    "gost_session_verified": True,
+                }
+
+        transport = Transport()
+
+        def close(self):
+            pass
+
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
+    )
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "gost_transport_available": True,
+            "cryptcp_available": False,
+        })(),
+    )
+    bridge._runtime = Runtime()
+    bridge._runtime_key = INN
+
+    status = bridge.status(INN)
+
+    assert status["authenticated"] is False
+    assert status["gost_session_verified"] is True
+    assert status["true_api_live_verified"] is True
