@@ -10,15 +10,18 @@ export interface BrowserCadesCertificate {
 type AsyncCadesObject = Record<string, any>;
 type CadesPlugin = AsyncCadesObject & {
   CreateObjectAsync(name: string): Promise<AsyncCadesObject>;
-  then?: (
-    onfulfilled?: ((value?: unknown) => unknown) | null,
-    onrejected?: ((reason?: unknown) => unknown) | null,
-  ) => unknown;
   CAPICOM_CURRENT_USER_STORE?: number;
   CAPICOM_MY_STORE?: string;
   CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED?: number;
   CADESCOM_BASE64_TO_BINARY?: number;
   CADESCOM_CADES_BES?: number;
+};
+
+type CadesPluginGlobal = CadesPlugin & {
+  then?: (
+    onfulfilled?: ((value?: unknown) => unknown) | null,
+    onrejected?: ((reason?: unknown) => unknown) | null,
+  ) => unknown;
 };
 
 export type BrowserCadesErrorCode =
@@ -132,7 +135,7 @@ async function ensureActivationScript(): Promise<void> {
 async function plugin(): Promise<CadesPlugin> {
   await ensureActivationScript();
   const raw = (globalThis as typeof globalThis & { cadesplugin?: unknown })
-    .cadesplugin as CadesPlugin | undefined;
+    .cadesplugin as CadesPluginGlobal | undefined;
   if (!raw) {
     throw new BrowserCadesError(
       "PLUGIN_INIT_FAILED",
