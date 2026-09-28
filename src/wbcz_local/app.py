@@ -16,6 +16,7 @@ from wbcz_web.middleware import RequestContextMiddleware
 from wbcz_web.services.integration_secrets import ReadOnlySecretProvider
 
 from .bridge import LocalTrueApiReadBridge
+from .principal import resolve_local_owner_identity
 from .routes import local_router
 
 
@@ -71,8 +72,6 @@ def create_local_app(
         "/api/health",
         "/api/version",
         "/api/auth/csrf",
-        "/api/auth/login",
-        "/api/auth/logout",
         "/api/me",
         "/api/capabilities",
         "/api/workspace",
@@ -105,6 +104,8 @@ def create_local_app(
     )
     app.state.config = config
     app.state.session_factory = session_factory or build_session_factory(config)
+    app.state.local_single_user_no_login = True
+    app.state.local_principal_resolver = resolve_local_owner_identity
     app.state.integration_secret_provider = ReadOnlySecretProvider()
     app.state.wb_http_adapter = None
     app.state.wb_rate_limiter = StatefulWbRateLimiter()
