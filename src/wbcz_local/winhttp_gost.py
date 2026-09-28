@@ -729,7 +729,7 @@ def probe_native_gost_transport(
     )
 
 
-class WindowsWinHttpGostTransport:class WindowsWinHttpGostTransport:
+class WindowsWinHttpGostTransport:
     """Read-only production True API transport over native Windows WinHTTP."""
 
     def __init__(
