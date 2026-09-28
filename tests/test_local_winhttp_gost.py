@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import replace
+import inspect
+import os
 from pathlib import Path
 import subprocess
 
@@ -112,6 +114,8 @@ class FakeWinHttp:
         self.open_request_flags = None
         self.connect_target = None
         self.options = []
+        self.send_calls = 0
+        self.receive_calls = 0
 
     def WinHttpOpen(self, *_args):
         return 1
@@ -138,9 +142,11 @@ class FakeWinHttp:
         return 1
 
     def WinHttpSendRequest(self, *_args):
+        self.send_calls += 1
         return 1
 
     def WinHttpReceiveResponse(self, *_args):
+        self.receive_calls += 1
         return 1
 
     def WinHttpQueryOption(self, _request, option, buffer, _size):
@@ -190,7 +196,7 @@ def test_native_wrapper_enforces_secure_request_no_client_cert_and_no_redirects(
     assert winhttp.open_request_flags == 0x00800000
     assert any(option == 88 for _, option, _, _ in winhttp.options)
     assert any(
-        option == 47 and pointer == ctypes.c_void_p(-1).value and size == 0
+        option == 47 and pointer is None and size == 0
         for _, option, pointer, size in winhttp.options
     )
 
@@ -248,8 +254,8 @@ def test_tls_client_certificate_request_fails_closed_without_ukep() -> None:
         )
 
     assert any(
-        option == 47 and null_buffer and size == 0
-        for _, option, null_buffer, size in winhttp.options
+        option == 47 and pointer is None and size == 0
+        for _, option, pointer, size in winhttp.options
     )
 
 
@@ -276,20 +282,26 @@ def test_native_wrapper_has_no_cert_ignore_or_tls_fallback() -> None:
         "WinHttpSendRequest",
         "WinHttpReceiveResponse",
         "_WINHTTP_OPTION_SECURITY_INFO = 151",
+        "_WINHTTP_OPTION_CLIENT_CERT_CONTEXT = 47",
         "_WINHTTP_FLAG_SECURE = 0x00800000",
     ):
         assert required in source
 
 
-class ProbeWinHttp:
-    def WinHttpOpen(self, *_args):
+class ProbeWinHttp(FakeWinHttp):
+    pass
+
+
+class ClientCertOptionFailureWinHttp(ProbeWinHttp):
+    def WinHttpSetOption(self, handle, option, buffer, size):
+        pointer = None if buffer is None else ctypes.cast(buffer, ctypes.c_void_p).value
+        self.options.append((handle, option, pointer, size))
+        if option == 47:
+            return 0
         return 1
 
-    def WinHttpCloseHandle(self, _handle):
-        return 1
 
-
-def _successful_probe(tmp_path: Path):
+def _successful_probe(tmp_path: Path, *, winhttp: FakeWinHttp | None = None):
     csptest = tmp_path / "csptest.exe"
     cpconfig = tmp_path / "cpconfig.exe"
     csptest.write_bytes(b"synthetic")
@@ -312,7 +324,7 @@ def _successful_probe(tmp_path: Path):
             command, 0, stdout="License: permanent; status: valid\n", stderr=""
         )
 
-    winhttp = ProbeWinHttp()
+    winhttp = winhttp or ProbeWinHttp()
 
     def loader(name: str):
         if name == "winhttp.dll":
@@ -335,7 +347,8 @@ def _successful_probe(tmp_path: Path):
 def test_structural_probe_accepts_supported_windows_csp_and_native_dlls(
     tmp_path: Path,
 ) -> None:
-    probe = _successful_probe(tmp_path)
+    winhttp = ProbeWinHttp()
+    probe = _successful_probe(tmp_path, winhttp=winhttp)
     assert probe.backend_ready is True
     assert probe.csp_version == "5.0.13000"
     assert probe.csp_version_supported is True
@@ -343,6 +356,46 @@ def test_structural_probe_accepts_supported_windows_csp_and_native_dlls(
     assert probe.cryptopro_tls_sspi_available is True
     assert probe.winhttp_gost_transport_initializable is True
     assert probe.reasons == ()
+    assert winhttp.connect_target == (PRODUCTION_HOST, PRODUCTION_PORT)
+    assert winhttp.open_request_flags == 0x00800000
+    assert any(
+        option == 47 and pointer is None and size == 0
+        for _, option, pointer, size in winhttp.options
+    )
+    assert any(option == 88 for _, option, _, _ in winhttp.options)
+    assert winhttp.send_calls == 0
+    assert winhttp.receive_calls == 0
+
+
+def test_structural_probe_fails_closed_when_null_client_cert_option_cannot_be_set(
+    tmp_path: Path,
+) -> None:
+    winhttp = ClientCertOptionFailureWinHttp()
+    probe = _successful_probe(tmp_path, winhttp=winhttp)
+
+    assert probe.winhttp_gost_transport_initializable is False
+    assert probe.backend_ready is False
+    assert "WINHTTP_GOST_TRANSPORT_NOT_INITIALIZABLE" in probe.reasons
+    assert any(
+        option == 47 and pointer is None and size == 0
+        for _, option, pointer, size in winhttp.options
+    )
+    assert winhttp.send_calls == 0
+    assert winhttp.receive_calls == 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real WinHTTP API check runs on Windows only")
+def test_real_windows_structural_probe_is_no_network_and_accepts_null_client_cert() -> None:
+    native = _WinHttpNative()
+
+    assert native.structural_initializable() is True
+
+    source = inspect.getsource(_WinHttpNative.structural_initializable)
+    assert "WinHttpConnect" in source
+    assert "WinHttpOpenRequest" in source
+    assert "_configure_request_safety" in source
+    assert "WinHttpSendRequest" not in source
+    assert "WinHttpReceiveResponse" not in source
 
 
 @pytest.mark.parametrize(
