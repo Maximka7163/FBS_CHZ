@@ -118,8 +118,13 @@ if (-not $appPassword) {
 
 $previousPgPassword = $env:PGPASSWORD
 $env:PGPASSWORD = $appPassword
-& $psql -h $PostgresHost -p $PostgresPort -U sellari_local -d sellari_local -Atqc "SELECT 1" *> $null
-$appDbReady = $LASTEXITCODE -eq 0
+$appDbReady = Test-SellariPsqlReady -PsqlPath $psql -Arguments @(
+    "-h", $PostgresHost,
+    "-p", [string]$PostgresPort,
+    "-U", "sellari_local",
+    "-d", "sellari_local",
+    "-Atqc", "SELECT 1"
+)
 
 if (-not $appDbReady) {
     $secureAdmin = Read-Host "PostgreSQL password for local admin '$PostgresAdminUser'" -AsSecureString
@@ -135,11 +140,24 @@ if (-not $appDbReady) {
             "-Atqc", "SELECT 1 FROM pg_roles WHERE rolname='sellari_local';"
         ) -FailureMessage "Cannot connect to local PostgreSQL as $PostgresAdminUser."
         if ($roleExists -eq "1") {
-            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE sellari_local WITH LOGIN PASSWORD '$appPassword';" | Out-Null
+            Invoke-SellariPsqlRequired -PsqlPath $psql -Arguments @(
+                "-h", $PostgresHost,
+                "-p", [string]$PostgresPort,
+                "-U", $PostgresAdminUser,
+                "-d", "postgres",
+                "-v", "ON_ERROR_STOP=1",
+                "-c", "ALTER ROLE sellari_local WITH LOGIN PASSWORD '$appPassword';"
+            ) -FailureMessage "Cannot create/update local Sellari PostgreSQL role." | Out-Null
         } else {
-            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE sellari_local LOGIN PASSWORD '$appPassword';" | Out-Null
+            Invoke-SellariPsqlRequired -PsqlPath $psql -Arguments @(
+                "-h", $PostgresHost,
+                "-p", [string]$PostgresPort,
+                "-U", $PostgresAdminUser,
+                "-d", "postgres",
+                "-v", "ON_ERROR_STOP=1",
+                "-c", "CREATE ROLE sellari_local LOGIN PASSWORD '$appPassword';"
+            ) -FailureMessage "Cannot create/update local Sellari PostgreSQL role." | Out-Null
         }
-        if ($LASTEXITCODE -ne 0) { throw "Cannot create/update local Sellari PostgreSQL role." }
 
         $databaseExists = Invoke-SellariPsqlScalar -PsqlPath $psql -Arguments @(
             "-h", $PostgresHost,
@@ -149,10 +167,23 @@ if (-not $appDbReady) {
             "-Atqc", "SELECT 1 FROM pg_database WHERE datname='sellari_local';"
         ) -FailureMessage "Cannot verify local PostgreSQL database state."
         if ($databaseExists -ne "1") {
-            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE sellari_local OWNER sellari_local;" | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Cannot create local Sellari PostgreSQL database." }
+            Invoke-SellariPsqlRequired -PsqlPath $psql -Arguments @(
+                "-h", $PostgresHost,
+                "-p", [string]$PostgresPort,
+                "-U", $PostgresAdminUser,
+                "-d", "postgres",
+                "-v", "ON_ERROR_STOP=1",
+                "-c", "CREATE DATABASE sellari_local OWNER sellari_local;"
+            ) -FailureMessage "Cannot create local Sellari PostgreSQL database." | Out-Null
         } else {
-            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE sellari_local OWNER TO sellari_local;" | Out-Null
+            Invoke-SellariPsqlRequired -PsqlPath $psql -Arguments @(
+                "-h", $PostgresHost,
+                "-p", [string]$PostgresPort,
+                "-U", $PostgresAdminUser,
+                "-d", "postgres",
+                "-v", "ON_ERROR_STOP=1",
+                "-c", "ALTER DATABASE sellari_local OWNER TO sellari_local;"
+            ) -FailureMessage "Cannot update local Sellari PostgreSQL database owner." | Out-Null
         }
     } finally {
         if ($ptr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
