@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  __testBrowserCadesApi,
   authenticateLocalBrowserCades,
   detectBrowserCades,
   enumerateBrowserCertificates,
@@ -101,6 +102,43 @@ test("official thenable shape keeps CreateObjectAsync on global cadesplugin", as
   assert.equal(probe.diagnostics.globalType, "object");
   assert.equal(probe.diagnostics.createObjectAsyncType, "function");
   assert.equal(probe.diagnostics.lastErrorCode, null);
+  assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAdESCOM.About"));
+});
+
+test("official thenable resolving undefined still enumerates CurrentUser/My", async () => {
+  const log = [];
+  installPlugin(log);
+  const raw = globalThis.cadesplugin;
+  raw.then = (resolve) => {
+    queueMicrotask(() => resolve(undefined));
+  };
+
+  const certs = await enumerateBrowserCertificates();
+
+  assert.equal(certs.length, 1);
+  assert.equal(certs[0].thumbprint, "AABBCC");
+  assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAPICOM.Store"));
+  assert.ok(log.some((entry) => entry[0] === "Open" && entry[1] === 2 && entry[2] === "My"));
+});
+
+test("async CAdES initializer returns non-thenable facade with bound CreateObjectAsync", async () => {
+  const log = [];
+  installPlugin(log);
+  const raw = globalThis.cadesplugin;
+  raw.then = (resolve) => {
+    queueMicrotask(() => resolve(undefined));
+  };
+  const originalCreateObjectAsync = raw.CreateObjectAsync;
+  raw.CreateObjectAsync = async function (name) {
+    assert.equal(this, raw);
+    return originalCreateObjectAsync.call(this, name);
+  };
+
+  const api = await __testBrowserCadesApi();
+
+  assert.equal(typeof api.CreateObjectAsync, "function");
+  assert.notEqual(typeof api.then, "function");
+  await api.CreateObjectAsync("CAdESCOM.About");
   assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAdESCOM.About"));
 });
 
@@ -230,6 +268,72 @@ test("typed Browser auth signs only prepared challenge and immediately completes
   });
   assert.equal("participant_inn" in completeBody, false);
   assert.equal("challenge_base64" in completeBody, false);
+});
+
+test("official thenable resolving undefined completes synthetic typed Browser auth", async (t) => {
+  const log = [];
+  installPlugin(log);
+  const raw = globalThis.cadesplugin;
+  raw.then = (resolve) => {
+    queueMicrotask(() => resolve(undefined));
+  };
+
+  const challengeBase64 = "IEVYQUNULVRIRU5BQkxFLUNIQURNSU5HRQ==";
+  const fetchCalls = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init = {}) => {
+    fetchCalls.push([String(url), init]);
+    if (url === "/api/auth/csrf") {
+      return { ok: true, status: 200, json: async () => ({ csrf_token: "csrf-thenable" }) };
+    }
+    if (url === "/api/local/auth/prepare") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          attempt_id: "attempt-thenable-123456",
+          challenge_base64: challengeBase64,
+          participant_inn: "1234567890",
+          expires_at: "2026-09-27T20:00:00+00:00",
+          read_only: true,
+        }),
+      };
+    }
+    if (url === "/api/local/auth/complete") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          authenticated: true,
+          expire_date: "2026-09-27T21:00:00+00:00",
+          read_only: true,
+          business_write_enabled: false,
+        }),
+      };
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const result = await authenticateLocalBrowserCades("AA BB CC");
+
+  assert.equal(result.authenticated, true);
+  assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAPICOM.Store"));
+  assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAdESCOM.CPSigner"));
+  assert.ok(log.some((entry) => entry[0] === "CheckCertificate" && entry[1] === true));
+  assert.ok(log.some((entry) => entry[0] === "CreateObjectAsync" && entry[1] === "CAdESCOM.CadesSignedData"));
+  assert.ok(log.some((entry) => entry[0] === "ContentEncoding" && entry[1] === 1));
+  assert.ok(log.some((entry) => entry[0] === "Content" && entry[1] === challengeBase64));
+  assert.ok(log.some((entry) => entry[0] === "SignCades" && entry[1] === 1 && entry[2] === false));
+
+  const complete = fetchCalls.find(([url]) => url === "/api/local/auth/complete");
+  assert.ok(complete);
+  assert.deepEqual(JSON.parse(complete[1].body), {
+    attempt_id: "attempt-thenable-123456",
+    signature_base64: "ATTACHED-CADES-BES",
+    selected_certificate_thumbprint: "AA BB CC",
+  });
 });
 
 test("Browser auth exposes no public arbitrary-content signer primitive", async () => {
