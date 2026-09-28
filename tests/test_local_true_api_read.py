@@ -22,6 +22,7 @@ from wbcz_ui.live_true_api import (
     ReadOnlyTrueApiTransport,
     TrueApiError,
     TrueApiHttpError,
+    WindowsCryptoProCertificateDiscovery,
 )
 from wbcz_local.bridge import (
     LocalTrueApiReadBridge,
@@ -52,7 +53,11 @@ def _foundation_status(gost_ready: bool = True):
         "csp_available": True,
         "csp_version": "5.0.13000",
         "csp_version_supported": True,
+        "csp_technical_supported": True,
+        "csp_compliance_status": "UNKNOWN",
         "csp_license_valid": True,
+        "license_status": "VALID",
+        "sspi_diagnostic_status": "AVAILABLE",
         "gost_transport_available": gost_ready,
         "winhttp_available": gost_ready,
         "cryptopro_tls_sspi_available": gost_ready,
@@ -368,6 +373,102 @@ def test_cryptcp_absence_does_not_make_valid_ukep_unsupported(
     assert status["cryptcp_available"] is False
     assert status["candidates"][0]["compatibility"] == "GOST_CRYPTOPRO"
     assert status["candidates"][0]["eligible"] is True
+
+
+def test_windows_certificate_discovery_enumerates_current_user_my_without_cryptcp() -> None:
+    captured: dict[str, str] = {}
+
+    def runner(args, **_kwargs):
+        captured["script"] = args[-1]
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps({
+                "certificates": [{
+                    "thumbprint": THUMBPRINT,
+                    "subject": f"CN=Test, OID.1.2.643.100.4={INN}",
+                    "issuer": "CN=Issuer",
+                    "serial": "1234",
+                    "hasPrivateKey": True,
+                    "notBefore": "2026-01-01T00:00:00.0000000Z",
+                    "notAfter": "2027-01-01T00:00:00.0000000Z",
+                    "publicKeyOid": "1.2.643.7.1.1.1.1",
+                    "signatureOid": "1.2.643.7.1.1.3.2",
+                    "providerName": "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider",
+                }],
+                "skippedCount": 0,
+            }),
+            stderr="",
+        )
+
+    discovery = WindowsCryptoProCertificateDiscovery(
+        cryptcp_path="C:/definitely/not/required/cryptcp.exe",
+        runner=runner,
+    )
+    inventory = discovery.discover()
+
+    candidate = inventory["candidates"][0]
+    assert candidate["compatibility"] == "GOST_CRYPTOPRO"
+    assert candidate["certificate_inn"] == INN
+    assert candidate["has_private_key"] is True
+    assert candidate["public_key_oid"] == "1.2.643.7.1.1.1.1"
+    assert inventory["cryptcp_available"] is False
+    assert inventory["discovery_state"] == "OK"
+    assert "X509Store('My','CurrentUser')" in captured["script"]
+    assert "$cert.GetKeyAlgorithm()" in captured["script"]
+    assert "cryptcp.exe" not in captured["script"]
+
+
+def test_certificate_discovery_failure_is_distinct_from_no_eligible_certificate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenDiscovery:
+        def discover(self):
+            raise TrueApiError("synthetic store failure")
+
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: _foundation_status(True),
+    )
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=BrokenDiscovery(),
+    )
+
+    status = bridge.discover(INN)
+    assert status["ukep_state"] == "DISCOVERY_FAILED"
+    assert status["ukep_available"] is False
+    assert status["candidates"] == []
+    assert status["error_code"] == "CRYPTOPRO_CERTIFICATE_DISCOVERY_FAILED"
+
+    with pytest.raises(LocalTrueApiUnavailable) as exc_info:
+        bridge.prepare_auth(INN, "browser-session-1")
+    assert exc_info.value.code == "CERTIFICATE_DISCOVERY_FAILED"
+
+
+def test_successful_discovery_with_no_eligible_certificate_reports_not_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyDiscovery:
+        def discover(self):
+            return {"cryptopro_available": True, "candidates": []}
+
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: _foundation_status(True),
+    )
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=EmptyDiscovery(),
+    )
+
+    status = bridge.discover(INN)
+    assert status["ukep_state"] == "NOT_VISIBLE"
+    assert status["error_code"] is None
 
 
 def test_expired_certificate_is_not_eligible_even_without_cryptcp(
