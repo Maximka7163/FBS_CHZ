@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 import os
@@ -248,7 +249,12 @@ def test_existing_local_owner_hash_participant_and_bootstrap_are_preserved(local
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
 def test_non_local_app_still_requires_session_and_verifies_password(local_factory) -> None:
     user_id, _, _, _ = _seed_owner(local_factory)
-    app = create_app(_config(DB_URL), session_factory=local_factory)
+    server_config = replace(
+        _config(DB_URL),
+        audit_pseudonym_key="synthetic-non-local-audit-key-0000000000000001",
+        audit_pseudonym_key_id="local-no-login-test-v1",
+    ).validate_for_startup()
+    app = create_app(server_config, session_factory=local_factory)
     assert not hasattr(app.state, "local_principal_resolver")
 
     with TestClient(app) as client:
