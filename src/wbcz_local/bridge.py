@@ -45,7 +45,11 @@ class CryptoProFoundationStatus:
     csp_available: bool
     csp_version: str | None
     csp_version_supported: bool
+    csp_technical_supported: bool
+    csp_compliance_status: str
     csp_license_valid: bool
+    license_status: str
+    sspi_diagnostic_status: str
     browser_cades_available: bool | None
     ukep_available: bool | None
     gost_transport_available: bool
@@ -144,7 +148,11 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
         csp_available=csp_available,
         csp_version=native.csp_version,
         csp_version_supported=native.csp_version_supported,
+        csp_technical_supported=native.csp_technical_supported,
+        csp_compliance_status=native.csp_compliance_status,
         csp_license_valid=native.csp_license_valid,
+        license_status=native.license_status,
+        sspi_diagnostic_status=native.sspi_diagnostic_status,
         browser_cades_available=None,
         ukep_available=None,
         gost_transport_available=native.backend_ready,
@@ -494,28 +502,90 @@ class LocalTrueApiReadBridge:
         )
 
     def discover(self, participant_inn: str) -> dict[str, Any]:
-        try:
-            inventory = self.discovery.discover()
-        except Exception:
-            components = inspect_local_cryptopro_foundation()
+        components = inspect_local_cryptopro_foundation()
+
+        def foundation_payload() -> dict[str, Any]:
             return {
                 "cryptopro_available": components.csp_available,
                 "csp_available": components.csp_available,
                 "csp_version": getattr(components, "csp_version", None),
-                "csp_version_supported": bool(getattr(components, "csp_version_supported", components.gost_transport_available)),
-                "csp_license_valid": bool(getattr(components, "csp_license_valid", components.gost_transport_available)),
+                "csp_version_supported": bool(
+                    getattr(
+                        components,
+                        "csp_version_supported",
+                        components.gost_transport_available,
+                    )
+                ),
+                "csp_technical_supported": bool(
+                    getattr(
+                        components,
+                        "csp_technical_supported",
+                        getattr(components, "csp_version_supported", False),
+                    )
+                ),
+                "csp_compliance_status": str(
+                    getattr(components, "csp_compliance_status", "UNKNOWN")
+                ),
+                "csp_license_valid": bool(
+                    getattr(components, "csp_license_valid", False)
+                ),
+                "license_status": str(
+                    getattr(
+                        components,
+                        "license_status",
+                        "VALID" if getattr(components, "csp_license_valid", False) else "UNKNOWN",
+                    )
+                ),
+                "sspi_diagnostic_status": str(
+                    getattr(
+                        components,
+                        "sspi_diagnostic_status",
+                        "AVAILABLE"
+                        if getattr(components, "cryptopro_tls_sspi_available", False)
+                        else "UNKNOWN",
+                    )
+                ),
                 "browser_cades_available": None,
-                "ukep_available": False,
                 "gost_transport_available": components.gost_transport_available,
                 "native_winhttp_gost_transport_ready": components.gost_transport_available,
-                "winhttp_available": bool(getattr(components, "winhttp_available", components.gost_transport_available)),
-                "cryptopro_tls_sspi_available": bool(getattr(components, "cryptopro_tls_sspi_available", components.gost_transport_available)),
-                "winhttp_gost_transport_initializable": bool(getattr(components, "winhttp_gost_transport_initializable", components.gost_transport_available)),
-                "transport_reasons": list(getattr(components, "readiness_reasons", ())),
+                "winhttp_available": bool(
+                    getattr(
+                        components,
+                        "winhttp_available",
+                        components.gost_transport_available,
+                    )
+                ),
+                "cryptopro_tls_sspi_available": bool(
+                    getattr(
+                        components,
+                        "cryptopro_tls_sspi_available",
+                        False,
+                    )
+                ),
+                "winhttp_gost_transport_initializable": bool(
+                    getattr(
+                        components,
+                        "winhttp_gost_transport_initializable",
+                        components.gost_transport_available,
+                    )
+                ),
+                "transport_reasons": list(
+                    getattr(components, "readiness_reasons", ())
+                ),
                 "cryptcp_available": components.cryptcp_available,
+            }
+
+        try:
+            inventory = self.discovery.discover()
+        except Exception:
+            return {
+                **foundation_payload(),
+                "ukep_available": False,
+                "ukep_state": "DISCOVERY_FAILED",
                 "candidates": [],
                 "error_code": "CRYPTOPRO_CERTIFICATE_DISCOVERY_FAILED",
             }
+
         candidates: list[dict[str, Any]] = []
         for item in inventory.get("candidates") or []:
             if not isinstance(item, dict):
@@ -549,22 +619,11 @@ class LocalTrueApiReadBridge:
             }
             safe["eligible"] = self._eligible(item, participant_inn)
             candidates.append(safe)
-        components = inspect_local_cryptopro_foundation()
+        visible = any(item.get("eligible") for item in candidates)
         return {
-            "cryptopro_available": components.csp_available,
-            "csp_available": components.csp_available,
-            "csp_version": getattr(components, "csp_version", None),
-            "csp_version_supported": bool(getattr(components, "csp_version_supported", components.gost_transport_available)),
-            "csp_license_valid": bool(getattr(components, "csp_license_valid", components.gost_transport_available)),
-            "browser_cades_available": None,
-            "ukep_available": any(item.get("eligible") for item in candidates),
-            "gost_transport_available": components.gost_transport_available,
-            "native_winhttp_gost_transport_ready": components.gost_transport_available,
-            "winhttp_available": bool(getattr(components, "winhttp_available", components.gost_transport_available)),
-            "cryptopro_tls_sspi_available": bool(getattr(components, "cryptopro_tls_sspi_available", components.gost_transport_available)),
-            "winhttp_gost_transport_initializable": bool(getattr(components, "winhttp_gost_transport_initializable", components.gost_transport_available)),
-            "transport_reasons": list(getattr(components, "readiness_reasons", ())),
-            "cryptcp_available": components.cryptcp_available,
+            **foundation_payload(),
+            "ukep_available": visible,
+            "ukep_state": "VISIBLE" if visible else "NOT_VISIBLE",
             "candidates": candidates,
             "error_code": None,
         }
@@ -642,6 +701,11 @@ class LocalTrueApiReadBridge:
         with self._lock:
             self._prune_attempts()
             inventory = self.discover(participant_inn)
+            if inventory.get("ukep_state") == "DISCOVERY_FAILED":
+                raise LocalTrueApiUnavailable(
+                    "CERTIFICATE_DISCOVERY_FAILED",
+                    "CurrentUser/My certificate discovery failed",
+                )
             eligible = frozenset(
                 str(item["thumbprint"])
                 for item in inventory.get("candidates", [])
@@ -811,7 +875,9 @@ class LocalTrueApiReadBridge:
         eligible_visible = bool(inventory.get("ukep_available"))
         backend_ready = bool(inventory.get("native_winhttp_gost_transport_ready"))
         reasons = list(inventory.get("transport_reasons") or [])
-        if not eligible_visible:
+        if inventory.get("ukep_state") == "DISCOVERY_FAILED":
+            reasons.append("CERTIFICATE_DISCOVERY_FAILED")
+        elif not eligible_visible:
             reasons.append("ELIGIBLE_UKEP_NOT_VISIBLE")
         # Browser CAdES availability is authoritative only inside the browser.
         # The frontend combines this backend structural state with its plugin
@@ -831,9 +897,7 @@ class LocalTrueApiReadBridge:
                 else None
             ),
             "gost_session_verified": gost_verified,
-            "true_api_local_ready_backend_prerequisites": bool(
-                backend_ready and eligible_visible
-            ),
+            "true_api_local_ready_backend_prerequisites": backend_ready,
             "true_api_local_ready": None,
             "true_api_local_ready_reasons": list(dict.fromkeys(reasons)),
             # A successfully negotiated production /auth/key connection is
