@@ -40,6 +40,9 @@ _MAX_RESPONSE = 16 * 1024 * 1024
 _WINHTTP_ACCESS_TYPE_NO_PROXY = 1
 _WINHTTP_FLAG_SECURE = 0x00800000
 _WINHTTP_OPTION_CLIENT_CERT_CONTEXT = 47
+# winhttp.h: ((PCCERT_CONTEXT) -1). This sentinel tells WinHTTP not to
+# automatically select/send a client certificate when the server requests one.
+_WINHTTP_NO_CLIENT_CERT_CONTEXT = ctypes.c_void_p(-1)
 _WINHTTP_OPTION_REDIRECT_POLICY = 88
 _WINHTTP_OPTION_REDIRECT_POLICY_NEVER = 0
 _WINHTTP_OPTION_SECURITY_INFO = 151
@@ -307,7 +310,10 @@ class _WinHttpNative:
 
             self._check(
                 self.winhttp.WinHttpSetOption(
-                    request, _WINHTTP_OPTION_CLIENT_CERT_CONTEXT, None, 0
+                    request,
+                    _WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+                    _WINHTTP_NO_CLIENT_CERT_CONTEXT,
+                    0,
                 ),
                 "WINHTTP_NO_CLIENT_CERT",
             )
