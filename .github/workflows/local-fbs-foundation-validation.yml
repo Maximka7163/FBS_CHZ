@@ -167,6 +167,13 @@ jobs:
           )
           if ($ready) { throw 'Expected failed psql-like readiness probe returned true.' }
           if ($ErrorActionPreference -ne $beforeProbeEap) { throw 'Readiness probe did not restore ErrorActionPreference.' }
+          $launchFailurePreserved = $false
+          try {
+            Test-SellariPsqlReady -PsqlPath (Join-Path $env:RUNNER_TEMP 'missing-psql.exe') -Arguments @('--version') | Out-Null
+          } catch {
+            if ($_.Exception.Message -like 'PostgreSQL client executable is unavailable:*') { $launchFailurePreserved = $true }
+          }
+          if (-not $launchFailurePreserved) { throw 'Missing psql launch failure was incorrectly converted to readiness=false.' }
 
           # stderr must never contaminate scalar stdout. Exit 0 still returns
           # only the successful stdout value.
