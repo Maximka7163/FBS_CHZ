@@ -48,10 +48,9 @@ if (-not $npm) {
     throw "Node.js/npm not found. Install a current Node.js LTS release for the one-time frontend build."
 }
 Ensure-SellariPostgresService
-$psql = Get-Command psql.exe -ErrorAction SilentlyContinue
-if (-not $psql) { $psql = Get-Command psql -ErrorAction SilentlyContinue }
+$psql = Find-SellariPsql
 if (-not $psql) {
-    throw "PostgreSQL client psql was not found in PATH. Install local PostgreSQL 16 before running setup."
+    throw "PostgreSQL 16 client psql.exe was not found in PATH or the standard Windows PostgreSQL 16 installation directories."
 }
 
 if (-not (Test-Path -LiteralPath $paths.Python)) {
@@ -114,14 +113,12 @@ if (Test-Path -LiteralPath $paths.EnvFile) {
 
 $appPassword = $env:WBCZ_LOCAL_DB_PASSWORD
 if (-not $appPassword) {
-    $bytes = New-Object byte[] 24
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-    $appPassword = [Convert]::ToHexString($bytes).ToLowerInvariant()
+    $appPassword = New-SellariSecureHex -ByteCount 24
 }
 
 $previousPgPassword = $env:PGPASSWORD
 $env:PGPASSWORD = $appPassword
-& $psql.Source -h $PostgresHost -p $PostgresPort -U sellari_local -d sellari_local -Atqc "SELECT 1" *> $null
+& $psql -h $PostgresHost -p $PostgresPort -U sellari_local -d sellari_local -Atqc "SELECT 1" *> $null
 $appDbReady = $LASTEXITCODE -eq 0
 
 if (-not $appDbReady) {
@@ -130,21 +127,32 @@ if (-not $appDbReady) {
     try {
         $adminPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
         $env:PGPASSWORD = $adminPassword
-        $roleExists = (& $psql.Source -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -Atqc "SELECT 1 FROM pg_roles WHERE rolname='sellari_local';").Trim()
-        if ($LASTEXITCODE -ne 0) { throw "Cannot connect to local PostgreSQL as $PostgresAdminUser." }
+        $roleExists = Invoke-SellariPsqlScalar -PsqlPath $psql -Arguments @(
+            "-h", $PostgresHost,
+            "-p", [string]$PostgresPort,
+            "-U", $PostgresAdminUser,
+            "-d", "postgres",
+            "-Atqc", "SELECT 1 FROM pg_roles WHERE rolname='sellari_local';"
+        ) -FailureMessage "Cannot connect to local PostgreSQL as $PostgresAdminUser."
         if ($roleExists -eq "1") {
-            & $psql.Source -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE sellari_local WITH LOGIN PASSWORD '$appPassword';" | Out-Null
+            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE sellari_local WITH LOGIN PASSWORD '$appPassword';" | Out-Null
         } else {
-            & $psql.Source -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE sellari_local LOGIN PASSWORD '$appPassword';" | Out-Null
+            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE sellari_local LOGIN PASSWORD '$appPassword';" | Out-Null
         }
         if ($LASTEXITCODE -ne 0) { throw "Cannot create/update local Sellari PostgreSQL role." }
 
-        $databaseExists = (& $psql.Source -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -Atqc "SELECT 1 FROM pg_database WHERE datname='sellari_local';").Trim()
+        $databaseExists = Invoke-SellariPsqlScalar -PsqlPath $psql -Arguments @(
+            "-h", $PostgresHost,
+            "-p", [string]$PostgresPort,
+            "-U", $PostgresAdminUser,
+            "-d", "postgres",
+            "-Atqc", "SELECT 1 FROM pg_database WHERE datname='sellari_local';"
+        ) -FailureMessage "Cannot verify local PostgreSQL database state."
         if ($databaseExists -ne "1") {
-            & $psql.Source -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE sellari_local OWNER sellari_local;" | Out-Null
+            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE sellari_local OWNER sellari_local;" | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "Cannot create local Sellari PostgreSQL database." }
         } else {
-            & $psql.Source -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE sellari_local OWNER TO sellari_local;" | Out-Null
+            & $psql -h $PostgresHost -p $PostgresPort -U $PostgresAdminUser -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE sellari_local OWNER TO sellari_local;" | Out-Null
         }
     } finally {
         if ($ptr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
@@ -199,8 +207,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Local database migration failed." }
 
     $env:PGPASSWORD = $appPassword
-    $bootstrapCount = (& $psql.Source -h $PostgresHost -p $PostgresPort -U sellari_local -d sellari_local -Atqc "SELECT count(*) FROM security_bootstrap;").Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Cannot verify local Sellari bootstrap state." }
+    $bootstrapCount = Invoke-SellariPsqlScalar -PsqlPath $psql -Arguments @(
+        "-h", $PostgresHost,
+        "-p", [string]$PostgresPort,
+        "-U", "sellari_local",
+        "-d", "sellari_local",
+        "-Atqc", "SELECT count(*) FROM security_bootstrap;"
+    ) -FailureMessage "Cannot verify local Sellari bootstrap state."
     if ($bootstrapCount -eq "0") {
         if (-not $OwnerUsername) { $OwnerUsername = Read-Host "Local owner username" }
         Write-Host "Create the local Sellari owner password. It is stored only as a password hash in local PostgreSQL."
