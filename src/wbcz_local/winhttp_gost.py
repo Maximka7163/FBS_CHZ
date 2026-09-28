@@ -30,6 +30,16 @@ PRODUCTION_BASE_URL = f"https://{PRODUCTION_HOST}{PRODUCTION_BASE_PATH}"
 APPROVED_GOST_CIPHER_SUITES = frozenset({0xC100, 0xC101, 0xC102})
 MIN_WINDOWS_BUILD_FOR_SECURITY_INFO = 20348
 MIN_CRYPTOPRO_RELEASE = (5, 0, 13000)
+TARGET_R4_PRELIMINARY_RELEASE = (5, 0, 13455)
+LICENSE_VALID = "VALID"
+LICENSE_INVALID = "INVALID"
+LICENSE_UNKNOWN = "UNKNOWN"
+COMPLIANCE_CERTIFIED = "CERTIFIED"
+COMPLIANCE_UNCERTIFIED = "UNCERTIFIED"
+COMPLIANCE_UNKNOWN = "UNKNOWN"
+SSPI_AVAILABLE = "AVAILABLE"
+SSPI_UNAVAILABLE = "UNAVAILABLE"
+SSPI_UNKNOWN = "UNKNOWN"
 _ALLOWED = frozenset({
     ("GET", "/auth/key"),
     ("POST", "/auth/simpleSignIn"),
@@ -89,29 +99,47 @@ class NativeTransportProbe:
     crypt32_available: bool
     csp_installed: bool
     csp_version: str | None
-    csp_version_supported: bool
-    csp_license_valid: bool
-    cryptopro_tls_sspi_available: bool
+    csp_technical_supported: bool
+    csp_compliance_status: str
+    license_status: str
+    sspi_diagnostic_status: str
     winhttp_gost_transport_initializable: bool
     reasons: tuple[str, ...]
 
     @property
+    def csp_version_supported(self) -> bool:
+        return self.csp_technical_supported
+
+    @property
+    def csp_license_valid(self) -> bool:
+        return self.license_status == LICENSE_VALID
+
+    @property
+    def cryptopro_tls_sspi_available(self) -> bool:
+        return self.sspi_diagnostic_status == SSPI_AVAILABLE
+
+    @property
     def backend_ready(self) -> bool:
+        # Offline structural readiness deliberately does not claim or require
+        # negotiated GOST TLS.  Compliance classification and SSPI diagnostics
+        # are reported independently and are not technical hard gates.
         return all((
             self.windows_supported,
-            self.winhttp_available,
-            self.secur32_available,
-            self.crypt32_available,
             self.csp_installed,
-            self.csp_version_supported,
-            self.csp_license_valid,
-            self.cryptopro_tls_sspi_available,
+            self.csp_technical_supported,
+            self.license_status != LICENSE_INVALID,
+            self.winhttp_available,
             self.winhttp_gost_transport_initializable,
         ))
 
     def safe_dict(self) -> dict[str, Any]:
         return {
             **asdict(self),
+            # Backward-compatible diagnostic aliases for existing UI/API
+            # consumers. Their values no longer define backend readiness.
+            "csp_version_supported": self.csp_version_supported,
+            "csp_license_valid": self.csp_license_valid,
+            "cryptopro_tls_sspi_available": self.cryptopro_tls_sspi_available,
             "backend_ready": self.backend_ready,
             "transport": "WINHTTP_CRYPTOPRO_SSPI_GOST",
             "target_host": PRODUCTION_HOST,
@@ -163,8 +191,6 @@ class _WinHttpNative:
         loader = dll_loader or (lambda name: ctypes.WinDLL(name, use_last_error=True))
         try:
             self.winhttp = loader("winhttp.dll")
-            self.secur32 = loader("secur32.dll")
-            self.crypt32 = loader("crypt32.dll")
         except Exception as exc:
             raise GostTlsUnavailable("WINHTTP_NATIVE_DLL_UNAVAILABLE") from exc
         self._configure()
@@ -470,11 +496,19 @@ def _find_tool(filename: str) -> Path | None:
 _RELEASE_RE = re.compile(
     r"\bRelease\s+Ver\s*:\s*(\d+)\.(\d+)\.(\d+)\b", re.IGNORECASE
 )
-_BAD_LICENSE_RE = re.compile(
-    r"(expired|not\s+found|invalid|unlicensed|license\s+is\s+not\s+valid|"
-    r"ист[её]к|просроч|лицензи[яи]\s+не\s+найден|лицензи[яи].*недейств)",
-    re.IGNORECASE,
-)
+def _classify_csp_release(
+    release: tuple[int, int, int] | tuple[()]
+) -> tuple[bool, str]:
+    if not release:
+        return False, COMPLIANCE_UNKNOWN
+    technical = release >= MIN_CRYPTOPRO_RELEASE
+    # Research 087 identifies 5.0.13455 as the R4 preliminary/uncertified
+    # target build. Do not infer certification for other builds.
+    if release == TARGET_R4_PRELIMINARY_RELEASE:
+        compliance = COMPLIANCE_UNCERTIFIED
+    else:
+        compliance = COMPLIANCE_UNKNOWN
+    return technical, compliance
 
 
 def _probe_csp(
@@ -482,11 +516,13 @@ def _probe_csp(
     csptest_path: Path | None = None,
     cpconfig_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> tuple[bool, str | None, bool, bool]:
+) -> tuple[bool, str | None, bool, str]:
+    # cpconfig_path is retained only for call compatibility. Localized
+    # cpconfig stdout is intentionally not a license/readiness verdict.
+    del cpconfig_path
     csptest = csptest_path or _find_tool("csptest.exe")
-    cpconfig = cpconfig_path or _find_tool("cpconfig.exe")
     if csptest is None:
-        return False, None, False, False
+        return False, None, False, COMPLIANCE_UNKNOWN
     try:
         version = runner(
             [str(csptest), "-keyset", "-verifycontext"],
@@ -496,83 +532,77 @@ def _probe_csp(
             check=False,
         )
     except Exception:
-        return True, None, False, False
+        return True, None, False, COMPLIANCE_UNKNOWN
     version_text = f"{version.stdout}\n{version.stderr}"
     match = _RELEASE_RE.search(version_text)
     release = ".".join(match.groups()) if match else None
     release_tuple = tuple(map(int, match.groups())) if match else ()
-    version_ok = bool(
-        version.returncode == 0
-        and "AcquireContext: OK" in version_text
-        and release_tuple >= MIN_CRYPTOPRO_RELEASE
-    )
-    if cpconfig is None:
-        return True, release, version_ok, False
+    technical, compliance = _classify_csp_release(release_tuple)
+    return True, release, technical, compliance
+
+
+def _probe_cadescom_license(
+    *,
+    powershell: str = "powershell.exe",
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[str, dict[str, Any]]:
+    """Return CSP license tri-state via CAdESCOM.CPLicense.
+
+    COM/API absence or invocation failure is UNKNOWN, never INVALID. No full
+    license serial is requested or returned.
+    """
+    if os.name != "nt" and runner is subprocess.run:
+        return LICENSE_UNKNOWN, {}
+    script = r'''
+$ErrorActionPreference='Stop'
+try {
+  $license=New-Object -ComObject CAdESCOM.CPLicense
+  $isValid=[bool]$license.IsValid()
+  [pscustomobject]@{isValid=$isValid} | ConvertTo-Json -Compress
+} catch {
+  exit 3
+}
+'''
     try:
-        license_result = runner(
-            [str(cpconfig), "-license", "-view"],
+        completed = runner(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
             text=True,
             capture_output=True,
             timeout=20,
             check=False,
         )
     except Exception:
-        return True, release, version_ok, False
-    license_text = f"{license_result.stdout}\n{license_result.stderr}".strip()
-    license_ok = bool(
-        license_result.returncode == 0
-        and license_text
-        and not _BAD_LICENSE_RE.search(license_text)
-    )
-    return True, release, version_ok, license_ok
-
-
-class _SecPkgInfoW(ctypes.Structure):
-    _fields_ = [
-        ("fCapabilities", ctypes.c_uint32),
-        ("wVersion", ctypes.c_uint16),
-        ("wRPCID", ctypes.c_uint16),
-        ("cbMaxToken", ctypes.c_uint32),
-        ("Name", ctypes.c_wchar_p),
-        ("Comment", ctypes.c_wchar_p),
-    ]
-
-
-def _cryptopro_sspi_package_available(secur32: Any) -> bool:
-    """Prove that a CryptoPro SSP/SChannel package is actually registered."""
-
+        return LICENSE_UNKNOWN, {}
+    if completed.returncode != 0:
+        return LICENSE_UNKNOWN, {}
     try:
-        enumerate_packages = secur32.EnumerateSecurityPackagesW
-        free_context = secur32.FreeContextBuffer
-    except AttributeError:
-        return False
+        payload = json.loads(completed.stdout.strip())
+    except (json.JSONDecodeError, TypeError):
+        return LICENSE_UNKNOWN, {}
+    if not isinstance(payload, dict) or not isinstance(payload.get("isValid"), bool):
+        return LICENSE_UNKNOWN, {}
+    status = LICENSE_VALID if payload["isValid"] else LICENSE_INVALID
+    return status, {"source": "CAdESCOM.CPLicense"}
 
-    count = ctypes.c_uint32()
-    packages = ctypes.POINTER(_SecPkgInfoW)()
+
+def _sspi_structural_status(secur32: Any) -> str:
+    """Diagnostic-only proof that the Windows SSPI API surface is usable.
+
+    This does not claim CryptoPro/GOST negotiation. Actual GOST proof remains
+    the negotiated WinHTTP TLS cipher from a later explicitly-authorised call.
+    """
     try:
-        enumerate_packages.argtypes = [
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.POINTER(_SecPkgInfoW)),
-        ]
-        enumerate_packages.restype = ctypes.c_long
-        free_context.argtypes = [ctypes.c_void_p]
-        free_context.restype = ctypes.c_long
+        init = secur32.InitSecurityInterfaceW
     except AttributeError:
-        # Synthetic callables used by tests may not expose ctypes metadata.
+        return SSPI_UNAVAILABLE
+    try:
+        init.restype = ctypes.c_void_p
+    except AttributeError:
         pass
-
-    status = enumerate_packages(ctypes.byref(count), ctypes.byref(packages))
-    if int(status) != 0 or not packages:
-        return False
     try:
-        for index in range(int(count.value)):
-            item = packages[index]
-            marker = f"{item.Name or ''} {item.Comment or ''}".casefold()
-            if "cryptopro" in marker or "crypto-pro" in marker:
-                return True
-        return False
-    finally:
-        free_context(packages)
+        return SSPI_AVAILABLE if init() else SSPI_UNAVAILABLE
+    except Exception:
+        return SSPI_UNKNOWN
 
 
 def probe_native_gost_transport(
@@ -583,7 +613,8 @@ def probe_native_gost_transport(
     csptest_path: Path | None = None,
     cpconfig_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    sspi_probe: Callable[[Any], bool] | None = None,
+    sspi_probe: Callable[[Any], Any] | None = None,
+    license_probe: Callable[[], Any] | None = None,
 ) -> NativeTransportProbe:
     windows = (system or platform.system()).casefold() == "windows"
     build = windows_build
@@ -598,16 +629,34 @@ def probe_native_gost_transport(
 
     csp_installed = False
     csp_version = None
-    csp_version_supported = False
-    csp_license_valid = False
+    csp_technical_supported = False
+    csp_compliance_status = COMPLIANCE_UNKNOWN
     if windows:
-        csp_installed, csp_version, csp_version_supported, csp_license_valid = (
-            _probe_csp(
-                csptest_path=csptest_path,
-                cpconfig_path=cpconfig_path,
-                runner=runner,
-            )
+        (
+            csp_installed,
+            csp_version,
+            csp_technical_supported,
+            csp_compliance_status,
+        ) = _probe_csp(
+            csptest_path=csptest_path,
+            cpconfig_path=cpconfig_path,
+            runner=runner,
         )
+
+    license_status = LICENSE_UNKNOWN
+    if windows and csp_installed:
+        try:
+            raw_license = (
+                license_probe()
+                if license_probe is not None
+                else _probe_cadescom_license(runner=runner)
+            )
+            if isinstance(raw_license, tuple):
+                raw_license = raw_license[0]
+            if raw_license in {LICENSE_VALID, LICENSE_INVALID, LICENSE_UNKNOWN}:
+                license_status = raw_license
+        except Exception:
+            license_status = LICENSE_UNKNOWN
 
     available = {"winhttp.dll": False, "secur32.dll": False, "crypt32.dll": False}
     loaded: dict[str, Any] = {}
@@ -620,7 +669,7 @@ def probe_native_gost_transport(
                 available[name] = True
             except Exception:
                 pass
-        if all(available.values()):
+        if available["winhttp.dll"]:
             try:
                 initializable = _WinHttpNative(
                     dll_loader=loader
@@ -628,27 +677,38 @@ def probe_native_gost_transport(
             except Exception:
                 initializable = False
 
-    sspi_detector = sspi_probe or _cryptopro_sspi_package_available
-    sspi = False
-    if (
-        available["secur32.dll"]
-        and csp_installed
-        and csp_version_supported
-        and csp_license_valid
-    ):
+    sspi_status = SSPI_UNKNOWN
+    if available["secur32.dll"]:
         try:
-            sspi = bool(sspi_detector(loaded["secur32.dll"]))
+            raw_sspi = (
+                sspi_probe(loaded["secur32.dll"])
+                if sspi_probe is not None
+                else _sspi_structural_status(loaded["secur32.dll"])
+            )
+            if raw_sspi is True:
+                sspi_status = SSPI_AVAILABLE
+            elif raw_sspi is False:
+                sspi_status = SSPI_UNAVAILABLE
+            elif raw_sspi in {SSPI_AVAILABLE, SSPI_UNAVAILABLE, SSPI_UNKNOWN}:
+                sspi_status = raw_sspi
         except Exception:
-            sspi = False
+            sspi_status = SSPI_UNKNOWN
+    elif windows:
+        sspi_status = SSPI_UNAVAILABLE
+
+    # Only structural technical prerequisites participate in offline readiness.
     checks = (
         (supported_windows, "UNSUPPORTED_WINDOWS"),
         (csp_installed, "CRYPTOPRO_CSP_NOT_INSTALLED"),
-        (not csp_installed or csp_version_supported, "UNSUPPORTED_CRYPTOPRO_VERSION"),
-        (not csp_installed or csp_license_valid, "CRYPTOPRO_CSP_LICENSE_NOT_VALID"),
+        (
+            not csp_installed or csp_technical_supported,
+            "UNSUPPORTED_CRYPTOPRO_VERSION",
+        ),
+        (
+            not csp_installed or license_status != LICENSE_INVALID,
+            "CRYPTOPRO_CSP_LICENSE_INVALID",
+        ),
         (available["winhttp.dll"], "WINHTTP_UNAVAILABLE"),
-        (available["secur32.dll"], "SSPI_UNAVAILABLE"),
-        (available["crypt32.dll"], "CRYPT32_UNAVAILABLE"),
-        (sspi, "CRYPTOPRO_TLS_SSPI_UNAVAILABLE"),
         (initializable, "WINHTTP_GOST_TRANSPORT_NOT_INITIALIZABLE"),
     )
     reasons = tuple(dict.fromkeys(reason for ok, reason in checks if not ok))
@@ -660,15 +720,16 @@ def probe_native_gost_transport(
         crypt32_available=available["crypt32.dll"],
         csp_installed=csp_installed,
         csp_version=csp_version,
-        csp_version_supported=csp_version_supported,
-        csp_license_valid=csp_license_valid,
-        cryptopro_tls_sspi_available=sspi,
+        csp_technical_supported=csp_technical_supported,
+        csp_compliance_status=csp_compliance_status,
+        license_status=license_status,
+        sspi_diagnostic_status=sspi_status,
         winhttp_gost_transport_initializable=initializable,
         reasons=reasons,
     )
 
 
-class WindowsWinHttpGostTransport:
+class WindowsWinHttpGostTransport:class WindowsWinHttpGostTransport:
     """Read-only production True API transport over native Windows WinHTTP."""
 
     def __init__(
