@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $paths.Frontend "index.html"))) { th
 if ($LASTEXITCODE -ne 0) { throw "Local preflight failed. Run .\Check-Local.ps1 for details." }
 
 if (Test-Path -LiteralPath $paths.PidFile) {
-    $existing = (Get-Content -LiteralPath $paths.PidFile -Raw).Trim()
+    $existing = ([string](Get-Content -LiteralPath $paths.PidFile -Raw)).Trim()
     if ($existing -match '^\d+$') {
         $proc = Get-Process -Id ([int]$existing) -ErrorAction SilentlyContinue
         if ($proc) {
