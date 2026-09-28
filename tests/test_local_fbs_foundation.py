@@ -48,7 +48,10 @@ def test_local_app_is_loopback_fbs_surface_and_serves_frontend(tmp_path: Path) -
     )
     paths = {getattr(route, "path", None) for route in app.routes}
     assert LOCAL_BIND_HOST == "127.0.0.1"
-    assert "/api/auth/login" in paths
+    assert "/api/auth/login" not in paths
+    assert "/api/auth/logout" not in paths
+    assert app.state.local_single_user_no_login is True
+    assert callable(app.state.local_principal_resolver)
     assert "/api/files" in paths
     assert "/api/files/{import_id}/control" in paths
     assert "/api/local/true-api/status" in paths
@@ -181,6 +184,10 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "& $psql " not in setup
     assert "Test-SellariPsqlReady -PsqlPath $psql" in setup
     assert setup.count("Invoke-SellariPsqlRequired -PsqlPath $psql") == 4
+    assert "Create the local Sellari owner password" not in setup
+    assert 'Read-Host "Local owner username"' not in setup
+    assert "bootstrap-local-owner" in setup
+    assert "bootstrap-owner $OwnerUsername" not in setup
 
 
 def test_local_frontend_build_hides_non_fbs_settings_without_changing_default_build() -> None:
@@ -190,6 +197,8 @@ def test_local_frontend_build_hides_non_fbs_settings_without_changing_default_bu
     assert 'LOCAL_FBS_ONLY ? ""' in main
     assert '!LOCAL_FBS_ONLY && viewFromUrl() === "integrations"' in main
     assert '$env:VITE_SELLARI_LOCAL_FBS_ONLY = "true"' in setup
+    assert "renderLocalStartupError" in main
+    assert "Вход по логину и паролю в локальном режиме не используется." in main
 
 
 def test_local_foundation_does_not_modify_production_entrypoint_contract() -> None:
