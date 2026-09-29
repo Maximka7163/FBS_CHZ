@@ -473,7 +473,23 @@ class LocalTrueApiReadBridge:
     def _eligible(candidate: dict[str, Any], participant_inn: str) -> bool:
         provider = str(candidate.get("crypto_provider") or "").casefold().replace("-", " ")
         public_key_oid = str(candidate.get("public_key_oid") or "")
-        certificate_inn = candidate.get("certificate_inn")
+        raw_certificate_inns = candidate.get("certificate_inns")
+        certificate_inns: set[str] = set()
+        if isinstance(raw_certificate_inns, (list, tuple, set, frozenset)):
+            certificate_inns.update(
+                str(value)
+                for value in raw_certificate_inns
+                if isinstance(value, str)
+                and len(value) in {10, 12}
+                and value.isdigit()
+            )
+        legacy_certificate_inn = candidate.get("certificate_inn")
+        if (
+            isinstance(legacy_certificate_inn, str)
+            and len(legacy_certificate_inn) in {10, 12}
+            and legacy_certificate_inn.isdigit()
+        ):
+            certificate_inns.add(legacy_certificate_inn)
         try:
             valid_from = datetime.fromisoformat(
                 str(candidate.get("valid_from") or "").replace("Z", "+00:00")
@@ -498,7 +514,7 @@ class LocalTrueApiReadBridge:
                 "1.2.643.7.1.1.1.2",
             }
             and ("crypto pro" in provider or "cryptopro" in provider)
-            and certificate_inn == participant_inn
+            and participant_inn in certificate_inns
         )
 
     def discover(self, participant_inn: str) -> dict[str, Any]:
