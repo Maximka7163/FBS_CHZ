@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import atexit
+import ctypes
+from ctypes import wintypes
 from dataclasses import asdict, dataclass
+import hashlib
 import http.client
 import json
 import os
@@ -31,6 +34,9 @@ PRODUCTION_PORT = 443
 PRODUCTION_BASE_PATH = "/api/v3/true-api"
 PRODUCTION_BASE_URL = f"https://{PRODUCTION_HOST}{PRODUCTION_BASE_PATH}"
 STUNNEL_MSSPI_FILENAME = "stunnel_msspi.exe"
+STUNNEL_MSSPI_OFFICIAL_SHA256 = (
+    "C15491EA8EAB0ADB7F8F761337DF85DA335A57E3AA18D1CBC19B31D1EEA09F8B"
+)
 GOST_ONLY_CIPHERS = (
     "GOST2012-GOST8912-GOST8912:GOST2001-GOST89-GOST89"
 )
@@ -42,6 +48,32 @@ _ALLOWED = frozenset({
     ("POST", "/auth/simpleSignIn"),
     ("POST", "/cises/info"),
 })
+_TCP_STATE_LISTEN = 2
+_TCP_STATE_ESTABLISHED = 5
+_AF_INET = 2
+_TCP_TABLE_OWNER_PID_ALL = 5
+_ERROR_INSUFFICIENT_BUFFER = 122
+
+
+class _MibTcpRowOwnerPid(ctypes.Structure):
+    _fields_ = [
+        ("dwState", wintypes.DWORD),
+        ("dwLocalAddr", wintypes.DWORD),
+        ("dwLocalPort", wintypes.DWORD),
+        ("dwRemoteAddr", wintypes.DWORD),
+        ("dwRemotePort", wintypes.DWORD),
+        ("dwOwningPid", wintypes.DWORD),
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class TcpOwnerRow:
+    state: int
+    local_address: str
+    local_port: int
+    remote_address: str
+    remote_port: int
+    owning_pid: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +82,7 @@ class StunnelMsspiProbe:
     executable_path: str | None
     stunnel_msspi_present: bool
     stunnel_msspi_executable_valid: bool
+    stunnel_msspi_authenticity_valid: bool
     stunnel_msspi_config_supported: bool
     stunnel_msspi_structural_ready: bool
     reasons: tuple[str, ...]
@@ -143,16 +176,32 @@ def _find_stunnel_msspi(explicit: str | Path | None = None) -> Path | None:
     return None
 
 
-def _valid_stunnel_msspi_executable(path: Path | None) -> bool:
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+
+def _inspect_stunnel_msspi_executable(path: Path | None) -> tuple[bool, bool]:
     if path is None or path.name.casefold() != STUNNEL_MSSPI_FILENAME:
-        return False
+        return False, False
     try:
         if not path.is_file() or path.suffix.casefold() != ".exe":
-            return False
+            return False, False
         with path.open("rb") as handle:
-            return handle.read(2) == b"MZ"
+            if handle.read(2) != b"MZ":
+                return False, False
+        authentic = _sha256_file(path) == STUNNEL_MSSPI_OFFICIAL_SHA256
+        return True, authentic
     except OSError:
-        return False
+        return False, False
+
+
+def _valid_stunnel_msspi_executable(path: Path | None) -> bool:
+    structural, authentic = _inspect_stunnel_msspi_executable(path)
+    return structural and authentic
 
 
 def probe_stunnel_msspi(
@@ -167,7 +216,8 @@ def probe_stunnel_msspi(
     )
     path = _find_stunnel_msspi(executable_path)
     present = path is not None
-    executable_valid = _valid_stunnel_msspi_executable(path)
+    executable_structural, authenticity_valid = _inspect_stunnel_msspi_executable(path)
+    executable_valid = executable_structural and authenticity_valid
     config_supported = _config_contract_supported(
         render_stunnel_msspi_config(PRIVATE_PORT_MIN)
     )
@@ -180,8 +230,10 @@ def probe_stunnel_msspi(
         reasons.append("UNSUPPORTED_WINDOWS")
     if not present:
         reasons.append("CRYPTOPRO_STUNNEL_MSSPI_MISSING")
-    elif not executable_valid:
+    elif not executable_structural:
         reasons.append("CRYPTOPRO_STUNNEL_MSSPI_EXECUTABLE_INVALID")
+    elif not authenticity_valid:
+        reasons.append("CRYPTOPRO_STUNNEL_MSSPI_AUTHENTICITY_FAILED")
     if not config_supported:
         reasons.append("CRYPTOPRO_STUNNEL_MSSPI_CONFIG_UNSUPPORTED")
     return StunnelMsspiProbe(
@@ -189,6 +241,7 @@ def probe_stunnel_msspi(
         executable_path=str(path) if path is not None else None,
         stunnel_msspi_present=present,
         stunnel_msspi_executable_valid=executable_valid,
+        stunnel_msspi_authenticity_valid=authenticity_valid,
         stunnel_msspi_config_supported=config_supported,
         stunnel_msspi_structural_ready=structural_ready,
         reasons=tuple(dict.fromkeys(reasons)),
@@ -220,27 +273,116 @@ def _select_private_port() -> int:
     raise GostTlsUnavailable("STUNNEL_MSSPI_PRIVATE_PORT_UNAVAILABLE")
 
 
-def _default_readiness_probe(
+def _decode_ipv4(value: int) -> str:
+    return socket.inet_ntoa(int(value).to_bytes(4, byteorder="little", signed=False))
+
+
+def _decode_tcp_port(value: int) -> int:
+    return socket.ntohs(int(value) & 0xFFFF)
+
+
+def _windows_tcp_owner_rows() -> tuple[TcpOwnerRow, ...]:
+    if os.name != "nt":
+        raise GostTlsUnavailable("STUNNEL_MSSPI_TCP_OWNERSHIP_WINDOWS_ONLY")
+    try:
+        iphlpapi = ctypes.WinDLL("iphlpapi.dll", use_last_error=True)
+        get_table = iphlpapi.GetExtendedTcpTable
+        get_table.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.ULONG),
+            wintypes.BOOL,
+            wintypes.ULONG,
+            wintypes.ULONG,
+            wintypes.ULONG,
+        ]
+        get_table.restype = wintypes.DWORD
+    except Exception as exc:
+        raise GostTlsUnavailable(
+            "STUNNEL_MSSPI_TCP_OWNERSHIP_API_UNAVAILABLE"
+        ) from exc
+
+    size = wintypes.ULONG(0)
+    status = int(
+        get_table(
+            None,
+            ctypes.byref(size),
+            False,
+            _AF_INET,
+            _TCP_TABLE_OWNER_PID_ALL,
+            0,
+        )
+    )
+    if status not in {0, _ERROR_INSUFFICIENT_BUFFER}:
+        raise GostTlsUnavailable(
+            f"STUNNEL_MSSPI_TCP_OWNERSHIP_API_FAILED:{status}"
+        )
+    if size.value == 0:
+        return ()
+
+    buffer = ctypes.create_string_buffer(int(size.value))
+    status = int(
+        get_table(
+            buffer,
+            ctypes.byref(size),
+            False,
+            _AF_INET,
+            _TCP_TABLE_OWNER_PID_ALL,
+            0,
+        )
+    )
+    if status != 0:
+        raise GostTlsUnavailable(
+            f"STUNNEL_MSSPI_TCP_OWNERSHIP_API_FAILED:{status}"
+        )
+
+    count = int(ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))[0])
+    row_size = ctypes.sizeof(_MibTcpRowOwnerPid)
+    offset = ctypes.sizeof(wintypes.DWORD)
+    rows: list[TcpOwnerRow] = []
+    for index in range(count):
+        address = ctypes.addressof(buffer) + offset + (index * row_size)
+        row = _MibTcpRowOwnerPid.from_address(address)
+        rows.append(
+            TcpOwnerRow(
+                state=int(row.dwState),
+                local_address=_decode_ipv4(int(row.dwLocalAddr)),
+                local_port=_decode_tcp_port(int(row.dwLocalPort)),
+                remote_address=_decode_ipv4(int(row.dwRemoteAddr)),
+                remote_port=_decode_tcp_port(int(row.dwRemotePort)),
+                owning_pid=int(row.dwOwningPid),
+            )
+        )
+    return tuple(rows)
+
+
+def _wait_for_child_listener(
     process: Any,
     port: int,
     timeout: float,
-) -> bool:
+    ownership_rows: Callable[[], tuple[TcpOwnerRow, ...]],
+) -> None:
+    child_pid = int(getattr(process, "pid", 0) or 0)
+    if child_pid <= 0:
+        raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_PID_UNAVAILABLE")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            return False
-        try:
-            connection = socket.create_connection(
-                ("127.0.0.1", port),
-                timeout=min(0.2, max(0.05, deadline - time.monotonic())),
+            raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_EXITED_EARLY")
+        listeners = [
+            row
+            for row in ownership_rows()
+            if row.state == _TCP_STATE_LISTEN
+            and row.local_address == "127.0.0.1"
+            and row.local_port == port
+        ]
+        if any(row.owning_pid == child_pid for row in listeners):
+            return
+        if listeners:
+            raise GostTlsUnavailable(
+                "STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_MISMATCH"
             )
-        except OSError:
-            time.sleep(0.05)
-            continue
-        else:
-            connection.close()
-            return True
-    return False
+        time.sleep(0.05)
+    raise GostTlsUnavailable("STUNNEL_MSSPI_NOT_READY")
 
 
 class StunnelMsspiTransport:
@@ -257,7 +399,7 @@ class StunnelMsspiTransport:
         popen_factory: Callable[..., Any] = subprocess.Popen,
         connection_factory: Callable[..., Any] = http.client.HTTPConnection,
         port_selector: Callable[[], int] = _select_private_port,
-        readiness_probe: Callable[[Any, int, float], bool] = _default_readiness_probe,
+        ownership_rows: Callable[[], tuple[TcpOwnerRow, ...]] = _windows_tcp_owner_rows,
         temp_root: str | Path | None = None,
     ) -> None:
         if not 0 < timeout <= 120:
@@ -270,6 +412,10 @@ class StunnelMsspiTransport:
         if not probe.stunnel_msspi_present:
             raise GostTlsUnavailable("CRYPTOPRO_STUNNEL_MSSPI_MISSING")
         if not probe.stunnel_msspi_executable_valid:
+            if not probe.stunnel_msspi_authenticity_valid:
+                raise GostTlsUnavailable(
+                    "CRYPTOPRO_STUNNEL_MSSPI_AUTHENTICITY_FAILED"
+                )
             raise GostTlsUnavailable("CRYPTOPRO_STUNNEL_MSSPI_EXECUTABLE_INVALID")
         if not probe.stunnel_msspi_config_supported:
             raise GostTlsUnavailable("CRYPTOPRO_STUNNEL_MSSPI_CONFIG_UNSUPPORTED")
@@ -281,6 +427,10 @@ class StunnelMsspiTransport:
             or Path(probe.executable_path).resolve() != explicit
         ):
             raise GostTlsUnavailable("CRYPTOPRO_STUNNEL_MSSPI_PATH_MISMATCH")
+        if not _valid_stunnel_msspi_executable(explicit):
+            raise GostTlsUnavailable(
+                "CRYPTOPRO_STUNNEL_MSSPI_AUTHENTICITY_FAILED"
+            )
 
         self.executable_path = explicit
         self.audit = audit or JsonlLiveAudit("live_true_api.jsonl")
@@ -289,7 +439,7 @@ class StunnelMsspiTransport:
         self._popen_factory = popen_factory
         self._connection_factory = connection_factory
         self._port_selector = port_selector
-        self._readiness_probe = readiness_probe
+        self._ownership_rows = ownership_rows
         self._temp_root = Path(temp_root) if temp_root is not None else None
         self._process: Any | None = None
         self._port: int | None = None
@@ -297,6 +447,8 @@ class StunnelMsspiTransport:
         self._config_path: Path | None = None
         self._closed = False
         self._live_verified = False
+        self._startup_ownership_verified = False
+        self._pending_auth_key_ownership_verified = False
         atexit.register(self.close)
 
     @staticmethod
@@ -377,6 +529,10 @@ class StunnelMsspiTransport:
             self._cleanup_config()
             raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_EXITED_EARLY")
 
+        if not _valid_stunnel_msspi_executable(self.executable_path):
+            raise GostTlsUnavailable(
+                "CRYPTOPRO_STUNNEL_MSSPI_AUTHENTICITY_FAILED"
+            )
         port = int(self._port_selector())
         if not PRIVATE_PORT_MIN <= port <= PRIVATE_PORT_MAX:
             raise GostTlsUnavailable("STUNNEL_MSSPI_PRIVATE_PORT_INVALID")
@@ -394,22 +550,111 @@ class StunnelMsspiTransport:
             self._port = port
             if process.poll() is not None:
                 raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_EXITED_EARLY")
-            if not self._readiness_probe(process, port, self.startup_timeout):
-                if process.poll() is not None:
-                    raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_EXITED_EARLY")
-                raise GostTlsUnavailable("STUNNEL_MSSPI_NOT_READY")
+            _wait_for_child_listener(
+                process,
+                port,
+                self.startup_timeout,
+                self._ownership_rows,
+            )
+            self._startup_ownership_verified = True
         except GostTlsUnavailable:
             self._stop_process()
             self._cleanup_config()
             self._port = None
+            self._startup_ownership_verified = False
             raise
         except Exception as exc:
             self._stop_process()
             self._cleanup_config()
             self._port = None
+            self._startup_ownership_verified = False
             raise GostTlsUnavailable(
                 "STUNNEL_MSSPI_CHILD_START_FAILED"
             ) from exc
+
+    def _open_owned_connection(self) -> Any:
+        process = self._process
+        port = self._port
+        if (
+            process is None
+            or port is None
+            or process.poll() is not None
+            or not self._startup_ownership_verified
+        ):
+            raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_EXITED_EARLY")
+        child_pid = int(getattr(process, "pid", 0) or 0)
+        if child_pid <= 0:
+            raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_PID_UNAVAILABLE")
+
+        connection = self._connection_factory(
+            "127.0.0.1",
+            port,
+            timeout=self.timeout,
+        )
+        try:
+            connection.connect()
+            sock = getattr(connection, "sock", None)
+            if sock is None:
+                raise GostTlsUnavailable(
+                    "STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_UNKNOWN"
+                )
+            client_host, client_port = sock.getsockname()[:2]
+            server_host, server_port = sock.getpeername()[:2]
+            if (
+                client_host != "127.0.0.1"
+                or server_host != "127.0.0.1"
+                or int(server_port) != port
+            ):
+                raise GostTlsUnavailable(
+                    "STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_MISMATCH"
+                )
+
+            deadline = time.monotonic() + min(self.startup_timeout, 1.0)
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise GostTlsUnavailable(
+                        "STUNNEL_MSSPI_CHILD_EXITED_EARLY"
+                    )
+                established = [
+                    row
+                    for row in self._ownership_rows()
+                    if row.state == _TCP_STATE_ESTABLISHED
+                    and row.local_address == "127.0.0.1"
+                    and row.local_port == port
+                    and row.remote_address == "127.0.0.1"
+                    and row.remote_port == int(client_port)
+                ]
+                if any(row.owning_pid == child_pid for row in established):
+                    return connection
+                if established:
+                    raise GostTlsUnavailable(
+                        "STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_MISMATCH"
+                    )
+                time.sleep(0.01)
+            raise GostTlsUnavailable(
+                "STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_UNKNOWN"
+            )
+        except Exception:
+            try:
+                connection.close()
+            except Exception:
+                pass
+            raise
+
+    def mark_auth_key_verified(self) -> None:
+        process = self._process
+        if (
+            not self._startup_ownership_verified
+            or not self._pending_auth_key_ownership_verified
+            or process is None
+            or process.poll() is not None
+        ):
+            self._live_verified = False
+            raise GostTlsUnavailable(
+                "STUNNEL_MSSPI_LIVE_VERIFICATION_PROCESS_MISMATCH"
+            )
+        self._live_verified = True
+        self._pending_auth_key_ownership_verified = False
 
     def tls_diagnostics(self) -> dict[str, Any]:
         return {
@@ -427,6 +672,7 @@ class StunnelMsspiTransport:
             "gost_cipher_list": GOST_ONLY_CIPHERS,
             "gost_session_verified": self._live_verified,
             "true_api_live_verified": self._live_verified,
+            "startup_pid_ownership_verified": self._startup_ownership_verified,
             "openssl_tls_to_production": False,
             "direct_winhttp_fallback": False,
         }
@@ -443,6 +689,9 @@ class StunnelMsspiTransport:
     ) -> Any:
         method = method.upper()
         self.assert_allowed(method, path, params)
+        if (method, path) == ("GET", "/auth/key"):
+            self._pending_auth_key_ownership_verified = False
+            self._live_verified = False
         self._start()
         if self._process is None or self._process.poll() is not None:
             self.close()
@@ -469,11 +718,9 @@ class StunnelMsspiTransport:
 
         connection = None
         try:
-            connection = self._connection_factory(
-                "127.0.0.1",
-                self._port,
-                timeout=self.timeout,
-            )
+            connection = self._open_owned_connection()
+            if (method, path) == ("GET", "/auth/key"):
+                self._pending_auth_key_ownership_verified = True
             connection.request(
                 method,
                 target,
@@ -502,11 +749,6 @@ class StunnelMsspiTransport:
                     body_sha256=safe.body_sha256,
                     safe_error_code=safe.safe_error_code,
                 )
-            if method == "GET" and path == "/auth/key":
-                # A successful response proves the child completed the pinned
-                # remote MSSPI/GOST TLS connection. Offline structural probes
-                # never set this flag.
-                self._live_verified = True
             try:
                 return (
                     json.loads(response_body.decode("utf-8"))
@@ -546,6 +788,9 @@ class StunnelMsspiTransport:
         if self._closed and self._process is None and self._temp_dir is None:
             return
         self._closed = True
+        self._live_verified = False
+        self._startup_ownership_verified = False
+        self._pending_auth_key_ownership_verified = False
         self._stop_process()
         self._cleanup_config()
         self._port = None
