@@ -32,14 +32,18 @@ from wbcz_local.bridge import (
     LocalTrueApiUnavailable,
     _browser_cades_signature_info,
 )
+import wbcz_local.stunnel_msspi as stunnel_module
 from wbcz_local.stunnel_msspi import (
     GOST_ONLY_CIPHERS,
     PRIVATE_PORT_MAX,
     PRIVATE_PORT_MIN,
     PRODUCTION_HOST,
     PRODUCTION_PORT,
+    STUNNEL_MSSPI_OFFICIAL_SHA256,
     StunnelMsspiTransport,
+    TcpOwnerRow,
     _select_private_port,
+    _windows_tcp_owner_rows,
     probe_stunnel_msspi,
     render_stunnel_msspi_config,
 )
@@ -193,7 +197,8 @@ def _runtime() -> tuple[LocalTrueApiReadRuntime, FakeTransport]:
 
 
 class _FakeStunnelProcess:
-    def __init__(self, *, exited: bool = False) -> None:
+    def __init__(self, *, pid: int = 4242, exited: bool = False) -> None:
+        self.pid = pid
         self.returncode = 1 if exited else None
         self.terminated = False
         self.killed = False
@@ -213,6 +218,23 @@ class _FakeStunnelProcess:
         self.returncode = -9
 
 
+class _FakeSocket:
+    def __init__(
+        self,
+        *,
+        client_port: int,
+        server_port: int,
+    ) -> None:
+        self.client_port = client_port
+        self.server_port = server_port
+
+    def getsockname(self):
+        return ("127.0.0.1", self.client_port)
+
+    def getpeername(self):
+        return ("127.0.0.1", self.server_port)
+
+
 class _FakeHttpResponse:
     status = 200
 
@@ -224,11 +246,36 @@ class _FakeHttpResponse:
 
 
 class _FakeHttpConnection:
-    def __init__(self, host: str, port: int, *, timeout: float, sink: list[dict]) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float,
+        sink: list[dict],
+        client_port: int = 61001,
+        on_connect=None,
+        response_payload: bytes = b'{"uuid":"u","data":"challenge"}',
+    ) -> None:
         sink.append({"connect_host": host, "connect_port": port, "timeout": timeout})
         self.sink = sink
+        self.sock = None
+        self.client_port = client_port
+        self.server_port = port
+        self.on_connect = on_connect
+        self.response_payload = response_payload
+
+    def connect(self) -> None:
+        if self.on_connect is not None:
+            self.on_connect()
+        self.sock = _FakeSocket(
+            client_port=self.client_port,
+            server_port=self.server_port,
+        )
+        self.sink.append({"tcp_connected": True})
 
     def request(self, method: str, target: str, *, body=None, headers=None) -> None:
+        assert self.sock is not None
         self.sink.append({
             "method": method,
             "target": target,
@@ -237,16 +284,53 @@ class _FakeHttpConnection:
         })
 
     def getresponse(self):
-        return _FakeHttpResponse()
+        return _FakeHttpResponse(self.response_payload)
 
     def close(self) -> None:
-        pass
+        self.sock = None
 
 
 def _fake_stunnel_executable(tmp_path: Path) -> Path:
     executable = tmp_path / "stunnel_msspi.exe"
     executable.write_bytes(b"MZsynthetic-offline-test")
     return executable
+
+
+def _trust_fake_stunnel_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        stunnel_module,
+        "_sha256_file",
+        lambda _path: STUNNEL_MSSPI_OFFICIAL_SHA256,
+    )
+
+
+def _owner_rows(
+    *,
+    child_pid: int,
+    port: int,
+    client_port: int = 61001,
+    listener_pid: int | None = None,
+    established_pid: int | None = None,
+) -> tuple[TcpOwnerRow, ...]:
+    return (
+        TcpOwnerRow(
+            state=2,
+            local_address="127.0.0.1",
+            local_port=port,
+            remote_address="0.0.0.0",
+            remote_port=0,
+            owning_pid=child_pid if listener_pid is None else listener_pid,
+        ),
+        TcpOwnerRow(
+            state=5,
+            local_address="127.0.0.1",
+            local_port=port,
+            remote_address="127.0.0.1",
+            remote_port=client_port,
+            owning_pid=child_pid if established_pid is None else established_pid,
+        ),
+    )
+
 
 
 def test_stunnel_msspi_config_is_fixed_loopback_gost_only_and_has_no_client_material() -> None:
