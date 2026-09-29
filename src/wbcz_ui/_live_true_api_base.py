@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import http.client
@@ -567,6 +568,78 @@ class ReadOnlyTrueApiTransport:
         return None
 
 
+
+def _safe_powershell_stderr(stderr: bytes | str | None) -> str:
+    """Decode failure diagnostics without trusting the Windows process codepage."""
+    if stderr is None:
+        return ""
+    if isinstance(stderr, bytes):
+        return stderr[:4096].decode("utf-8", errors="replace")
+    return str(stderr)[:4096]
+
+
+def _run_powershell_json_object(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    powershell: str,
+    script: str,
+    failure_message: str,
+    invalid_message: str,
+    timeout: int = 30,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Run Windows PowerShell with a deterministic binary JSON transport."""
+    transport_script = script + r'''
+$WbczJson = $WbczJsonObject | ConvertTo-Json -Compress -Depth 4
+$WbczUtf8 = [System.Text.Encoding]::UTF8.GetBytes($WbczJson)
+$WbczBase64 = [Convert]::ToBase64String($WbczUtf8)
+$WbczAscii = [System.Text.Encoding]::ASCII.GetBytes($WbczBase64)
+$WbczStdout = [Console]::OpenStandardOutput()
+$WbczStdout.Write($WbczAscii, 0, $WbczAscii.Length)
+$WbczStdout.Flush()
+'''
+    completed = runner(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            transport_script,
+        ],
+        text=False,
+        capture_output=True,
+        timeout=timeout,
+        env=env,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = _safe_powershell_stderr(completed.stderr).strip()
+        raise TrueApiError((detail or failure_message)[:1000])
+
+    stdout = completed.stdout
+    if stdout is None:
+        raise TrueApiError(invalid_message)
+    if isinstance(stdout, str):
+        try:
+            payload = stdout.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise TrueApiError(invalid_message) from exc
+    else:
+        payload = bytes(stdout)
+    payload = payload.strip()
+    if not payload:
+        raise TrueApiError(invalid_message)
+
+    try:
+        raw_json = base64.b64decode(payload, validate=True)
+        parsed = json.loads(raw_json.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise TrueApiError(invalid_message) from exc
+    if not isinstance(parsed, dict):
+        raise TrueApiError(invalid_message)
+    return parsed
+
+
 class WindowsCryptoProCertificateDiscovery:
     """Enumerate safe CurrentUser\\My metadata without cryptcp or private-key export."""
 
@@ -650,23 +723,15 @@ try {
 } finally {
   $store.Close()
 }
-[pscustomobject]@{certificates=@($items);skippedCount=$skipped} | ConvertTo-Json -Compress -Depth 4
+$WbczJsonObject=[pscustomobject]@{certificates=@($items);skippedCount=$skipped}
 '''
-        completed = self._runner(
-            [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script],
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
+        root = _run_powershell_json_object(
+            runner=self._runner,
+            powershell=self.powershell,
+            script=script,
+            failure_message="Certificate discovery failed",
+            invalid_message="Certificate discovery returned invalid data",
         )
-        if completed.returncode != 0:
-            raise TrueApiError(
-                (completed.stderr.strip() or "Certificate discovery failed")[:1000]
-            )
-        try:
-            root = json.loads(completed.stdout.strip())
-        except json.JSONDecodeError as exc:
-            raise TrueApiError("Certificate discovery returned invalid data") from exc
         rows = root.get("certificates") if isinstance(root, dict) else None
         if not isinstance(rows, list):
             raise TrueApiError("Certificate discovery response misses certificates")
@@ -778,7 +843,7 @@ try {
     $info=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[type][WbczCertNative+CRYPT_KEY_PROV_INFO])
     $provider=[Runtime.InteropServices.Marshal]::PtrToStringUni($info.pwszProvName)
   } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }
-  [pscustomobject]@{
+  $WbczJsonObject=[pscustomobject]@{
     thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
     hasPrivateKey=$cert.HasPrivateKey
     notBefore=$cert.NotBefore.ToUniversalTime().ToString('o')
@@ -786,33 +851,19 @@ try {
     publicKeyOid=$cert.PublicKey.Oid.Value
     signatureOid=$cert.SignatureAlgorithm.Value
     providerName=$provider
-  } | ConvertTo-Json -Compress
+  }
 } finally { $store.Close() }
 '''
         env = os.environ.copy()
         env["WBCZ_CERT_THUMBPRINT"] = self.thumbprint
-        completed = self._runner(
-            [
-                self.powershell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                script,
-            ],
-            text=True,
-            capture_output=True,
-            timeout=30,
+        data = _run_powershell_json_object(
+            runner=self._runner,
+            powershell=self.powershell,
+            script=script,
+            failure_message="Certificate diagnostics failed",
+            invalid_message="Certificate diagnostics returned invalid data",
             env=env,
-            check=False,
         )
-        if completed.returncode != 0:
-            raise TrueApiError(
-                (completed.stderr.strip() or "Certificate diagnostics failed")[:1000]
-            )
-        try:
-            data = json.loads(completed.stdout.strip())
-        except json.JSONDecodeError as exc:
-            raise TrueApiError("Certificate diagnostics returned invalid data") from exc
         if data.get("thumbprint") != self.thumbprint:
             raise TrueApiError("Certificate thumbprint mismatch")
         if data.get("hasPrivateKey") is not True:
