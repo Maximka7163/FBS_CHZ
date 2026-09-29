@@ -640,6 +640,26 @@ $WbczStdout.Flush()
     return parsed
 
 
+_CERTIFICATE_SUBJECT_INN_RE = re.compile(
+    r"(?:OID\.1\.2\.643\.100\.4|OID\.1\.2\.643\.3\.131\.1\.1|INN|ИНН)"
+    r"\s*[=:]\s*(\d{12}|\d{10})(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def _certificate_subject_inns(subject: str) -> list[str]:
+    """Return recognized subject INNs in first-seen order without duplicates."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in _CERTIFICATE_SUBJECT_INN_RE.finditer(subject):
+        value = match.group(1)
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 class WindowsCryptoProCertificateDiscovery:
     """Enumerate safe CurrentUser\\My metadata without cryptcp or private-key export."""
 
@@ -755,17 +775,14 @@ $WbczJsonObject=[pscustomobject]@{certificates=@($items);skippedCount=$skipped}
                 and ("crypto pro" in provider_key or "cryptopro" in provider_key)
             )
             cryptopro_visible = cryptopro_visible or compatible
-            match = re.search(
-                r"(?:OID\.1\.2\.643\.100\.4|OID\.1\.2\.643\.3\.131\.1\.1|INN|ИНН)\s*[=:]\s*(\d{10}|\d{12})",
-                subject,
-                re.IGNORECASE,
-            )
+            certificate_inns = _certificate_subject_inns(subject)
             candidates.append({
                 "thumbprint": thumbprint[:160],
                 "subject": subject or None,
                 "issuer": str(raw.get("issuer") or "")[:2000] or None,
                 "serial": str(raw.get("serial") or "")[:160] or None,
-                "certificate_inn": match.group(1) if match else None,
+                "certificate_inn": certificate_inns[0] if certificate_inns else None,
+                "certificate_inns": certificate_inns,
                 "valid_from": str(raw.get("notBefore") or "")[:64] or None,
                 "valid_to": str(raw.get("notAfter") or "")[:64] or None,
                 "has_private_key": bool(raw.get("hasPrivateKey")),
