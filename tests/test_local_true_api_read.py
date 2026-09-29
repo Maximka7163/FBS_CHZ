@@ -1068,6 +1068,16 @@ if os.name == "nt":
         assert inventory["discovery_state"] == "OK"
 
 
+    def test_real_windows_tcp_ownership_table_structural() -> None:
+        rows = _windows_tcp_owner_rows()
+
+        assert isinstance(rows, tuple)
+        for row in rows:
+            assert isinstance(row.owning_pid, int)
+            assert isinstance(row.local_port, int)
+            assert isinstance(row.remote_port, int)
+
+
     def test_real_windows_stunnel_msspi_probe_is_offline_structural_only() -> None:
         probe = probe_stunnel_msspi()
         safe = probe.safe_dict()
