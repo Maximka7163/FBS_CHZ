@@ -294,6 +294,9 @@ class LocalTrueApiReadRuntime:
         data = payload.get("data")
         if not isinstance(uuid, str) or not uuid or not isinstance(data, str) or not data:
             raise TrueApiProtocolError("/auth/key response misses uuid/data")
+        mark_verified = getattr(self.transport, "mark_auth_key_verified", None)
+        if callable(mark_verified):
+            mark_verified()
         return uuid, data
 
     def complete_auth(self, *, uuid: str, signature_base64: str) -> dict[str, Any]:
