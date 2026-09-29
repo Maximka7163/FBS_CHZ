@@ -430,6 +430,50 @@ def test_local_true_api_runtime_has_no_direct_winhttp_fallback() -> None:
     assert "WindowsWinHttpGostTransport" not in source
 
 
+def test_missing_stunnel_msspi_is_exact_readiness_error_and_local_ready_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = LocalTrueApiReadBridge(
+        settings_path=tmp_path / "settings.json",
+        audit_log_path=tmp_path / "audit.jsonl",
+        discovery=FakeDiscovery(),
+        cms_signature_info=lambda signature: (THUMBPRINT, EXACT_CHALLENGE_BYTES),
+    )
+    monkeypatch.setattr(
+        "wbcz_local.bridge.inspect_local_cryptopro_foundation",
+        lambda: type("Status", (), {
+            "csp_available": True,
+            "csp_version": "5.0.13455",
+            "csp_version_supported": True,
+            "csp_technical_supported": True,
+            "csp_compliance_status": "UNCERTIFIED",
+            "csp_license_valid": True,
+            "license_status": "VALID",
+            "sspi_diagnostic_status": "AVAILABLE",
+            "gost_transport_available": False,
+            "stunnel_msspi_present": False,
+            "stunnel_msspi_executable_valid": False,
+            "stunnel_msspi_config_supported": True,
+            "stunnel_msspi_structural_ready": False,
+            "winhttp_available": True,
+            "cryptopro_tls_sspi_available": True,
+            "winhttp_gost_transport_initializable": True,
+            "cryptcp_available": False,
+            "cryptcp_path": None,
+            "readiness_reasons": ("CRYPTOPRO_STUNNEL_MSSPI_MISSING",),
+        })(),
+    )
+
+    status = bridge.status(INN)
+
+    assert status["error_code"] == "CRYPTOPRO_STUNNEL_MSSPI_MISSING"
+    assert status["stunnel_msspi_present"] is False
+    assert status["stunnel_msspi_structural_ready"] is False
+    assert status["true_api_local_ready"] is False
+    assert status["true_api_live_verified"] is False
+
+
 def _browser_auth(runtime: LocalTrueApiReadRuntime) -> dict:
     uuid, challenge = runtime.prepare_auth_challenge()
     assert uuid == "challenge-uuid"
@@ -644,6 +688,16 @@ if os.name == "nt":
         assert isinstance(inventory["candidates"], list)
         assert inventory["cryptcp_available"] is False
         assert inventory["discovery_state"] == "OK"
+
+
+    def test_real_windows_stunnel_msspi_probe_is_offline_structural_only() -> None:
+        probe = probe_stunnel_msspi()
+        safe = probe.safe_dict()
+
+        assert safe["true_api_live_verified"] is False
+        assert safe["canonical_transport"] == "CRYPTOPRO_STUNNEL_MSSPI_CHILD_PROCESS"
+        if not probe.stunnel_msspi_present:
+            assert "CRYPTOPRO_STUNNEL_MSSPI_MISSING" in probe.reasons
 
 
 def test_windows_certificate_discovery_enumerates_current_user_my_without_cryptcp() -> None:
