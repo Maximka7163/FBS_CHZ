@@ -12,10 +12,29 @@ import type {
   CertificateStatus,
   EnrollmentIntent,
   IntegrationItem,
+  LocalTrueApiStatus,
 } from "./types";
 import { filterWorkspaceItems, shortKiz, shouldPollWorkspace, stateTone } from "./workflow";
+import {
+  authenticateLocalBrowserCades,
+  BrowserCadesError,
+  enumerateBrowserCertificates,
+  getBrowserCadesDiagnostics,
+  probeBrowserCades,
+  type BrowserCadesCertificate,
+} from "./local_cades";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const LOCAL_FBS_ONLY = import.meta.env.VITE_SELLARI_LOCAL_FBS_ONLY === "true";
+const BRAND_NAME = LOCAL_FBS_ONLY ? "Sellari" : "markflow";
+
+if (LOCAL_FBS_ONLY) {
+  (
+    globalThis as typeof globalThis & {
+      __sellariCadesDiagnostics?: typeof getBrowserCadesDiagnostics;
+    }
+  ).__sellariCadesDiagnostics = getBrowserCadesDiagnostics;
+}
 
 let user: UserInfo | null = null;
 let homeHistory: FileItem[] = [];
@@ -30,6 +49,13 @@ let bulkBusy = false;
 let pollTimer: number | null = null;
 let enrollmentIntent: EnrollmentIntent | null = null;
 let kiLookupMessage = "";
+let localTrueApiStatus: LocalTrueApiStatus | null = null;
+let localTrueApiStatusError = "";
+let localTrueApiBusy = false;
+let browserCadesAvailable: boolean | null = null;
+let browserCadesErrorCode: string | null = null;
+let browserCertificates: BrowserCadesCertificate[] = [];
+let selectedBrowserThumbprint = "";
 let viewToken = 0;
 
 const icons = {
@@ -93,13 +119,12 @@ function shell(content: string): void {
   const initials = (user?.username || "").slice(0, 2).toUpperCase();
   app.innerHTML = `
     <header class="topbar">
-      <button id="nav-workspace" class="brand-button">markflow</button>
+      <button id="nav-workspace" class="brand-button">${BRAND_NAME}</button>
       <div class="topbar-right">
-        <button id="nav-settings" class="quiet-button">Настройки</button>
+        ${LOCAL_FBS_ONLY ? "" : '<button id="nav-settings" class="quiet-button">Настройки</button>'}
         <span class="safety-indicator"><i></i>DRY RUN</span>
         <span class="safety-indicator"><i></i>Отправка в ЧЗ отключена</span>
-        <span class="profile" title="${esc(user?.username || "")}">${esc(initials)}</span>
-        <button id="logout" class="quiet-button">Выйти</button>
+        ${LOCAL_FBS_ONLY ? "" : `<span class="profile" title="${esc(user?.username || "")}">${esc(initials)}</span><button id="logout" class="quiet-button">Выйти</button>`}
       </div>
     </header>
     <aside class="rail" aria-label="Навигация"><button id="rail-workspace" class="rail-mark" title="WB FBS">${icons.mark}</button></aside>
@@ -125,10 +150,25 @@ function shell(content: string): void {
   });
 }
 
+function renderLocalStartupError(error: string): void {
+  stopPolling();
+  app.innerHTML = `<main class="login-page"><section class="login-card">
+    <div class="login-brand">${BRAND_NAME}</div>
+    <h1>Маркировка</h1>
+    <p>Локальный OWNER недоступен</p>
+    <div class="login-error">${esc(error)}</div>
+    <p>Проверьте локальную установку через Check-Local.ps1. Вход по логину и паролю в локальном режиме не используется.</p>
+  </section></main>`;
+}
+
 function renderLogin(error = ""): void {
+  if (LOCAL_FBS_ONLY) {
+    renderLocalStartupError(error || "Локальный OWNER не найден или определён неоднозначно.");
+    return;
+  }
   stopPolling();
   app.innerHTML = `<main class="login-page"><form id="login" class="login-card">
-    <div class="login-brand">markflow</div>
+    <div class="login-brand">${BRAND_NAME}</div>
     <h1>Маркировка</h1>
     <p>Рабочая область WB FBS</p>
     ${error ? `<div class="login-error">${esc(error)}</div>` : ""}
@@ -143,6 +183,7 @@ function renderLogin(error = ""): void {
         document.querySelector<HTMLInputElement>("#username")!.value,
         document.querySelector<HTMLInputElement>("#password")!.value,
       );
+      await refreshLocalTrueApiStatus();
       await restoreInitialView();
     } catch (e) {
       renderLogin(readError(e));
@@ -175,13 +216,195 @@ function kiLookupBlock(): string {
   </section>`;
 }
 
+function localTrueApiBlock(): string {
+  if (!LOCAL_FBS_ONLY) return "";
+  if (!localTrueApiStatus) {
+    const message = localTrueApiStatusError
+      ? `Локальный статус Честного знака недоступен: ${localTrueApiStatusError}`
+      : "Проверяем локальную УКЭП и WinHTTP/CryptoPro transport…";
+    return `<section class="ki-lookup-card"><div><strong>Честный знак / CryptoPro</strong><span>${esc(message)}</span></div></section>`;
+  }
+
+  const status = localTrueApiStatus;
+  const backendEligible = new Map(
+    status.candidates
+      .filter((item) => item.eligible)
+      .map((item) => [item.thumbprint, item]),
+  );
+  const candidates = browserCertificates.filter((item) => backendEligible.has(item.thumbprint));
+  const selected = candidates.find((item) => item.thumbprint === selectedBrowserThumbprint);
+  const browserEligibleVisible = candidates.length > 0;
+  const trueApiLocalReady = Boolean(
+    status.true_api_local_ready_backend_prerequisites
+      && browserCadesAvailable === true
+      && browserEligibleVisible,
+  );
+  const rows = candidates.map((certificate) => {
+    const server = backendEligible.get(certificate.thumbprint)!;
+    const isSelected = certificate.thumbprint === selectedBrowserThumbprint;
+    return `<div class="certificate-row">
+      <div>
+        <b>${esc(certificate.subject || server.subject || certificate.thumbprint)}</b>
+        <small>ИНН ${esc(server.certificate_inn || "не извлечён")} · до ${esc(server.valid_to || certificate.validTo || "—")}</small>
+      </div>
+      <button class="quiet-button" data-browser-cert="${esc(certificate.thumbprint)}">
+        ${isSelected ? "Выбрано" : "Выбрать"}
+      </button>
+    </div>`;
+  }).join("");
+
+  const cspText = status.csp_available
+    ? `CryptoPro CSP ${status.csp_version || "версия не определена"} · Technical ${status.csp_technical_supported ? "SUPPORTED" : "UNSUPPORTED"} · Compliance ${status.csp_compliance_status} · License ${status.license_status}`
+    : "CryptoPro CSP не обнаружен";
+  const pluginText = browserCadesAvailable === true
+    ? "Browser CAdES READY"
+    : browserCadesAvailable === false
+      ? `Browser CAdES NOT READY${browserCadesErrorCode ? ` (${browserCadesErrorCode})` : ""}`
+      : "Проверяем Browser CAdES…";
+  const transportText = status.native_winhttp_gost_transport_ready
+    ? "WinHTTP READY"
+    : `WinHTTP NOT READY${status.transport_reasons.length ? `: ${status.transport_reasons.join(", ")}` : ""}`;
+  const sspiText = `SSPI diagnostic ${status.sspi_diagnostic_status}`;
+  const ukepState = status.ukep_state === "DISCOVERY_FAILED"
+    ? "DISCOVERY_FAILED"
+    : browserCadesAvailable === true && browserEligibleVisible
+      ? "VISIBLE"
+      : "NOT_VISIBLE";
+  const ukepText = `УКЭП ${ukepState}`;
+  const readinessText = `TRUE_API_LOCAL_READY=${trueApiLocalReady ? "true" : "false"} · TRUE_API_LIVE_VERIFIED=${status.true_api_live_verified ? "true" : "false"}`;
+
+  const noCertificateText = status.ukep_state === "DISCOVERY_FAILED"
+    ? '<span>Перечисление CurrentUser/My завершилось ошибкой (DISCOVERY_FAILED).</span>'
+    : '<span>Подходящая УКЭП в CurrentUser/My не обнаружена.</span>';
+  const connection = status.authenticated
+    ? `<strong>Честный знак подключён · только чтение</strong>
+       <span>GOST TLS ${status.gost_session_verified ? "подтверждён" : "не подтверждён"}${status.expire_date ? ` · сессия до ${esc(fmtHistoryDate(status.expire_date))}` : ""}</span>`
+    : `${rows || noCertificateText}
+       <button id="local-true-api-auth" class="secondary-button"
+         ${localTrueApiBusy || !selected || !trueApiLocalReady ? "disabled" : ""}>
+         ${localTrueApiBusy ? "Подключаем…" : "Подключить Честный знак"}
+       </button>`;
+
+  return `<section class="ki-lookup-card">
+    <div><strong>Честный знак / CryptoPro</strong><span>Business writes отключены</span></div>
+    <p class="integration-note">${esc(cspText)}</p>
+    <p class="integration-note">${esc(sspiText)} · ${esc(pluginText)} · ${esc(transportText)} · ${esc(ukepText)}</p>
+    ${status.csp_compliance_status === "UNCERTIFIED" ? '<p class="integration-note">Compliance: UNCERTIFIED — информационное предупреждение, не технический блокирующий gate.</p>' : ""}
+    <p class="integration-note">${esc(readinessText)}</p>
+    ${selected ? `<p class="integration-note">Выбрана УКЭП: ${esc(selected.subject || selected.thumbprint)}</p>` : ""}
+    ${connection}
+    ${status.error_code ? `<p class="login-error">${esc(status.error_code)}</p>` : ""}
+    ${localTrueApiStatusError ? `<p class="login-error">${esc(localTrueApiStatusError)}</p>` : ""}
+    <p class="integration-note">PIN обрабатывает CryptoPro/токен. Sellari не получает и не хранит PIN, private key или uuidToken. cryptcp.exe не требуется.</p>
+  </section>`;
+}
+
+function rerenderCurrentSurface(): void {
+  if (current) renderWorkspace();
+  else renderHome();
+}
+
+async function refreshLocalTrueApiStatus(): Promise<void> {
+  if (!LOCAL_FBS_ONLY || !user) return;
+
+  localTrueApiStatusError = "";
+  try {
+    localTrueApiStatus = await api.localTrueApiStatus();
+  } catch (error) {
+    localTrueApiStatusError = readError(error);
+    showToast(localTrueApiStatusError, "error");
+  }
+
+  try {
+    const browserProbe = await probeBrowserCades();
+    browserCadesAvailable = browserProbe.ready;
+    browserCadesErrorCode = browserProbe.errorCode;
+    browserCertificates = browserProbe.ready
+      ? await enumerateBrowserCertificates()
+      : [];
+    if (!browserProbe.ready && browserProbe.message) {
+      localTrueApiStatusError = localTrueApiStatusError
+        ? `${localTrueApiStatusError}; ${browserProbe.errorCode}: ${browserProbe.message}`
+        : `${browserProbe.errorCode}: ${browserProbe.message}`;
+    }
+  } catch (error) {
+    browserCadesAvailable = false;
+    browserCertificates = [];
+    browserCadesErrorCode = error instanceof BrowserCadesError
+      ? error.code
+      : "PLUGIN_INIT_FAILED";
+    const browserError = readError(error);
+    localTrueApiStatusError = localTrueApiStatusError
+      ? `${localTrueApiStatusError}; ${browserCadesErrorCode}: ${browserError}`
+      : `${browserCadesErrorCode}: ${browserError}`;
+    showToast(browserError, "error");
+  }
+
+  const status = localTrueApiStatus;
+  if (!status) return;
+  const eligible = new Set(
+    status.candidates.filter((item) => item.eligible).map((item) => item.thumbprint),
+  );
+  if (!selectedBrowserThumbprint && status.selected_thumbprint) {
+    selectedBrowserThumbprint = status.selected_thumbprint;
+  }
+  if (
+    selectedBrowserThumbprint
+    && (!eligible.has(selectedBrowserThumbprint)
+      || !browserCertificates.some((item) => item.thumbprint === selectedBrowserThumbprint))
+  ) {
+    selectedBrowserThumbprint = "";
+  }
+}
+
+function bindLocalTrueApi(): void {
+  if (!LOCAL_FBS_ONLY) return;
+
+  document.querySelectorAll<HTMLButtonElement>("[data-browser-cert]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const thumbprint = button.dataset.browserCert || "";
+      if (!thumbprint || localTrueApiBusy) return;
+      selectedBrowserThumbprint = thumbprint;
+      rerenderCurrentSurface();
+    });
+  });
+
+  document.querySelector<HTMLButtonElement>("#local-true-api-auth")?.addEventListener("click", async () => {
+    if (localTrueApiBusy || !selectedBrowserThumbprint) return;
+    localTrueApiBusy = true;
+    rerenderCurrentSurface();
+    try {
+      await authenticateLocalBrowserCades(selectedBrowserThumbprint);
+      await refreshLocalTrueApiStatus();
+      showToast("Честный знак подключён · только чтение");
+    } catch (error) {
+      await refreshLocalTrueApiStatus();
+      showToast(readError(error), "error");
+    } finally {
+      localTrueApiBusy = false;
+      rerenderCurrentSurface();
+    }
+  });
+}
+
 async function runKiLookup(): Promise<void> {
   const input = document.querySelector<HTMLInputElement>("#ki-lookup-value");
   const value = input?.value.trim() || "";
   if (!value) return;
-  kiLookupMessage = "Ставим безопасный read-only запрос…";
+  kiLookupMessage = "Выполняем безопасный read-only запрос…";
   renderHome();
   try {
+    if (LOCAL_FBS_ONLY) {
+      const response = await api.localCisesInfo([value]);
+      const item = response.items[0];
+      const state = item?.normalized;
+      kiLookupMessage = state
+        ? `${state.status || "—"} · владелец ${state.owner_inn || "—"} · ${state.product_group || "lp"} · сейчас`
+        : `ЧЗ не вернул состояние КИ${item?.item_error?.code ? ` · ${item.item_error.code}` : ""}`;
+      await refreshLocalTrueApiStatus();
+      renderHome();
+      return;
+    }
     const queued = await api.queueKiInfo([value]);
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 500));
@@ -203,10 +426,8 @@ async function runKiLookup(): Promise<void> {
     }
     kiLookupMessage = "Ответ ещё не получен. Повторите проверку позже.";
   } catch (error) {
-    const raw = readError(error);
-    kiLookupMessage = raw.includes("REAL_CERT_READ_ONLY_AUTHORIZATION_REQUIRED")
-      ? "Реальный read-only вход в ЧЗ подготовлен, но ещё не разрешён."
-      : raw;
+    kiLookupMessage = readError(error);
+    if (LOCAL_FBS_ONLY) await refreshLocalTrueApiStatus();
   }
   renderHome();
 }
@@ -259,7 +480,12 @@ function renderHome(): void {
   query = "";
   openDetail = null;
   setImportUrl(null);
-  shell(`${pageHeading()}${uploadBlock()}${historySection(homeHistory, null)}`);
+  shell(`${pageHeading()}${localTrueApiBlock()}${kiLookupBlock()}${uploadBlock()}${historySection(homeHistory, null)}`);
+  bindLocalTrueApi();
+  document.querySelector<HTMLFormElement>("#ki-lookup-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void runKiLookup();
+  });
   bindUpload();
   bindHistory();
 }
@@ -388,6 +614,7 @@ function bulkBar(view: WorkspaceView): string {
 
 function workspaceMarkup(view: WorkspaceView): string {
   return `${pageHeading()}
+  ${localTrueApiBlock()}
   <section class="workspace-card">
     <div class="active-file-row">
       <div class="active-file"><span class="file-icon">${icons.file}</span><div><strong>${esc(view.file.filename)}</strong><span>${view.file.unique_kiz} КИ · Все ${view.items.length}</span></div></div>
@@ -404,6 +631,7 @@ function workspaceMarkup(view: WorkspaceView): string {
 function renderWorkspace(): void {
   if (!current) return;
   shell(workspaceMarkup(current));
+  bindLocalTrueApi();
   bindWorkspaceEvents();
   bindHistory();
 }
@@ -504,12 +732,17 @@ function schedulePollIfNeeded(token: number): void {
 
 async function runCheck(): Promise<void> {
   if (!current || checking) return;
+  if (LOCAL_FBS_ONLY && !localTrueApiStatus?.authenticated) {
+    showToast("Сначала подключите Честный знак через Browser CAdES", "warn");
+    return;
+  }
   checking = true;
   renderWorkspace();
   try {
     await api.control(current.file.id);
     await refreshCurrent();
   } catch (e) {
+    if (LOCAL_FBS_ONLY) await refreshLocalTrueApiStatus();
     showToast(readError(e), "error");
   } finally {
     checking = false;
@@ -750,7 +983,7 @@ function readError(error: unknown): string {
 }
 
 async function restoreInitialView(): Promise<void> {
-  if (viewFromUrl() === "integrations") {
+  if (!LOCAL_FBS_ONLY && viewFromUrl() === "integrations") {
     await openIntegrations();
     return;
   }
@@ -763,7 +996,7 @@ async function restoreInitialView(): Promise<void> {
 }
 
 window.addEventListener("popstate", () => {
-  if (viewFromUrl() === "integrations") {
+  if (!LOCAL_FBS_ONLY && viewFromUrl() === "integrations") {
     void openIntegrations();
     return;
   }
@@ -776,8 +1009,10 @@ window.addEventListener("popstate", () => {
   await api.seedCsrf();
   try {
     user = await api.me();
+    await refreshLocalTrueApiStatus();
     await restoreInitialView();
-  } catch {
-    renderLogin();
+  } catch (error) {
+    if (LOCAL_FBS_ONLY) renderLocalStartupError(readError(error));
+    else renderLogin();
   }
 })();

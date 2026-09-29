@@ -313,8 +313,12 @@ def test_certificate_preflight_checks_gost_and_cryptopro_provider(tmp_path):
     }
 
     def runner(*args, **kwargs):
+        assert kwargs["text"] is False
         return subprocess.CompletedProcess(
-            args[0], 0, stdout=json.dumps(payload), stderr=""
+            args[0],
+            0,
+            stdout=base64.b64encode(json.dumps(payload).encode("utf-8")),
+            stderr=b"",
         )
 
     inspector = WindowsCryptoProCertificateInspector(
@@ -344,8 +348,12 @@ def test_certificate_preflight_rejects_non_cryptopro_provider(tmp_path):
     }
 
     def runner(*args, **kwargs):
+        assert kwargs["text"] is False
         return subprocess.CompletedProcess(
-            args[0], 0, stdout=json.dumps(payload), stderr=""
+            args[0],
+            0,
+            stdout=base64.b64encode(json.dumps(payload).encode("utf-8")),
+            stderr=b"",
         )
 
     inspector = WindowsCryptoProCertificateInspector(

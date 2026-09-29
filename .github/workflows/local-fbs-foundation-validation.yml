@@ -1,0 +1,333 @@
+name: Local FBS foundation validation
+
+on:
+  push:
+    branches: [local/fbs-only]
+  pull_request:
+    paths:
+      - "src/wbcz_local/**"
+      - "src/wbcz_web/api/dependencies.py"
+      - "src/wbcz_web/admin.py"
+      - "Setup-Local.ps1"
+      - "Start-Sellari.ps1"
+      - "Stop-Sellari.ps1"
+      - "Check-Local.ps1"
+      - "scripts/local/**"
+      - ".env.local.example"
+      - "LOCAL_README.md"
+      - "frontend/src/main.ts"
+      - "frontend/src/local_cades.ts"
+      - "frontend/tests/local_cades.test.mjs"
+      - "frontend/package.json"
+      - "frontend/tsconfig.json"
+      - "pyproject.toml"
+      - "tests/test_local_fbs_foundation.py"
+      - "tests/test_local_no_login.py"
+      - "tests/test_local_true_api_read.py"
+      - "tests/test_local_winhttp_gost.py"
+      - ".github/workflows/local-fbs-foundation-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  foundation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: sellari_local_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sellari_local_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      WBCZ_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/sellari_local_test
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install focused backend dependencies
+        run: python -m pip install -e ".[web,test]"
+
+      - name: Local foundation tests
+        run: >-
+          python -m pytest -q
+          tests/test_local_fbs_foundation.py
+          tests/test_local_no_login.py
+          tests/test_local_true_api_read.py
+          tests/test_local_winhttp_gost.py
+          tests/test_fbs_control_policy.py
+          tests/test_control.py
+
+      - name: Local FBS frontend build
+        working-directory: frontend
+        env:
+          VITE_SELLARI_LOCAL_FBS_ONLY: "true"
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run typecheck
+          npm run build
+
+  powershell-syntax:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Windows WinHTTP probe test dependencies
+        shell: pwsh
+        run: python -m pip install -e ".[web,test]"
+
+      - name: Real Windows CryptoPro and WinHTTP structural probes
+        shell: pwsh
+        run: >-
+          python -m pytest -q
+          tests/test_local_winhttp_gost.py
+          tests/test_local_true_api_read.py
+          -k real_windows_
+
+      - name: Parse local PowerShell scripts
+        shell: pwsh
+        run: |
+          $files = @(
+            "Setup-Local.ps1",
+            "Start-Sellari.ps1",
+            "Stop-Sellari.ps1",
+            "Check-Local.ps1",
+            "scripts/local/Common-Local.ps1"
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              throw "PowerShell parse failed: $file"
+            }
+          }
+
+      - name: Windows PowerShell 5.1 setup compatibility runtime
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+
+          $files = @(
+            'Setup-Local.ps1',
+            'Start-Sellari.ps1',
+            'Stop-Sellari.ps1',
+            'Check-Local.ps1',
+            'scripts/local/Common-Local.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              throw "Windows PowerShell 5.1 parse failed: $file"
+            }
+          }
+
+          . ./scripts/local/Common-Local.ps1
+
+          $password = New-SellariSecureHex -ByteCount 24
+          if ($password -notmatch '^[0-9a-f]{48}$') {
+            throw "Secure local DB password must be exactly 48 lowercase hex characters."
+          }
+
+          # psql -Atq can legitimately return no stdout for a missing role/DB.
+          # The shared scalar helper must normalize that to an empty string.
+          $emptyRole = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit /b 0') -FailureMessage 'synthetic role query failed'
+          $emptyDb = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @('/d','/c','exit /b 0') -FailureMessage 'synthetic DB query failed'
+          if ($emptyRole -ne '') { throw "Missing role output was not normalized to empty string." }
+          if ($emptyDb -ne '') { throw "Missing database output was not normalized to empty string." }
+
+          # Reproduce the real first-install case: native stderr + non-zero under
+          # global ErrorActionPreference=Stop must become ready=false, not a
+          # terminating NativeCommandError.
+          $beforeProbeEap = $ErrorActionPreference
+          $ready = Test-SellariPsqlReady -PsqlPath $env:ComSpec -Arguments @(
+            '/d', '/c', 'echo expected-auth-failure 1>&2 & exit /b 7'
+          )
+          if ($ready) { throw 'Expected failed psql-like readiness probe returned true.' }
+          if ($ErrorActionPreference -ne $beforeProbeEap) { throw 'Readiness probe did not restore ErrorActionPreference.' }
+          $launchFailurePreserved = $false
+          try {
+            Test-SellariPsqlReady -PsqlPath (Join-Path $env:RUNNER_TEMP 'missing-psql.exe') -Arguments @('--version') | Out-Null
+          } catch {
+            if ($_.Exception.Message -like 'PostgreSQL client executable is unavailable:*') { $launchFailurePreserved = $true }
+          }
+          if (-not $launchFailurePreserved) { throw 'Missing psql launch failure was incorrectly converted to readiness=false.' }
+
+          # stderr must never contaminate scalar stdout. Exit 0 still returns
+          # only the successful stdout value.
+          $scalar = Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @(
+            '/d', '/c', 'echo scalar-ok & echo benign-stderr 1>&2 & exit /b 0'
+          ) -FailureMessage 'synthetic scalar success unexpectedly failed'
+          if ($scalar -ne 'scalar-ok') { throw "Scalar stdout was contaminated or parsed incorrectly: '$scalar'" }
+
+          # Non-zero scalar/native SQL commands must reach controlled exit-code
+          # handling instead of surfacing PowerShell NativeCommandError.
+          $scalarRejected = $false
+          try {
+            Invoke-SellariPsqlScalar -PsqlPath $env:ComSpec -Arguments @(
+              '/d', '/c', 'echo scalar-failure 1>&2 & exit /b 8'
+            ) -FailureMessage 'controlled scalar failure' | Out-Null
+          } catch {
+            if ($_.Exception.Message -eq 'controlled scalar failure') { $scalarRejected = $true }
+          }
+          if (-not $scalarRejected) { throw 'Non-zero scalar command did not return the controlled FailureMessage.' }
+
+          $requiredRejected = $false
+          try {
+            Invoke-SellariPsqlRequired -PsqlPath $env:ComSpec -Arguments @(
+              '/d', '/c', 'echo required-sql-failure 1>&2 & exit /b 9'
+            ) -FailureMessage 'controlled required SQL failure' | Out-Null
+          } catch {
+            if ($_.Exception.Message -eq 'controlled required SQL failure') { $requiredRejected = $true }
+          }
+          if (-not $requiredRejected) { throw 'Required SQL failure was not fail-closed with the controlled message.' }
+
+          # Expected synthetic non-zero native exits above were asserted.
+          $global:LASTEXITCODE = 0
+          $root = Join-Path $env:RUNNER_TEMP 'sellari-psql-discovery-test'
+          $fakePsql = Join-Path $root 'PostgreSQL\16\bin\psql.exe'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $fakePsql) | Out-Null
+          New-Item -ItemType File -Force -Path $fakePsql | Out-Null
+          $savedPath = $env:PATH
+          $savedProgramFiles = $env:ProgramFiles
+          $savedProgramW6432 = $env:ProgramW6432
+          $savedProgramFilesX86 = ${env:ProgramFiles(x86)}
+          try {
+            $env:PATH = ''
+            $env:ProgramW6432 = $root
+            $env:ProgramFiles = $root
+            ${env:ProgramFiles(x86)} = $root
+            $found = Find-SellariPsql
+            if ([System.IO.Path]::GetFullPath($found) -ne [System.IO.Path]::GetFullPath($fakePsql)) {
+              throw "psql.exe outside PATH was not discovered from the standard PostgreSQL 16 location."
+            }
+          } finally {
+            $env:PATH = $savedPath
+            $env:ProgramFiles = $savedProgramFiles
+            $env:ProgramW6432 = $savedProgramW6432
+            ${env:ProgramFiles(x86)} = $savedProgramFilesX86
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          $setup = Get-Content -LiteralPath ./Setup-Local.ps1 -Raw
+          if ($setup -match 'RandomNumberGenerator\]::Fill') { throw 'Setup still uses .NET Core-only RandomNumberGenerator.Fill.' }
+          if ($setup -match '\[Convert\]::ToHexString') { throw 'Setup still uses .NET 5+ Convert.ToHexString.' }
+          if ($setup -notmatch 'New-SellariSecureHex -ByteCount 24') { throw 'Setup does not use the PS5.1-safe secure RNG helper.' }
+      - name: Pinned Browser CAdES artifact helper fails closed
+        shell: pwsh
+        run: |
+          . ./scripts/local/Common-Local.ps1
+          $root = Join-Path $env:RUNNER_TEMP "sellari-pinned-cades-test"
+          Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          $good = Join-Path $root "good.js"
+          $published = Join-Path $root "published.js"
+          [System.IO.File]::WriteAllBytes($good, [System.Text.Encoding]::UTF8.GetBytes("audited-cades-artifact"))
+          $expected = (Get-FileHash -LiteralPath $good -Algorithm SHA256).Hash
+          Publish-SellariPinnedArtifact -CandidatePath $good -DestinationPath $published -ExpectedSha256 $expected
+          if (-not (Test-Path -LiteralPath $published)) { throw "Verified artifact was not published." }
+          Assert-SellariPinnedSha256 -Path $published -ExpectedSha256 $expected | Out-Null
+
+          $mutated = Join-Path $root "mutated.js"
+          $mustNotPublish = Join-Path $root "must-not-publish.js"
+          [System.IO.File]::WriteAllBytes($mutated, [System.Text.Encoding]::UTF8.GetBytes("mutated-cades-artifact"))
+          $rejected = $false
+          try {
+            Publish-SellariPinnedArtifact -CandidatePath $mutated -DestinationPath $mustNotPublish -ExpectedSha256 $expected
+          } catch {
+            $rejected = $true
+          }
+          if (-not $rejected) { throw "Mutated artifact was not rejected." }
+          if (Test-Path -LiteralPath $mustNotPublish) { throw "Mutated artifact was published." }
+
+      - name: SignedCms signature-only integrity semantics
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+          $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+          try {
+            $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+              "CN=Sellari Synthetic CI",
+              $rsa,
+              [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+              [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            )
+            $certificate = $request.CreateSelfSigned(
+              [DateTimeOffset]::UtcNow.AddMinutes(-1),
+              [DateTimeOffset]::UtcNow.AddHours(1)
+            )
+            $content = [System.Text.Encoding]::UTF8.GetBytes("synthetic-browser-cades-auth-challenge")
+            $contentInfo = [System.Security.Cryptography.Pkcs.ContentInfo]::new($content)
+            $signed = [System.Security.Cryptography.Pkcs.SignedCms]::new($contentInfo, $false)
+            $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($certificate)
+            $signed.ComputeSignature($signer)
+            $encoded = $signed.Encode()
+
+            $valid = [System.Security.Cryptography.Pkcs.SignedCms]::new()
+            $valid.Decode($encoded)
+            if ($valid.Detached) { throw "Synthetic CMS unexpectedly detached." }
+            if ($valid.SignerInfos.Count -ne 1) { throw "Synthetic CMS signer count mismatch." }
+            # Same semantics used by wbcz_local.bridge: integrity only. Chain
+            # eligibility is a separate participant/certificate policy.
+            $valid.CheckSignature($true)
+
+            $mutated = [byte[]]$encoded.Clone()
+            $mutated[$mutated.Length - 8] = $mutated[$mutated.Length - 8] -bxor 1
+            $rejected = $false
+            try {
+              $invalid = [System.Security.Cryptography.Pkcs.SignedCms]::new()
+              $invalid.Decode($mutated)
+              $invalid.CheckSignature($true)
+            } catch {
+              $rejected = $true
+            }
+            if (-not $rejected) { throw "Tampered CMS unexpectedly passed CheckSignature(true)." }
+          } finally {
+            $rsa.Dispose()
+          }

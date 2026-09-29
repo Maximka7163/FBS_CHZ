@@ -217,6 +217,92 @@ export interface EnrollmentIntent {
   requested_protocol_version: string | null;
 }
 
+export interface LocalTrueApiCandidate {
+  thumbprint: string;
+  subject: string | null;
+  certificate_inn: string | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  has_private_key: boolean;
+  compatibility: string | null;
+  crypto_provider: string | null;
+  public_key_oid: string | null;
+  eligible: boolean;
+}
+
+export interface LocalTrueApiStatus {
+  cryptopro_available: boolean;
+  csp_available: boolean;
+  csp_version: string | null;
+  csp_version_supported: boolean;
+  csp_technical_supported: boolean;
+  csp_compliance_status: "CERTIFIED" | "UNCERTIFIED" | "UNKNOWN";
+  csp_license_valid: boolean;
+  license_status: "VALID" | "INVALID" | "UNKNOWN";
+  sspi_diagnostic_status: "AVAILABLE" | "UNAVAILABLE" | "UNKNOWN";
+  browser_cades_available: boolean | null;
+  ukep_available: boolean;
+  ukep_state: "VISIBLE" | "NOT_VISIBLE" | "DISCOVERY_FAILED";
+  gost_transport_available: boolean;
+  native_winhttp_gost_transport_ready: boolean;
+  winhttp_available: boolean;
+  cryptopro_tls_sspi_available: boolean;
+  winhttp_gost_transport_initializable: boolean;
+  transport_reasons: string[];
+  cryptcp_available: boolean;
+  candidates: LocalTrueApiCandidate[];
+  error_code: string | null;
+  selected_thumbprint: string | null;
+  authenticated: boolean;
+  expire_date: string | null;
+  gost_session_verified: boolean;
+  true_api_local_ready_backend_prerequisites: boolean;
+  true_api_local_ready: boolean | null;
+  true_api_local_ready_reasons: string[];
+  true_api_live_verified: boolean;
+  real_read_enabled: boolean;
+  read_only: boolean;
+  business_write_enabled: boolean;
+  uuid_token_persisted: boolean;
+  pin_persisted: boolean;
+}
+
+export interface LocalBrowserAuthPrepare {
+  attempt_id: string;
+  challenge_base64: string;
+  participant_inn: string;
+  expires_at: string;
+  read_only: true;
+}
+
+export interface LocalBrowserAuthComplete {
+  authenticated: boolean;
+  expire_date: string;
+  read_only: boolean;
+  business_write_enabled: boolean;
+}
+
+export interface LocalCisInfoResponse {
+  status: "completed";
+  source: "local-cryptopro-true-api";
+  items: Array<{
+    requested_cis: string;
+    normalized: {
+      requested_cis: string;
+      cis: string | null;
+      gtin: string | null;
+      product_name: string | null;
+      product_group: string | null;
+      owner_inn: string | null;
+      owner_name: string | null;
+      status: string | null;
+      status_ex: string | null;
+      withdraw_reason: string | null;
+    } | null;
+    item_error: { code?: string | null; message?: string | null } | null;
+  }>;
+}
+
 export interface CisInventoryRequest {
   request_id: string;
   job_type: string;

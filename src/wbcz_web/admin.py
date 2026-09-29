@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import secrets
 import sys
 
 from sqlalchemy.exc import IntegrityError
@@ -129,6 +130,40 @@ def _bootstrap_owner(args, db) -> int:
     return 0
 
 
+def _bootstrap_local_owner(args, db, config: WebConfig) -> int:
+    """Bootstrap the local-only OWNER without an interactive application password."""
+    try:
+        from wbcz_local.app import assert_local_foundation_safety
+
+        assert_local_foundation_safety(config)
+    except ValueError as exc:
+        print(f"Cannot bootstrap local owner: {exc}", file=sys.stderr)
+        return 2
+
+    generated_verifier = secrets.token_urlsafe(48)
+    try:
+        user, org, participant, _ = BootstrapService(db).bootstrap(
+            username=args.username,
+            password=generated_verifier,
+            organisation_name=args.organisation,
+            participant_inn=args.inn,
+            participant_name=args.participant_name,
+        )
+        db.commit()
+    except (ValueError, AuthorizationError, IntegrityError) as exc:
+        db.rollback()
+        print(f"Cannot bootstrap local owner: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        generated_verifier = ""
+
+    print(
+        f"Bootstrapped local-only OWNER {user.username} "
+        f"organisation={org.id} participant={participant.id}"
+    )
+    return 0
+
+
 def _verify_audit_chain(args, db) -> int:
     if bool(args.system) == bool(args.organisation_id):
         print("Select exactly one of --system or --organisation-id", file=sys.stderr)
@@ -216,6 +251,12 @@ def main() -> None:
     bootstrap.add_argument("--inn", required=True)
     bootstrap.add_argument("--participant-name", default=None)
 
+    bootstrap_local = sub.add_parser("bootstrap-local-owner")
+    bootstrap_local.add_argument("username")
+    bootstrap_local.add_argument("--organisation", required=True)
+    bootstrap_local.add_argument("--inn", required=True)
+    bootstrap_local.add_argument("--participant-name", default=None)
+
     verify = sub.add_parser("verify-audit-chain")
     selection = verify.add_mutually_exclusive_group(required=True)
     selection.add_argument("--organisation-id", default=None)
@@ -230,6 +271,8 @@ def main() -> None:
     try:
         if args.command == "bootstrap-owner":
             code = _bootstrap_owner(args, db)
+        elif args.command == "bootstrap-local-owner":
+            code = _bootstrap_local_owner(args, db, config)
         elif args.command == "create-user":
             code = _create_user(args, db)
         elif args.command == "disable-user":

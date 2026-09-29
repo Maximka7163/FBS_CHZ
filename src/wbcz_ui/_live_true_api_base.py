@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import http.client
@@ -567,8 +568,127 @@ class ReadOnlyTrueApiTransport:
         return None
 
 
+
+def _safe_powershell_stderr(stderr: bytes | str | None) -> str:
+    """Decode failure diagnostics without trusting the Windows process codepage."""
+    if stderr is None:
+        return ""
+    if isinstance(stderr, bytes):
+        return stderr[:4096].decode("utf-8", errors="replace")
+    return str(stderr)[:4096]
+
+
+def _run_powershell_json_object(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    powershell: str,
+    script: str,
+    failure_message: str,
+    invalid_message: str,
+    timeout: int = 30,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Run Windows PowerShell with a deterministic binary JSON transport."""
+    transport_script = script + r'''
+$WbczJson = $WbczJsonObject | ConvertTo-Json -Compress -Depth 4
+$WbczUtf8 = [System.Text.Encoding]::UTF8.GetBytes($WbczJson)
+$WbczBase64 = [Convert]::ToBase64String($WbczUtf8)
+$WbczAscii = [System.Text.Encoding]::ASCII.GetBytes($WbczBase64)
+$WbczStdout = [Console]::OpenStandardOutput()
+$WbczStdout.Write($WbczAscii, 0, $WbczAscii.Length)
+$WbczStdout.Flush()
+'''
+    completed = runner(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            transport_script,
+        ],
+        text=False,
+        capture_output=True,
+        timeout=timeout,
+        env=env,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = _safe_powershell_stderr(completed.stderr).strip()
+        raise TrueApiError((detail or failure_message)[:1000])
+
+    stdout = completed.stdout
+    if stdout is None:
+        raise TrueApiError(invalid_message)
+    if isinstance(stdout, str):
+        try:
+            payload = stdout.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise TrueApiError(invalid_message) from exc
+    else:
+        payload = bytes(stdout)
+    payload = payload.strip()
+    if not payload:
+        raise TrueApiError(invalid_message)
+
+    try:
+        raw_json = base64.b64decode(payload, validate=True)
+        parsed = json.loads(raw_json.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise TrueApiError(invalid_message) from exc
+    if not isinstance(parsed, dict):
+        raise TrueApiError(invalid_message)
+    return parsed
+
+
+_CERTIFICATE_SUBJECT_INN_COMPONENT_RE = re.compile(
+    r"^\s*"
+    r"(?:OID\.1\.2\.643\.100\.4|OID\.1\.2\.643\.3\.131\.1\.1|INN|ИНН)"
+    r"\s*[=:]\s*(\d{12}|\d{10})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _certificate_subject_components(subject: str) -> list[str]:
+    """Split .NET X500 subject components without splitting quoted/escaped commas."""
+    components: list[str] = []
+    start = 0
+    quoted = False
+    escaped = False
+    for index, char in enumerate(subject):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            quoted = not quoted
+            continue
+        if char == "," and not quoted:
+            components.append(subject[start:index])
+            start = index + 1
+    components.append(subject[start:])
+    return components
+
+
+def _certificate_subject_inns(subject: str) -> list[str]:
+    """Return recognized standalone subject INNs in first-seen order."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for component in _certificate_subject_components(subject):
+        match = _CERTIFICATE_SUBJECT_INN_COMPONENT_RE.fullmatch(component)
+        if match is None:
+            continue
+        value = match.group(1)
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 class WindowsCryptoProCertificateDiscovery:
-    """Enumerate safe CurrentUser\\My certificate metadata without signing or exporting keys."""
+    """Enumerate safe CurrentUser\\My metadata without cryptcp or private-key export."""
 
     def __init__(
         self,
@@ -577,16 +697,11 @@ class WindowsCryptoProCertificateDiscovery:
         powershell: str = "powershell.exe",
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
+        # Kept for constructor compatibility only. LOCAL discovery deliberately
+        # does not require or execute cryptcp.exe.
         self._explicit_cryptcp = Path(cryptcp_path) if cryptcp_path else None
         self.powershell = powershell
         self._runner = runner
-
-    def _cryptcp_available(self) -> bool:
-        try:
-            _find_cryptopro_binary(self._explicit_cryptcp, "cryptcp.exe")
-            return True
-        except Exception:
-            return False
 
     def discover(self) -> dict[str, Any]:
         if os.name != "nt" and self._runner is subprocess.run:
@@ -614,58 +729,68 @@ public static class WbczCertDiscoveryNative {
 "@
 $store=New-Object System.Security.Cryptography.X509Certificates.X509Store('My','CurrentUser')
 $items=@()
+$skipped=0
 try {
   $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
   foreach ($cert in $store.Certificates) {
-    $provider=$null
-    $size=[uint32]0
-    if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,[IntPtr]::Zero,[ref]$size) -and $size -gt 0) {
-      $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal([int]$size)
-      try {
-        if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,$ptr,[ref]$size)) {
-          $info=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[type][WbczCertDiscoveryNative+CRYPT_KEY_PROV_INFO])
-          $provider=[Runtime.InteropServices.Marshal]::PtrToStringUni($info.pwszProvName)
+    try {
+      $provider=$null
+      $size=[uint32]0
+      if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,[IntPtr]::Zero,[ref]$size) -and $size -gt 0) {
+        $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal([int]$size)
+        try {
+          if ([WbczCertDiscoveryNative]::CertGetCertificateContextProperty($cert.Handle,2,$ptr,[ref]$size)) {
+            $info=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[type][WbczCertDiscoveryNative+CRYPT_KEY_PROV_INFO])
+            $provider=[Runtime.InteropServices.Marshal]::PtrToStringUni($info.pwszProvName)
+          }
+        } finally {
+          [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
         }
-      } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }
-    }
-    $items += [pscustomobject]@{
-      thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
-      subject=$cert.Subject
-      issuer=$cert.Issuer
-      serial=$cert.GetSerialNumberString()
-      hasPrivateKey=$cert.HasPrivateKey
-      notBefore=$cert.NotBefore.ToUniversalTime().ToString('o')
-      notAfter=$cert.NotAfter.ToUniversalTime().ToString('o')
-      publicKeyOid=$cert.PublicKey.Oid.Value
-      signatureOid=$cert.SignatureAlgorithm.Value
-      providerName=$provider
+      }
+      # GetKeyAlgorithm reads the certificate algorithm OID without requiring
+      # .NET to construct a GOST PublicKey implementation.
+      $items += [pscustomobject]@{
+        thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
+        subject=$cert.Subject
+        issuer=$cert.Issuer
+        serial=$cert.GetSerialNumberString()
+        hasPrivateKey=$cert.HasPrivateKey
+        notBefore=$cert.NotBefore.ToUniversalTime().ToString('o')
+        notAfter=$cert.NotAfter.ToUniversalTime().ToString('o')
+        publicKeyOid=$cert.GetKeyAlgorithm()
+        signatureOid=$cert.SignatureAlgorithm.Value
+        providerName=$provider
+      }
+    } catch {
+      # One unreadable certificate must not make CurrentUser\\My discovery
+      # indistinguishable from a store/API failure.
+      $skipped += 1
     }
   }
-} finally { $store.Close() }
-[pscustomobject]@{certificates=@($items)} | ConvertTo-Json -Compress -Depth 4
+} finally {
+  $store.Close()
+}
+$WbczJsonObject=[pscustomobject]@{certificates=@($items);skippedCount=$skipped}
 '''
-        completed = self._runner(
-            [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script],
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
+        root = _run_powershell_json_object(
+            runner=self._runner,
+            powershell=self.powershell,
+            script=script,
+            failure_message="Certificate discovery failed",
+            invalid_message="Certificate discovery returned invalid data",
         )
-        if completed.returncode != 0:
-            raise TrueApiError((completed.stderr.strip() or "Certificate discovery failed")[:1000])
-        try:
-            root = json.loads(completed.stdout.strip())
-        except json.JSONDecodeError as exc:
-            raise TrueApiError("Certificate discovery returned invalid data") from exc
         rows = root.get("certificates") if isinstance(root, dict) else None
         if not isinstance(rows, list):
             raise TrueApiError("Certificate discovery response misses certificates")
-        cryptcp_available = self._cryptcp_available()
+
         candidates: list[dict[str, Any]] = []
+        cryptopro_visible = False
         for raw in rows:
             if not isinstance(raw, dict):
                 continue
-            thumbprint = re.sub(r"[^0-9A-F]", "", str(raw.get("thumbprint") or "").upper())
+            thumbprint = re.sub(
+                r"[^0-9A-F]", "", str(raw.get("thumbprint") or "").upper()
+            )
             if not thumbprint:
                 continue
             subject = str(raw.get("subject") or "")[:2000]
@@ -673,21 +798,18 @@ try {
             provider_key = provider.casefold().replace("-", " ")
             public_key_oid = str(raw.get("publicKeyOid") or "")[:128]
             compatible = (
-                cryptcp_available
-                and public_key_oid in _GOST_PUBLIC_KEY_OIDS
+                public_key_oid in _GOST_PUBLIC_KEY_OIDS
                 and ("crypto pro" in provider_key or "cryptopro" in provider_key)
             )
-            match = re.search(
-                r"(?:OID\.1\.2\.643\.100\.4|INN|ИНН)\s*[=:]\s*(\d{10}|\d{12})",
-                subject,
-                re.IGNORECASE,
-            )
+            cryptopro_visible = cryptopro_visible or compatible
+            certificate_inns = _certificate_subject_inns(subject)
             candidates.append({
                 "thumbprint": thumbprint[:160],
                 "subject": subject or None,
                 "issuer": str(raw.get("issuer") or "")[:2000] or None,
                 "serial": str(raw.get("serial") or "")[:160] or None,
-                "certificate_inn": match.group(1) if match else None,
+                "certificate_inn": certificate_inns[0] if certificate_inns else None,
+                "certificate_inns": certificate_inns,
                 "valid_from": str(raw.get("notBefore") or "")[:64] or None,
                 "valid_to": str(raw.get("notAfter") or "")[:64] or None,
                 "has_private_key": bool(raw.get("hasPrivateKey")),
@@ -696,7 +818,13 @@ try {
                 "crypto_provider": provider or None,
                 "compatibility": "GOST_CRYPTOPRO" if compatible else "UNSUPPORTED",
             })
-        return {"cryptopro_available": cryptcp_available, "candidates": candidates}
+        return {
+            "cryptopro_available": cryptopro_visible,
+            "cryptcp_available": False,
+            "candidates": candidates,
+            "skipped_certificate_count": int(root.get("skippedCount") or 0),
+            "discovery_state": "OK",
+        }
 
 
 class WindowsCryptoProCertificateInspector:
@@ -759,7 +887,7 @@ try {
     $info=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[type][WbczCertNative+CRYPT_KEY_PROV_INFO])
     $provider=[Runtime.InteropServices.Marshal]::PtrToStringUni($info.pwszProvName)
   } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }
-  [pscustomobject]@{
+  $WbczJsonObject=[pscustomobject]@{
     thumbprint=$cert.Thumbprint.Replace(' ','').ToUpperInvariant()
     hasPrivateKey=$cert.HasPrivateKey
     notBefore=$cert.NotBefore.ToUniversalTime().ToString('o')
@@ -767,33 +895,19 @@ try {
     publicKeyOid=$cert.PublicKey.Oid.Value
     signatureOid=$cert.SignatureAlgorithm.Value
     providerName=$provider
-  } | ConvertTo-Json -Compress
+  }
 } finally { $store.Close() }
 '''
         env = os.environ.copy()
         env["WBCZ_CERT_THUMBPRINT"] = self.thumbprint
-        completed = self._runner(
-            [
-                self.powershell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                script,
-            ],
-            text=True,
-            capture_output=True,
-            timeout=30,
+        data = _run_powershell_json_object(
+            runner=self._runner,
+            powershell=self.powershell,
+            script=script,
+            failure_message="Certificate diagnostics failed",
+            invalid_message="Certificate diagnostics returned invalid data",
             env=env,
-            check=False,
         )
-        if completed.returncode != 0:
-            raise TrueApiError(
-                (completed.stderr.strip() or "Certificate diagnostics failed")[:1000]
-            )
-        try:
-            data = json.loads(completed.stdout.strip())
-        except json.JSONDecodeError as exc:
-            raise TrueApiError("Certificate diagnostics returned invalid data") from exc
         if data.get("thumbprint") != self.thumbprint:
             raise TrueApiError("Certificate thumbprint mismatch")
         if data.get("hasPrivateKey") is not True:
