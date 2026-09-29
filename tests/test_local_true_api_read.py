@@ -529,7 +529,8 @@ def test_certificate_discovery_ignores_unbound_digit_strings_and_deduplicates_al
             "thumbprint": THUMBPRINT,
             "subject": (
                 "CN=1234567890, SERIALNUMBER=027504733612, "
-                "INN=027504733612, OID.1.2.643.100.4=027504733612, "
+                "XINN=9999999999, INN=027504733612, "
+                "OID.1.2.643.100.4=027504733612, "
                 "OID.1.2.643.3.131.1.1=027504733612"
             ),
             "issuer": "CN=УЦ 9999999999",
