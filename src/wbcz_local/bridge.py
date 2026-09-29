@@ -29,7 +29,8 @@ from wbcz_ui.live_true_api import (
     _find_cryptopro_binary,
 )
 
-from .winhttp_gost import WindowsWinHttpGostTransport, probe_native_gost_transport
+from .stunnel_msspi import StunnelMsspiTransport, probe_stunnel_msspi
+from .winhttp_gost import probe_native_gost_transport
 
 
 class LocalTrueApiUnavailable(RuntimeError):
@@ -61,6 +62,11 @@ class CryptoProFoundationStatus:
     readiness_reasons: tuple[str, ...]
     real_read_enabled: bool
     business_write_enabled: bool = False
+    stunnel_msspi_present: bool = False
+    stunnel_msspi_executable_valid: bool = False
+    stunnel_msspi_config_supported: bool = False
+    stunnel_msspi_structural_ready: bool = False
+    stunnel_msspi_path: str | None = None
 
     @property
     def cryptopro_csp_detected(self) -> bool:
@@ -69,7 +75,11 @@ class CryptoProFoundationStatus:
     def safe_dict(self) -> dict:
         value = asdict(self)
         value["cryptopro_csp_detected"] = self.csp_available
-        value["native_winhttp_gost_transport_ready"] = self.gost_transport_available
+        value["native_winhttp_gost_transport_ready"] = (
+            self.winhttp_gost_transport_initializable
+        )
+        value["canonical_transport"] = "CRYPTOPRO_STUNNEL_MSSPI_CHILD_PROCESS"
+        value["true_api_live_verified"] = False
         return value
 
 def _candidate_paths(explicit: str | None, names: Iterable[str]) -> list[Path]:
@@ -130,6 +140,7 @@ def _windows_csp_registry_detected() -> bool:
 def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
     windows = platform.system().lower() == "windows"
     native = probe_native_gost_transport()
+    stunnel = probe_stunnel_msspi()
     cryptcp = _find_optional_cryptopro(
         "cryptcp.exe", os.getenv("WBCZ_CRYPTOPRO_CRYPTCP")
     )
@@ -142,6 +153,18 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
             or _windows_csp_registry_detected()
         )
     )
+
+    readiness_reasons: list[str] = []
+    if not windows:
+        readiness_reasons.append("UNSUPPORTED_WINDOWS")
+    if not csp_available:
+        readiness_reasons.append("CRYPTOPRO_CSP_NOT_INSTALLED")
+    if csp_available and not native.csp_technical_supported:
+        readiness_reasons.append("UNSUPPORTED_CRYPTOPRO_VERSION")
+    if csp_available and native.license_status == "INVALID":
+        readiness_reasons.append("CRYPTOPRO_CSP_LICENSE_INVALID")
+    readiness_reasons.extend(stunnel.reasons)
+
     return CryptoProFoundationStatus(
         windows=windows,
         windows_build=native.windows_build,
@@ -155,18 +178,23 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
         sspi_diagnostic_status=native.sspi_diagnostic_status,
         browser_cades_available=None,
         ukep_available=None,
-        gost_transport_available=native.backend_ready,
+        gost_transport_available=stunnel.stunnel_msspi_structural_ready,
         winhttp_available=native.winhttp_available,
         cryptopro_tls_sspi_available=native.cryptopro_tls_sspi_available,
         winhttp_gost_transport_initializable=native.winhttp_gost_transport_initializable,
         cryptcp_available=bool(cryptcp),
         cryptcp_path=str(cryptcp) if cryptcp else None,
-        readiness_reasons=native.reasons,
+        readiness_reasons=tuple(dict.fromkeys(readiness_reasons)),
         real_read_enabled=bool(
             os.getenv("WBCZ_TRUE_API_REAL_READ_ENABLED", "false").strip().lower()
             in {"1", "true", "yes", "on"}
         ),
         business_write_enabled=False,
+        stunnel_msspi_present=stunnel.stunnel_msspi_present,
+        stunnel_msspi_executable_valid=stunnel.stunnel_msspi_executable_valid,
+        stunnel_msspi_config_supported=stunnel.stunnel_msspi_config_supported,
+        stunnel_msspi_structural_ready=stunnel.stunnel_msspi_structural_ready,
+        stunnel_msspi_path=stunnel.executable_path,
     )
 
 def _browser_cades_signature_info(
@@ -562,14 +590,39 @@ class LocalTrueApiReadBridge:
                     )
                 ),
                 "browser_cades_available": None,
-                "gost_transport_available": components.gost_transport_available,
-                "native_winhttp_gost_transport_ready": components.gost_transport_available,
-                "winhttp_available": bool(
+                "canonical_transport": "CRYPTOPRO_STUNNEL_MSSPI_CHILD_PROCESS",
+                "gost_transport_available": bool(
                     getattr(
                         components,
-                        "winhttp_available",
+                        "stunnel_msspi_structural_ready",
                         components.gost_transport_available,
                     )
+                ),
+                "stunnel_msspi_present": bool(
+                    getattr(components, "stunnel_msspi_present", False)
+                ),
+                "stunnel_msspi_executable_valid": bool(
+                    getattr(components, "stunnel_msspi_executable_valid", False)
+                ),
+                "stunnel_msspi_config_supported": bool(
+                    getattr(components, "stunnel_msspi_config_supported", False)
+                ),
+                "stunnel_msspi_structural_ready": bool(
+                    getattr(
+                        components,
+                        "stunnel_msspi_structural_ready",
+                        components.gost_transport_available,
+                    )
+                ),
+                "native_winhttp_gost_transport_ready": bool(
+                    getattr(
+                        components,
+                        "winhttp_gost_transport_initializable",
+                        False,
+                    )
+                ),
+                "winhttp_available": bool(
+                    getattr(components, "winhttp_available", False)
                 ),
                 "cryptopro_tls_sspi_available": bool(
                     getattr(
@@ -582,7 +635,7 @@ class LocalTrueApiReadBridge:
                     getattr(
                         components,
                         "winhttp_gost_transport_initializable",
-                        components.gost_transport_available,
+                        False,
                     )
                 ),
                 "transport_reasons": list(
@@ -636,12 +689,33 @@ class LocalTrueApiReadBridge:
             safe["eligible"] = self._eligible(item, participant_inn)
             candidates.append(safe)
         visible = any(item.get("eligible") for item in candidates)
+        transport_ready = bool(
+            getattr(
+                components,
+                "stunnel_msspi_structural_ready",
+                components.gost_transport_available,
+            )
+        )
+        transport_error = None
+        if not transport_ready:
+            transport_reasons = list(
+                getattr(components, "readiness_reasons", ())
+            )
+            transport_error = (
+                transport_reasons[0]
+                if transport_reasons
+                else "CRYPTOPRO_STUNNEL_MSSPI_MISSING"
+            )
         return {
             **foundation_payload(),
             "ukep_available": visible,
             "ukep_state": "VISIBLE" if visible else "NOT_VISIBLE",
             "candidates": candidates,
-            "error_code": None if visible else "NO_ELIGIBLE_CERTIFICATE",
+            "error_code": (
+                transport_error
+                if transport_error
+                else (None if visible else "NO_ELIGIBLE_CERTIFICATE")
+            ),
         }
 
     def selected_thumbprint(self, participant_inn: str) -> str | None:
@@ -689,11 +763,20 @@ class LocalTrueApiReadBridge:
 
     def _build_runtime(self, participant_inn: str) -> LocalTrueApiReadRuntime:
         foundation = inspect_local_cryptopro_foundation()
-        if not foundation.gost_transport_available:
-            reason = foundation.readiness_reasons[0] if foundation.readiness_reasons else "WINHTTP_GOST_TRANSPORT_NOT_READY"
+        if not foundation.stunnel_msspi_structural_ready:
+            reason = (
+                foundation.readiness_reasons[0]
+                if foundation.readiness_reasons
+                else "CRYPTOPRO_STUNNEL_MSSPI_MISSING"
+            )
             raise GostTlsUnavailable(reason)
+        if not foundation.stunnel_msspi_path:
+            raise GostTlsUnavailable("CRYPTOPRO_STUNNEL_MSSPI_MISSING")
         audit = JsonlLiveAudit(self.audit_log_path)
-        transport = WindowsWinHttpGostTransport(audit=audit)
+        transport = StunnelMsspiTransport(
+            executable_path=foundation.stunnel_msspi_path,
+            audit=audit,
+        )
         return LocalTrueApiReadRuntime(
             participant_inn=participant_inn,
             transport=transport,
@@ -889,7 +972,12 @@ class LocalTrueApiReadBridge:
         authenticated = bool(runtime and runtime.authenticated)
         gost_verified = bool(tls.get("gost_session_verified"))
         eligible_visible = bool(inventory.get("ukep_available"))
-        backend_ready = bool(inventory.get("native_winhttp_gost_transport_ready"))
+        backend_ready = bool(
+            inventory.get(
+                "stunnel_msspi_structural_ready",
+                inventory.get("gost_transport_available"),
+            )
+        )
         reasons = list(inventory.get("transport_reasons") or [])
         if inventory.get("ukep_state") == "DISCOVERY_FAILED":
             reasons.append("CERTIFICATE_DISCOVERY_FAILED")
@@ -901,7 +989,11 @@ class LocalTrueApiReadBridge:
         reasons.append("BROWSER_CADES_RUNTIME_CHECK_REQUIRED")
         if not error_code and not backend_ready:
             transport_reasons = inventory.get("transport_reasons") or []
-            error_code = transport_reasons[0] if transport_reasons else "WINHTTP_GOST_TRANSPORT_NOT_READY"
+            error_code = (
+                transport_reasons[0]
+                if transport_reasons
+                else "CRYPTOPRO_STUNNEL_MSSPI_MISSING"
+            )
         return {
             **inventory,
             "error_code": error_code,
@@ -914,12 +1006,14 @@ class LocalTrueApiReadBridge:
             ),
             "gost_session_verified": gost_verified,
             "true_api_local_ready_backend_prerequisites": backend_ready,
-            "true_api_local_ready": None,
+            "true_api_local_ready": None if backend_ready else False,
             "true_api_local_ready_reasons": list(dict.fromkeys(reasons)),
-            # A successfully negotiated production /auth/key connection is
-            # enough to prove live GOST transport. True API authentication is
-            # reported separately by the authenticated field.
-            "true_api_live_verified": gost_verified,
+            # Offline structural readiness never claims a live connection.
+            # Only a successful production /auth/key through stunnel MSSPI can
+            # set true_api_live_verified inside the transport diagnostics.
+            "true_api_live_verified": bool(
+                tls.get("true_api_live_verified", gost_verified)
+            ),
             "real_read_enabled": True,
             "read_only": True,
             "business_write_enabled": False,
