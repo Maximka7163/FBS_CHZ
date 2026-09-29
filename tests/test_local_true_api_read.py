@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 import base64
+import inspect
 import json
 import os
 import subprocess
@@ -30,6 +31,17 @@ from wbcz_local.bridge import (
     LocalTrueApiReadRuntime,
     LocalTrueApiUnavailable,
     _browser_cades_signature_info,
+)
+from wbcz_local.stunnel_msspi import (
+    GOST_ONLY_CIPHERS,
+    PRIVATE_PORT_MAX,
+    PRIVATE_PORT_MIN,
+    PRODUCTION_HOST,
+    PRODUCTION_PORT,
+    StunnelMsspiTransport,
+    _select_private_port,
+    probe_stunnel_msspi,
+    render_stunnel_msspi_config,
 )
 from wbcz_local.control import LocalTrueApiControlService
 from wbcz_web.models import AgentJobRecord, Base, CheckRecord, ControlRun, WriteOperationRecord
@@ -178,6 +190,244 @@ def _runtime() -> tuple[LocalTrueApiReadRuntime, FakeTransport]:
         transport=transport,  # type: ignore[arg-type]
     )
     return runtime, transport
+
+
+class _FakeStunnelProcess:
+    def __init__(self, *, exited: bool = False) -> None:
+        self.returncode = 1 if exited else None
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
+class _FakeHttpResponse:
+    status = 200
+
+    def __init__(self, payload: bytes = b'{"uuid":"u","data":"challenge"}') -> None:
+        self.payload = payload
+
+    def read(self, _limit: int) -> bytes:
+        return self.payload
+
+
+class _FakeHttpConnection:
+    def __init__(self, host: str, port: int, *, timeout: float, sink: list[dict]) -> None:
+        sink.append({"connect_host": host, "connect_port": port, "timeout": timeout})
+        self.sink = sink
+
+    def request(self, method: str, target: str, *, body=None, headers=None) -> None:
+        self.sink.append({
+            "method": method,
+            "target": target,
+            "body": body,
+            "headers": dict(headers or {}),
+        })
+
+    def getresponse(self):
+        return _FakeHttpResponse()
+
+    def close(self) -> None:
+        pass
+
+
+def _fake_stunnel_executable(tmp_path: Path) -> Path:
+    executable = tmp_path / "stunnel_msspi.exe"
+    executable.write_bytes(b"MZsynthetic-offline-test")
+    return executable
+
+
+def test_stunnel_msspi_config_is_fixed_loopback_gost_only_and_has_no_client_material() -> None:
+    config = render_stunnel_msspi_config(55001)
+
+    assert "accept = 127.0.0.1:55001" in config
+    assert f"connect = {PRODUCTION_HOST}:{PRODUCTION_PORT}" in config
+    assert f"sni = {PRODUCTION_HOST}" in config
+    assert "verify = 2" in config
+    assert f"checkHost = {PRODUCTION_HOST}" in config
+    assert "sslVersion = TLSv1.2" in config
+    assert f"ciphers = {GOST_ONLY_CIPHERS}" in config
+    lower = config.casefold()
+    assert "\ncert =" not in lower
+    assert "\nkey =" not in lower
+    assert "\npin =" not in lower
+    assert "msspi = 0" not in lower
+    assert "-install" not in lower
+
+
+def test_stunnel_private_port_selector_returns_high_private_loopback_port() -> None:
+    port = _select_private_port()
+    assert PRIVATE_PORT_MIN <= port <= PRIVATE_PORT_MAX
+
+
+def test_stunnel_probe_missing_executable_fails_closed(tmp_path: Path) -> None:
+    probe = probe_stunnel_msspi(
+        tmp_path / "missing-stunnel_msspi.exe",
+        windows_supported=True,
+    )
+
+    assert probe.stunnel_msspi_present is False
+    assert probe.stunnel_msspi_structural_ready is False
+    assert "CRYPTOPRO_STUNNEL_MSSPI_MISSING" in probe.reasons
+    assert probe.safe_dict()["true_api_live_verified"] is False
+
+
+def test_stunnel_probe_validates_official_named_mz_executable(tmp_path: Path) -> None:
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+
+    assert probe.stunnel_msspi_present is True
+    assert probe.stunnel_msspi_executable_valid is True
+    assert probe.stunnel_msspi_config_supported is True
+    assert probe.stunnel_msspi_structural_ready is True
+
+
+def test_stunnel_transport_child_is_non_service_non_shell_fixed_loopback_and_cleans_up(
+    tmp_path: Path,
+) -> None:
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    process = _FakeStunnelProcess()
+    popen_calls: list[dict] = []
+    http_calls: list[dict] = []
+
+    def popen_factory(args, **kwargs):
+        popen_calls.append({"args": list(args), "kwargs": dict(kwargs)})
+        return process
+
+    def connection_factory(host, port, *, timeout):
+        return _FakeHttpConnection(host, port, timeout=timeout, sink=http_calls)
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=popen_factory,
+        connection_factory=connection_factory,
+        port_selector=lambda: 55001,
+        readiness_probe=lambda _process, port, _timeout: port == 55001,
+        temp_root=tmp_path,
+    )
+
+    result = transport.request_json("GET", "/auth/key")
+
+    assert result == {"uuid": "u", "data": "challenge"}
+    assert len(popen_calls) == 1
+    call = popen_calls[0]
+    assert call["args"][0] == str(executable.resolve())
+    assert len(call["args"]) == 2
+    assert "-install" not in " ".join(call["args"]).casefold()
+    assert call["kwargs"]["shell"] is False
+    assert http_calls[0]["connect_host"] == "127.0.0.1"
+    assert http_calls[0]["connect_port"] == 55001
+    request = http_calls[1]
+    assert request["target"] == "/api/v3/true-api/auth/key"
+    assert request["headers"]["Host"] == PRODUCTION_HOST
+    assert transport.tls_diagnostics()["true_api_live_verified"] is True
+    config_path = transport._config_path
+    assert config_path is not None and config_path.is_file()
+    config_text = config_path.read_text(encoding="ascii")
+    assert "accept = 127.0.0.1:55001" in config_text
+    assert f"connect = {PRODUCTION_HOST}:{PRODUCTION_PORT}" in config_text
+
+    transport.close()
+
+    assert process.terminated is True
+    assert config_path.exists() is False
+
+
+def test_stunnel_child_startup_failure_fails_closed_and_cleans_config(
+    tmp_path: Path,
+) -> None:
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+
+    def popen_factory(_args, **_kwargs):
+        raise OSError("synthetic startup failure")
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=popen_factory,
+        port_selector=lambda: 55002,
+        readiness_probe=lambda *_args: True,
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(GostTlsUnavailable, match="STUNNEL_MSSPI_CHILD_START_FAILED"):
+        transport.request_json("GET", "/auth/key")
+
+    assert transport._config_path is None
+    assert transport._temp_dir is None
+
+
+def test_stunnel_child_early_exit_fails_closed_and_cleans_config(
+    tmp_path: Path,
+) -> None:
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    process = _FakeStunnelProcess(exited=True)
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=lambda *_args, **_kwargs: process,
+        port_selector=lambda: 55003,
+        readiness_probe=lambda *_args: True,
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(GostTlsUnavailable, match="STUNNEL_MSSPI_CHILD_EXITED_EARLY"):
+        transport.request_json("GET", "/auth/key")
+
+    assert transport._config_path is None
+    assert transport._temp_dir is None
+
+
+def test_stunnel_allowlist_blocks_writes_before_child_start(tmp_path: Path) -> None:
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    starts = 0
+
+    def popen_factory(*_args, **_kwargs):
+        nonlocal starts
+        starts += 1
+        return _FakeStunnelProcess()
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=popen_factory,
+        port_selector=lambda: 55004,
+        readiness_probe=lambda *_args: True,
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(ProductionMutationDisabled):
+        transport.request_json("POST", "/lk/documents/create", body={})
+    with pytest.raises(ProductionMutationDisabled):
+        transport.request_json("POST", "/cises/info", params={"pg": "shoes"}, body=[])
+    with pytest.raises(ProductionMutationDisabled):
+        transport.request_json("GET", "/auth/key", params={"unexpected": "1"})
+
+    assert starts == 0
+    transport.close()
+
+
+def test_local_true_api_runtime_has_no_direct_winhttp_fallback() -> None:
+    source = inspect.getsource(LocalTrueApiReadBridge._build_runtime)
+    assert "StunnelMsspiTransport" in source
+    assert "WindowsWinHttpGostTransport" not in source
 
 
 def _browser_auth(runtime: LocalTrueApiReadRuntime) -> dict:
