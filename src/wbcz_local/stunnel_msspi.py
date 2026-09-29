@@ -398,11 +398,18 @@ class StunnelMsspiTransport:
                 if process.poll() is not None:
                     raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_EXITED_EARLY")
                 raise GostTlsUnavailable("STUNNEL_MSSPI_NOT_READY")
-        except Exception:
+        except GostTlsUnavailable:
             self._stop_process()
             self._cleanup_config()
             self._port = None
             raise
+        except Exception as exc:
+            self._stop_process()
+            self._cleanup_config()
+            self._port = None
+            raise GostTlsUnavailable(
+                "STUNNEL_MSSPI_CHILD_START_FAILED"
+            ) from exc
 
     def tls_diagnostics(self) -> dict[str, Any]:
         return {
