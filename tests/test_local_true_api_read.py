@@ -450,6 +450,119 @@ def test_windows_certificate_discovery_enumerates_current_user_my_without_cryptc
     assert "cryptcp.exe" not in str(captured["script"])
 
 
+def _certificate_candidate_for_inns(*inns: str) -> dict:
+    return {
+        "thumbprint": THUMBPRINT,
+        "certificate_inn": inns[0] if inns else None,
+        "certificate_inns": list(inns),
+        "valid_from": "2026-01-01T00:00:00+00:00",
+        "valid_to": "2027-01-01T00:00:00+00:00",
+        "has_private_key": True,
+        "crypto_provider": "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider",
+        "public_key_oid": "1.2.643.7.1.1.1.1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        (
+            "CN=Организация, INN=1234567890, "
+            "OID.1.2.643.3.131.1.1=027504733612",
+            ["1234567890", "027504733612"],
+        ),
+        (
+            "CN=Организация, OID.1.2.643.3.131.1.1=027504733612, "
+            "INN=1234567890",
+            ["027504733612", "1234567890"],
+        ),
+    ],
+)
+def test_certificate_discovery_parses_all_inns_and_eligibility_is_order_independent(
+    subject: str,
+    expected: list[str],
+) -> None:
+    payload = {
+        "certificates": [{
+            "thumbprint": THUMBPRINT,
+            "subject": subject,
+            "issuer": "CN=УЦ",
+            "serial": "1234",
+            "hasPrivateKey": True,
+            "notBefore": "2026-01-01T00:00:00.0000000Z",
+            "notAfter": "2027-01-01T00:00:00.0000000Z",
+            "publicKeyOid": "1.2.643.7.1.1.1.1",
+            "signatureOid": "1.2.643.7.1.1.3.2",
+            "providerName": "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider",
+        }],
+        "skippedCount": 0,
+    }
+
+    def runner(args, **kwargs):
+        assert kwargs["text"] is False
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=_powershell_json_payload(payload),
+            stderr=b"",
+        )
+
+    inventory = WindowsCryptoProCertificateDiscovery(runner=runner).discover()
+    candidate = inventory["candidates"][0]
+
+    assert candidate["certificate_inns"] == expected
+    assert candidate["certificate_inn"] == expected[0]
+    assert LocalTrueApiReadBridge._eligible(candidate, "027504733612") is True
+
+
+@pytest.mark.parametrize("participant_inn", ["1234567890", "027504733612"])
+def test_single_certificate_inn_keeps_10_and_12_digit_eligibility(
+    participant_inn: str,
+) -> None:
+    candidate = _certificate_candidate_for_inns(participant_inn)
+    assert LocalTrueApiReadBridge._eligible(candidate, participant_inn) is True
+
+
+def test_certificate_discovery_ignores_unbound_digit_strings_and_deduplicates_aliases() -> None:
+    payload = {
+        "certificates": [{
+            "thumbprint": THUMBPRINT,
+            "subject": (
+                "CN=1234567890, SERIALNUMBER=027504733612, "
+                "INN=027504733612, OID.1.2.643.100.4=027504733612, "
+                "OID.1.2.643.3.131.1.1=027504733612"
+            ),
+            "issuer": "CN=УЦ 9999999999",
+            "serial": "1234",
+            "hasPrivateKey": True,
+            "notBefore": "2026-01-01T00:00:00.0000000Z",
+            "notAfter": "2027-01-01T00:00:00.0000000Z",
+            "publicKeyOid": "1.2.643.7.1.1.1.1",
+            "signatureOid": "1.2.643.7.1.1.3.2",
+            "providerName": "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider",
+        }],
+        "skippedCount": 0,
+    }
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=_powershell_json_payload(payload),
+            stderr=b"",
+        )
+
+    candidate = WindowsCryptoProCertificateDiscovery(runner=runner).discover()["candidates"][0]
+
+    assert candidate["certificate_inns"] == ["027504733612"]
+    assert candidate["certificate_inn"] == "027504733612"
+
+
+def test_multi_inn_certificate_rejects_other_participant() -> None:
+    candidate = _certificate_candidate_for_inns("1234567890", "027504733612")
+    assert LocalTrueApiReadBridge._eligible(candidate, "111111111111") is False
+
+
 def test_windows_certificate_inspector_uses_same_binary_unicode_transport(
     tmp_path: Path,
 ) -> None:
