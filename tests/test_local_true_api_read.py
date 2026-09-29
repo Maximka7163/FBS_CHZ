@@ -564,6 +564,63 @@ def test_multi_inn_certificate_rejects_other_participant() -> None:
     assert LocalTrueApiReadBridge._eligible(candidate, "111111111111") is False
 
 
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        ("CN=INN=027504733612", []),
+        ("CN=X-INN=027504733612", []),
+        ("X-INN=027504733612", []),
+        ("FOO-INN=027504733612", []),
+        ("CN=foo-INN=027504733612", []),
+        ("SERIALNUMBER=027504733612", []),
+        ("CN=027504733612", []),
+        ("INN=027504733612", ["027504733612"]),
+        ("ИНН=027504733612", ["027504733612"]),
+        ("OID.1.2.643.3.131.1.1=027504733612", ["027504733612"]),
+        ("OID.1.2.643.100.4=1234567890", ["1234567890"]),
+        ("CN=Org, INN=027504733612", ["027504733612"]),
+        ("CN=Org,INN=027504733612", ["027504733612"]),
+        (
+            "CN=Org, OID.1.2.643.3.131.1.1=027504733612",
+            ["027504733612"],
+        ),
+        ("CN=Org, INN : 027504733612", ["027504733612"]),
+    ],
+)
+def test_certificate_inn_parser_requires_real_dn_attribute_boundary(
+    subject: str,
+    expected: list[str],
+) -> None:
+    payload = {
+        "certificates": [{
+            "thumbprint": THUMBPRINT,
+            "subject": subject,
+            "issuer": "CN=УЦ",
+            "serial": "1234",
+            "hasPrivateKey": True,
+            "notBefore": "2026-01-01T00:00:00.0000000Z",
+            "notAfter": "2027-01-01T00:00:00.0000000Z",
+            "publicKeyOid": "1.2.643.7.1.1.1.1",
+            "signatureOid": "1.2.643.7.1.1.3.2",
+            "providerName": "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider",
+        }],
+        "skippedCount": 0,
+    }
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=_powershell_json_payload(payload),
+            stderr=b"",
+        )
+
+    candidate = WindowsCryptoProCertificateDiscovery(runner=runner).discover()["candidates"][0]
+
+    assert candidate["certificate_inns"] == expected
+    assert candidate["certificate_inn"] == (expected[0] if expected else None)
+
+
 def test_windows_certificate_inspector_uses_same_binary_unicode_transport(
     tmp_path: Path,
 ) -> None:
