@@ -64,6 +64,7 @@ class CryptoProFoundationStatus:
     business_write_enabled: bool = False
     stunnel_msspi_present: bool = False
     stunnel_msspi_executable_valid: bool = False
+    stunnel_msspi_authenticity_valid: bool = False
     stunnel_msspi_config_supported: bool = False
     stunnel_msspi_structural_ready: bool = False
     stunnel_msspi_path: str | None = None
@@ -192,6 +193,7 @@ def inspect_local_cryptopro_foundation() -> CryptoProFoundationStatus:
         business_write_enabled=False,
         stunnel_msspi_present=stunnel.stunnel_msspi_present,
         stunnel_msspi_executable_valid=stunnel.stunnel_msspi_executable_valid,
+        stunnel_msspi_authenticity_valid=stunnel.stunnel_msspi_authenticity_valid,
         stunnel_msspi_config_supported=stunnel.stunnel_msspi_config_supported,
         stunnel_msspi_structural_ready=stunnel.stunnel_msspi_structural_ready,
         stunnel_msspi_path=stunnel.executable_path,
@@ -606,6 +608,9 @@ class LocalTrueApiReadBridge:
                 ),
                 "stunnel_msspi_executable_valid": bool(
                     getattr(components, "stunnel_msspi_executable_valid", False)
+                ),
+                "stunnel_msspi_authenticity_valid": bool(
+                    getattr(components, "stunnel_msspi_authenticity_valid", False)
                 ),
                 "stunnel_msspi_config_supported": bool(
                     getattr(components, "stunnel_msspi_config_supported", False)
