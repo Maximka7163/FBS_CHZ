@@ -23,6 +23,7 @@ from wbcz_ui.live_true_api import (
     TrueApiError,
     TrueApiHttpError,
     WindowsCryptoProCertificateDiscovery,
+    WindowsCryptoProCertificateInspector,
 )
 from wbcz_local.bridge import (
     LocalTrueApiReadBridge,
@@ -46,6 +47,15 @@ THUMBPRINT = "A" * 40
 TOKEN = "SECRET-UUID-TOKEN-MUST-STAY-IN-MEMORY"
 EXACT_CHALLENGE = " EXACT-CRPT-CHALLENGE\nЮникод "
 EXACT_CHALLENGE_BYTES = EXACT_CHALLENGE.encode("utf-8")
+
+
+def _powershell_json_payload(payload: dict) -> bytes:
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.b64encode(raw)
 
 
 def _foundation_status(gost_ready: bool = True):
@@ -387,29 +397,35 @@ if os.name == "nt":
 
 
 def test_windows_certificate_discovery_enumerates_current_user_my_without_cryptcp() -> None:
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
+    payload = {
+        "certificates": [{
+            "thumbprint": THUMBPRINT,
+            "subject": f"CN=Тестовая организация, OID.1.2.643.100.4={INN}",
+            "issuer": "CN=Идентификация УЦ",
+            "serial": "1234",
+            "hasPrivateKey": True,
+            "notBefore": "2026-01-01T00:00:00.0000000Z",
+            "notAfter": "2027-01-01T00:00:00.0000000Z",
+            "publicKeyOid": "1.2.643.7.1.1.1.1",
+            "signatureOid": "1.2.643.7.1.1.3.2",
+            "providerName": "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider",
+        }],
+        "skippedCount": 0,
+    }
+    raw_json = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    transported = _powershell_json_payload(payload)
+    assert b"\x98" in raw_json
+    assert all(byte < 128 for byte in transported)
 
-    def runner(args, **_kwargs):
+    def runner(args, **kwargs):
         captured["script"] = args[-1]
+        captured["text"] = kwargs.get("text")
         return subprocess.CompletedProcess(
             args,
             0,
-            stdout=json.dumps({
-                "certificates": [{
-                    "thumbprint": THUMBPRINT,
-                    "subject": f"CN=Test, OID.1.2.643.100.4={INN}",
-                    "issuer": "CN=Issuer",
-                    "serial": "1234",
-                    "hasPrivateKey": True,
-                    "notBefore": "2026-01-01T00:00:00.0000000Z",
-                    "notAfter": "2027-01-01T00:00:00.0000000Z",
-                    "publicKeyOid": "1.2.643.7.1.1.1.1",
-                    "signatureOid": "1.2.643.7.1.1.3.2",
-                    "providerName": "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider",
-                }],
-                "skippedCount": 0,
-            }),
-            stderr="",
+            stdout=transported,
+            stderr=b"",
         )
 
     discovery = WindowsCryptoProCertificateDiscovery(
@@ -421,13 +437,121 @@ def test_windows_certificate_discovery_enumerates_current_user_my_without_cryptc
     candidate = inventory["candidates"][0]
     assert candidate["compatibility"] == "GOST_CRYPTOPRO"
     assert candidate["certificate_inn"] == INN
+    assert candidate["subject"] == f"CN=Тестовая организация, OID.1.2.643.100.4={INN}"
+    assert candidate["issuer"] == "CN=Идентификация УЦ"
     assert candidate["has_private_key"] is True
     assert candidate["public_key_oid"] == "1.2.643.7.1.1.1.1"
     assert inventory["cryptcp_available"] is False
     assert inventory["discovery_state"] == "OK"
-    assert "X509Store('My','CurrentUser')" in captured["script"]
-    assert "$cert.GetKeyAlgorithm()" in captured["script"]
-    assert "cryptcp.exe" not in captured["script"]
+    assert captured["text"] is False
+    assert "X509Store('My','CurrentUser')" in str(captured["script"])
+    assert "$cert.GetKeyAlgorithm()" in str(captured["script"])
+    assert "OpenStandardOutput" in str(captured["script"])
+    assert "cryptcp.exe" not in str(captured["script"])
+
+
+def test_windows_certificate_inspector_uses_same_binary_unicode_transport(
+    tmp_path: Path,
+) -> None:
+    cryptcp = tmp_path / "cryptcp.exe"
+    cryptcp.write_bytes(b"")
+    provider = (
+        "Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider "
+        "— Тестовый провайдер"
+    )
+    payload = {
+        "thumbprint": THUMBPRINT,
+        "hasPrivateKey": True,
+        "notBefore": "2026-01-01T00:00:00.0000000Z",
+        "notAfter": "2027-01-01T00:00:00.0000000Z",
+        "publicKeyOid": "1.2.643.7.1.1.1.1",
+        "signatureOid": "1.2.643.7.1.1.3.2",
+        "providerName": provider,
+    }
+    captured: dict[str, object] = {}
+
+    def runner(args, **kwargs):
+        captured["text"] = kwargs.get("text")
+        captured["script"] = args[-1]
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=_powershell_json_payload(payload),
+            stderr=b"",
+        )
+
+    inspector = WindowsCryptoProCertificateInspector(
+        THUMBPRINT,
+        cryptcp_path=cryptcp,
+        runner=runner,
+    )
+    result = inspector.inspect()
+
+    assert result["provider"] == provider
+    assert result["gost_compatible"] is True
+    assert result["cryptopro_provider"] is True
+    assert captured["text"] is False
+    assert "OpenStandardOutput" in str(captured["script"])
+
+
+def test_certificate_powershell_failure_handles_non_utf8_stderr_without_decode_crash(
+    tmp_path: Path,
+) -> None:
+    cryptcp = tmp_path / "cryptcp.exe"
+    cryptcp.write_bytes(b"")
+
+    def runner(args, **kwargs):
+        assert kwargs["text"] is False
+        return subprocess.CompletedProcess(
+            args,
+            7,
+            stdout=b"",
+            stderr=b"failure:\xff\xfe\x98",
+        )
+
+    discovery = WindowsCryptoProCertificateDiscovery(runner=runner)
+    with pytest.raises(TrueApiError) as discovery_error:
+        discovery.discover()
+    assert "failure:" in str(discovery_error.value)
+
+    inspector = WindowsCryptoProCertificateInspector(
+        THUMBPRINT,
+        cryptcp_path=cryptcp,
+        runner=runner,
+    )
+    with pytest.raises(TrueApiError) as inspector_error:
+        inspector.inspect()
+    assert "failure:" in str(inspector_error.value)
+
+
+@pytest.mark.parametrize("stdout", [None, b"", b"not-base64%%%"])
+def test_certificate_powershell_empty_or_malformed_success_is_typed(
+    tmp_path: Path,
+    stdout,
+) -> None:
+    cryptcp = tmp_path / "cryptcp.exe"
+    cryptcp.write_bytes(b"")
+
+    def runner(args, **kwargs):
+        assert kwargs["text"] is False
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=stdout,
+            stderr=b"",
+        )
+
+    discovery = WindowsCryptoProCertificateDiscovery(runner=runner)
+    with pytest.raises(TrueApiError, match="Certificate discovery returned invalid data"):
+        discovery.discover()
+
+    inspector = WindowsCryptoProCertificateInspector(
+        THUMBPRINT,
+        cryptcp_path=cryptcp,
+        runner=runner,
+    )
+    with pytest.raises(TrueApiError, match="Certificate diagnostics returned invalid data"):
+        inspector.inspect()
 
 
 def test_certificate_discovery_failure_is_distinct_from_no_eligible_certificate(
