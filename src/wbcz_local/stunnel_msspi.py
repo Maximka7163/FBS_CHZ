@@ -527,6 +527,9 @@ class StunnelMsspiTransport:
                 return
             self._stop_process()
             self._cleanup_config()
+            self._startup_ownership_verified = False
+            self._live_verified = False
+            self._pending_auth_key_ownership_verified = False
             raise GostTlsUnavailable("STUNNEL_MSSPI_CHILD_EXITED_EARLY")
 
         if not _valid_stunnel_msspi_executable(self.executable_path):
@@ -761,9 +764,11 @@ class StunnelMsspiTransport:
                 ) from exc
         except ProductionMutationDisabled:
             raise
-        except TrueApiError:
-            raise
         except GostTlsUnavailable:
+            self._live_verified = False
+            self._pending_auth_key_ownership_verified = False
+            raise
+        except TrueApiError:
             raise
         except Exception as exc:
             self.audit.record(
