@@ -641,6 +641,7 @@ $WbczStdout.Flush()
 
 
 _CERTIFICATE_SUBJECT_INN_RE = re.compile(
+    r"(?<![\w.])"
     r"(?:OID\.1\.2\.643\.100\.4|OID\.1\.2\.643\.3\.131\.1\.1|INN|ИНН)"
     r"\s*[=:]\s*(\d{12}|\d{10})(?!\d)",
     re.IGNORECASE,
