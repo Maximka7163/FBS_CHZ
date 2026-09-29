@@ -368,11 +368,69 @@ def test_stunnel_probe_missing_executable_fails_closed(tmp_path: Path) -> None:
     assert probe.safe_dict()["true_api_live_verified"] is False
 
 
-def test_stunnel_probe_validates_official_named_mz_executable(tmp_path: Path) -> None:
+def test_fake_mz_stunnel_is_rejected_by_pinned_sha256(tmp_path: Path) -> None:
     executable = _fake_stunnel_executable(tmp_path)
     probe = probe_stunnel_msspi(executable, windows_supported=True)
 
+    assert STUNNEL_MSSPI_OFFICIAL_SHA256 == (
+        "C15491EA8EAB0ADB7F8F761337DF85DA335A57E3AA18D1CBC19B31D1EEA09F8B"
+    )
     assert probe.stunnel_msspi_present is True
+    assert probe.stunnel_msspi_authenticity_valid is False
+    assert probe.stunnel_msspi_executable_valid is False
+    assert probe.stunnel_msspi_structural_ready is False
+    assert "CRYPTOPRO_STUNNEL_MSSPI_AUTHENTICITY_FAILED" in probe.reasons
+
+
+@pytest.mark.parametrize("source", ["explicit", "env", "path"])
+def test_all_discovery_sources_reject_substituted_stunnel_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    executable = _fake_stunnel_executable(tmp_path)
+    monkeypatch.delenv("WBCZ_CRYPTOPRO_STUNNEL_MSSPI", raising=False)
+    monkeypatch.setattr(stunnel_module.shutil, "which", lambda _name: None)
+
+    explicit = None
+    if source == "explicit":
+        explicit = executable
+    elif source == "env":
+        monkeypatch.setenv(
+            "WBCZ_CRYPTOPRO_STUNNEL_MSSPI",
+            str(executable),
+        )
+    else:
+        monkeypatch.setattr(
+            stunnel_module.shutil,
+            "which",
+            lambda name: (
+                str(executable)
+                if name == stunnel_module.STUNNEL_MSSPI_FILENAME
+                else None
+            ),
+        )
+
+    probe = probe_stunnel_msspi(explicit, windows_supported=True)
+
+    assert probe.stunnel_msspi_present is True
+    assert probe.stunnel_msspi_authenticity_valid is False
+    assert probe.stunnel_msspi_executable_valid is False
+    assert probe.stunnel_msspi_structural_ready is False
+    assert "CRYPTOPRO_STUNNEL_MSSPI_AUTHENTICITY_FAILED" in probe.reasons
+
+
+def test_expected_digest_fixture_is_accepted_without_changing_production_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = _fake_stunnel_executable(tmp_path)
+    _trust_fake_stunnel_digest(monkeypatch)
+
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+
+    assert probe.stunnel_msspi_present is True
+    assert probe.stunnel_msspi_authenticity_valid is True
     assert probe.stunnel_msspi_executable_valid is True
     assert probe.stunnel_msspi_config_supported is True
     assert probe.stunnel_msspi_structural_ready is True
@@ -380,10 +438,12 @@ def test_stunnel_probe_validates_official_named_mz_executable(tmp_path: Path) ->
 
 def test_stunnel_transport_child_is_non_service_non_shell_fixed_loopback_and_cleans_up(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
     executable = _fake_stunnel_executable(tmp_path)
     probe = probe_stunnel_msspi(executable, windows_supported=True)
-    process = _FakeStunnelProcess()
+    process = _FakeStunnelProcess(pid=4242)
     popen_calls: list[dict] = []
     http_calls: list[dict] = []
 
@@ -392,7 +452,13 @@ def test_stunnel_transport_child_is_non_service_non_shell_fixed_loopback_and_cle
         return process
 
     def connection_factory(host, port, *, timeout):
-        return _FakeHttpConnection(host, port, timeout=timeout, sink=http_calls)
+        return _FakeHttpConnection(
+            host,
+            port,
+            timeout=timeout,
+            sink=http_calls,
+            client_port=61001,
+        )
 
     transport = StunnelMsspiTransport(
         executable_path=executable,
@@ -400,13 +466,21 @@ def test_stunnel_transport_child_is_non_service_non_shell_fixed_loopback_and_cle
         popen_factory=popen_factory,
         connection_factory=connection_factory,
         port_selector=lambda: 55001,
-        readiness_probe=lambda _process, port, _timeout: port == 55001,
+        ownership_rows=lambda: _owner_rows(
+            child_pid=4242,
+            port=55001,
+            client_port=61001,
+        ),
         temp_root=tmp_path,
     )
+    runtime = LocalTrueApiReadRuntime(
+        participant_inn=INN,
+        transport=transport,
+    )
 
-    result = transport.request_json("GET", "/auth/key")
+    uuid, challenge = runtime.prepare_auth_challenge()
 
-    assert result == {"uuid": "u", "data": "challenge"}
+    assert (uuid, challenge) == ("u", "challenge")
     assert len(popen_calls) == 1
     call = popen_calls[0]
     assert call["args"][0] == str(executable.resolve())
@@ -415,9 +489,10 @@ def test_stunnel_transport_child_is_non_service_non_shell_fixed_loopback_and_cle
     assert call["kwargs"]["shell"] is False
     assert http_calls[0]["connect_host"] == "127.0.0.1"
     assert http_calls[0]["connect_port"] == 55001
-    request = http_calls[1]
+    request = next(item for item in http_calls if item.get("method") == "GET")
     assert request["target"] == "/api/v3/true-api/auth/key"
     assert request["headers"]["Host"] == PRODUCTION_HOST
+    assert transport.tls_diagnostics()["startup_pid_ownership_verified"] is True
     assert transport.tls_diagnostics()["true_api_live_verified"] is True
     config_path = transport._config_path
     assert config_path is not None and config_path.is_file()
@@ -425,15 +500,228 @@ def test_stunnel_transport_child_is_non_service_non_shell_fixed_loopback_and_cle
     assert "accept = 127.0.0.1:55001" in config_text
     assert f"connect = {PRODUCTION_HOST}:{PRODUCTION_PORT}" in config_text
 
-    transport.close()
+    runtime.close()
 
     assert process.terminated is True
     assert config_path.exists() is False
 
 
+def test_attacker_listener_occupying_selected_port_fails_before_http_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    process = _FakeStunnelProcess(pid=4242)
+    http_calls: list[dict] = []
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=lambda *_args, **_kwargs: process,
+        connection_factory=lambda host, port, timeout: _FakeHttpConnection(
+            host, port, timeout=timeout, sink=http_calls
+        ),
+        port_selector=lambda: 55005,
+        ownership_rows=lambda: _owner_rows(
+            child_pid=4242,
+            port=55005,
+            listener_pid=9999,
+            established_pid=9999,
+        ),
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(
+        GostTlsUnavailable,
+        match="STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_MISMATCH",
+    ):
+        transport.request_json("GET", "/auth/key")
+
+    assert http_calls == []
+    assert transport.tls_diagnostics()["true_api_live_verified"] is False
+
+
+def test_fake_auth_key_listener_pid_mismatch_receives_no_http_and_cannot_mark_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    process = _FakeStunnelProcess(pid=4242)
+    http_calls: list[dict] = []
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=lambda *_args, **_kwargs: process,
+        connection_factory=lambda host, port, timeout: _FakeHttpConnection(
+            host,
+            port,
+            timeout=timeout,
+            sink=http_calls,
+            client_port=61002,
+            response_payload=b'{"uuid":"fake","data":"fake"}',
+        ),
+        port_selector=lambda: 55006,
+        ownership_rows=lambda: _owner_rows(
+            child_pid=4242,
+            port=55006,
+            client_port=61002,
+            established_pid=9999,
+        ),
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(
+        GostTlsUnavailable,
+        match="STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_MISMATCH",
+    ):
+        transport.request_json("GET", "/auth/key")
+
+    assert not any(item.get("method") for item in http_calls)
+    assert transport.tls_diagnostics()["true_api_live_verified"] is False
+
+
+def test_bearer_request_ownership_mismatch_sends_no_authorization_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    process = _FakeStunnelProcess(pid=4242)
+    http_calls: list[dict] = []
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=lambda *_args, **_kwargs: process,
+        connection_factory=lambda host, port, timeout: _FakeHttpConnection(
+            host,
+            port,
+            timeout=timeout,
+            sink=http_calls,
+            client_port=61003,
+        ),
+        port_selector=lambda: 55007,
+        ownership_rows=lambda: _owner_rows(
+            child_pid=4242,
+            port=55007,
+            client_port=61003,
+            established_pid=9999,
+        ),
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(
+        GostTlsUnavailable,
+        match="STUNNEL_MSSPI_LOOPBACK_OWNERSHIP_MISMATCH",
+    ):
+        transport.request_json(
+            "POST",
+            "/cises/info",
+            params={"pg": "lp"},
+            body=[CIS],
+            bearer_token="ATTACKER-MUST-NOT-SEE-THIS",
+            cis_count=1,
+        )
+
+    requests = [item for item in http_calls if item.get("method")]
+    assert requests == []
+    assert "ATTACKER-MUST-NOT-SEE-THIS" not in repr(http_calls)
+
+
+def test_child_exit_after_startup_fails_before_http_request_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    process = _FakeStunnelProcess(pid=4242)
+    http_calls: list[dict] = []
+
+    def connection_factory(host, port, *, timeout):
+        return _FakeHttpConnection(
+            host,
+            port,
+            timeout=timeout,
+            sink=http_calls,
+            client_port=61004,
+            on_connect=lambda: setattr(process, "returncode", 1),
+        )
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=lambda *_args, **_kwargs: process,
+        connection_factory=connection_factory,
+        port_selector=lambda: 55008,
+        ownership_rows=lambda: _owner_rows(
+            child_pid=4242,
+            port=55008,
+            client_port=61004,
+        ),
+        temp_root=tmp_path,
+    )
+
+    with pytest.raises(
+        GostTlsUnavailable,
+        match="STUNNEL_MSSPI_CHILD_EXITED_EARLY",
+    ):
+        transport.request_json("GET", "/auth/key")
+
+    assert not any(item.get("method") for item in http_calls)
+    assert transport.tls_diagnostics()["true_api_live_verified"] is False
+
+
+def test_invalid_auth_key_payload_never_sets_live_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
+    executable = _fake_stunnel_executable(tmp_path)
+    probe = probe_stunnel_msspi(executable, windows_supported=True)
+    process = _FakeStunnelProcess(pid=4242)
+    http_calls: list[dict] = []
+
+    transport = StunnelMsspiTransport(
+        executable_path=executable,
+        validated_probe=probe,
+        popen_factory=lambda *_args, **_kwargs: process,
+        connection_factory=lambda host, port, timeout: _FakeHttpConnection(
+            host,
+            port,
+            timeout=timeout,
+            sink=http_calls,
+            client_port=61005,
+            response_payload=b'{"uuid":"","data":"fake"}',
+        ),
+        port_selector=lambda: 55009,
+        ownership_rows=lambda: _owner_rows(
+            child_pid=4242,
+            port=55009,
+            client_port=61005,
+        ),
+        temp_root=tmp_path,
+    )
+    runtime = LocalTrueApiReadRuntime(participant_inn=INN, transport=transport)
+
+    with pytest.raises(TrueApiError, match="uuid/data"):
+        runtime.prepare_auth_challenge()
+
+    assert transport.tls_diagnostics()["true_api_live_verified"] is False
+    runtime.close()
+
+
 def test_stunnel_child_startup_failure_fails_closed_and_cleans_config(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
     executable = _fake_stunnel_executable(tmp_path)
     probe = probe_stunnel_msspi(executable, windows_supported=True)
 
@@ -445,7 +733,7 @@ def test_stunnel_child_startup_failure_fails_closed_and_cleans_config(
         validated_probe=probe,
         popen_factory=popen_factory,
         port_selector=lambda: 55002,
-        readiness_probe=lambda *_args: True,
+        ownership_rows=lambda: (),
         temp_root=tmp_path,
     )
 
@@ -458,16 +746,18 @@ def test_stunnel_child_startup_failure_fails_closed_and_cleans_config(
 
 def test_stunnel_child_early_exit_fails_closed_and_cleans_config(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
     executable = _fake_stunnel_executable(tmp_path)
     probe = probe_stunnel_msspi(executable, windows_supported=True)
-    process = _FakeStunnelProcess(exited=True)
+    process = _FakeStunnelProcess(pid=4242, exited=True)
     transport = StunnelMsspiTransport(
         executable_path=executable,
         validated_probe=probe,
         popen_factory=lambda *_args, **_kwargs: process,
         port_selector=lambda: 55003,
-        readiness_probe=lambda *_args: True,
+        ownership_rows=lambda: (),
         temp_root=tmp_path,
     )
 
@@ -478,7 +768,11 @@ def test_stunnel_child_early_exit_fails_closed_and_cleans_config(
     assert transport._temp_dir is None
 
 
-def test_stunnel_allowlist_blocks_writes_before_child_start(tmp_path: Path) -> None:
+def test_stunnel_allowlist_blocks_writes_before_child_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trust_fake_stunnel_digest(monkeypatch)
     executable = _fake_stunnel_executable(tmp_path)
     probe = probe_stunnel_msspi(executable, windows_supported=True)
     starts = 0
@@ -493,7 +787,7 @@ def test_stunnel_allowlist_blocks_writes_before_child_start(tmp_path: Path) -> N
         validated_probe=probe,
         popen_factory=popen_factory,
         port_selector=lambda: 55004,
-        readiness_probe=lambda *_args: True,
+        ownership_rows=lambda: (),
         temp_root=tmp_path,
     )
 
