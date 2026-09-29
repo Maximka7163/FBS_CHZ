@@ -640,19 +640,45 @@ $WbczStdout.Flush()
     return parsed
 
 
-_CERTIFICATE_SUBJECT_INN_RE = re.compile(
-    r"(?:^|,)\s*"
+_CERTIFICATE_SUBJECT_INN_COMPONENT_RE = re.compile(
+    r"^\s*"
     r"(?:OID\.1\.2\.643\.100\.4|OID\.1\.2\.643\.3\.131\.1\.1|INN|ИНН)"
-    r"\s*[=:]\s*(\d{12}|\d{10})(?=\s*(?:,|$))",
+    r"\s*[=:]\s*(\d{12}|\d{10})\s*$",
     re.IGNORECASE,
 )
 
 
+def _certificate_subject_components(subject: str) -> list[str]:
+    """Split .NET X500 subject components without splitting quoted/escaped commas."""
+    components: list[str] = []
+    start = 0
+    quoted = False
+    escaped = False
+    for index, char in enumerate(subject):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            quoted = not quoted
+            continue
+        if char == "," and not quoted:
+            components.append(subject[start:index])
+            start = index + 1
+    components.append(subject[start:])
+    return components
+
+
 def _certificate_subject_inns(subject: str) -> list[str]:
-    """Return recognized subject INNs in first-seen order without duplicates."""
+    """Return recognized standalone subject INNs in first-seen order."""
     result: list[str] = []
     seen: set[str] = set()
-    for match in _CERTIFICATE_SUBJECT_INN_RE.finditer(subject):
+    for component in _certificate_subject_components(subject):
+        match = _CERTIFICATE_SUBJECT_INN_COMPONENT_RE.fullmatch(component)
+        if match is None:
+            continue
         value = match.group(1)
         if value in seen:
             continue
