@@ -1,6 +1,9 @@
 name: stunnel artifact provenance validation
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/stunnel-artifact-provenance-validation.yml"
 
 permissions:
   contents: read
