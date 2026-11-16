@@ -26,6 +26,12 @@ if (-not $crypto) {
     throw "CryptoPro CSP was not detected. Install licensed CryptoPro CSP and authorised UKEP first. Sellari does not redistribute CryptoPro binaries."
 }
 $cryptcp = Find-SellariCryptoProTool -FileName "cryptcp.exe"
+$stunnel = Find-SellariCryptoProTool -FileName "stunnel-msspi.exe"
+if (-not $stunnel -and $env:WBCZ_CRYPTOPRO_STUNNEL_MSSPI) {
+    if (Test-Path -LiteralPath $env:WBCZ_CRYPTOPRO_STUNNEL_MSSPI) {
+        $stunnel = $env:WBCZ_CRYPTOPRO_STUNNEL_MSSPI
+    }
+}
 
 Write-Host "CryptoPro CSP detected: $crypto"
 if ($cryptcp) {
@@ -33,7 +39,12 @@ if ($cryptcp) {
 } else {
     Write-Host "cryptcp.exe not detected (OK; local True API does not require it)."
 }
-Write-Host "True API transport uses native Windows WinHTTP / SSPI / CryptoPro."
+if ($stunnel) {
+    Write-Host "CryptoPro stunnel-msspi detected (canonical GOST TLS transport): $stunnel"
+} else {
+    Write-Host "CryptoPro stunnel-msspi not detected. Install the official CryptoPro stunnel-msspi Windows x86 release (stunnel-msspi.exe) and set WBCZ_CRYPTOPRO_STUNNEL_MSSPI to its path. Sellari does not redistribute CryptoPro binaries."
+}
+Write-Host "True API transport uses CryptoPro stunnel-msspi child process (GOST TLS only)."
 Write-Host "Browser CAdES plug-in readiness is checked inside Yandex Browser/Chromium at runtime."
 
 $pythonCommand = Get-SellariPythonCommand

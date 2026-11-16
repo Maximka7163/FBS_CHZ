@@ -9,14 +9,15 @@
 Нужно:
 
 - Windows 10/11;
-- КриптоПро CSP 5.0 с компонентом `stunnel_msspi.exe` из установленного комплекта КриптоПро CSP;
+- КриптоПро CSP 5.0;
+- официальный `stunnel-msspi.exe` из релиза CryptoPro/stunnel-msspi на GitHub (`stunnel-5.78-msspi-0.84-386-windows.zip`, SHA-256 exe `106f5de201e9d4b768ded05ab463aafc6ef0abfab27f4c081c24471fa3ce660e`); приложение проверяет этот SHA-256 перед запуском;
 - `cryptcp.exe` из КриптоПро CSP;
 - действующий сертификат УКЭП в `CurrentUser\\My`, связанный с приватным ключом КриптоПро;
 - Python 3.12;
 - Node.js 20/22, пока frontend запускается через Vite;
 - исходники ветки `ui/v0.3-first-real-ui`.
 
-Не используйте произвольный OpenSSL/stunnel вместо `stunnel_msspi.exe` КриптоПро. Не отключайте проверку сертификата сервера. Не экспортируйте приватный ключ и не передавайте PIN приложению, в GitHub, ChatGPT или облако.
+Не используйте произвольный OpenSSL/stunnel вместо официального `stunnel-msspi.exe` КриптоПро. Не отключайте проверку сертификата сервера. Не экспортируйте приватный ключ и не передавайте PIN приложению, в GitHub, ChatGPT или облако.
 
 ## Подготовка сертификата
 
@@ -77,7 +78,7 @@ $env:WBCZ_LIVE_AUDIT_LOG="$PWD\live_true_api.jsonl"
 Обычно пути к CryptoPro определяются автоматически. Если нет, задайте их явно, используя именно файлы установленного КриптоПро CSP:
 
 ```powershell
-$env:WBCZ_CRYPTOPRO_STUNNEL="C:\Program Files\Crypto Pro\CSP\stunnel_msspi.exe"
+$env:WBCZ_CRYPTOPRO_STUNNEL_MSSPI="C:\Program Files\Crypto Pro\CSP\stunnel-msspi.exe"
 $env:WBCZ_CRYPTOPRO_CRYPTCP="C:\Program Files\Crypto Pro\CSP\cryptcp.exe"
 ```
 

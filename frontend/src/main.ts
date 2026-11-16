@@ -221,7 +221,7 @@ function localTrueApiBlock(): string {
   if (!localTrueApiStatus) {
     const message = localTrueApiStatusError
       ? `Локальный статус Честного знака недоступен: ${localTrueApiStatusError}`
-      : "Проверяем локальную УКЭП и WinHTTP/CryptoPro transport…";
+      : "Проверяем локальную УКЭП и CryptoPro stunnel-msspi…";
     return `<section class="ki-lookup-card"><div><strong>Честный знак / CryptoPro</strong><span>${esc(message)}</span></div></section>`;
   }
 
@@ -261,9 +261,9 @@ function localTrueApiBlock(): string {
     : browserCadesAvailable === false
       ? `Browser CAdES NOT READY${browserCadesErrorCode ? ` (${browserCadesErrorCode})` : ""}`
       : "Проверяем Browser CAdES…";
-  const transportText = status.native_winhttp_gost_transport_ready
-    ? "WinHTTP READY"
-    : `WinHTTP NOT READY${status.transport_reasons.length ? `: ${status.transport_reasons.join(", ")}` : ""}`;
+  const transportText = status.stunnel_msspi_structural_ready
+    ? "STUNNEL-MSSPI READY"
+    : `STUNNEL-MSSPI NOT READY${status.transport_reasons.length ? `: ${status.transport_reasons.join(", ")}` : ""}`;
   const sspiText = `SSPI diagnostic ${status.sspi_diagnostic_status}`;
   const ukepState = status.ukep_state === "DISCOVERY_FAILED"
     ? "DISCOVERY_FAILED"

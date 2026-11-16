@@ -149,11 +149,11 @@ def test_local_scripts_pin_closed_gates_and_single_loopback_endpoint() -> None:
     assert "does **not** redistribute CryptoPro" in readme
     assert "WBCZ_TRUE_API_REAL_READ_ENABLED=true" in setup
     assert "stunnel_msspi.exe" not in setup
-    assert "WBCZ_CRYPTOPRO_STUNNEL" not in setup
+    assert "WBCZ_CRYPTOPRO_STUNNEL_MSSPI" in setup
     assert "cryptcp.exe" in setup
     assert 'throw "CryptoPro cryptcp.exe was not detected' not in setup
     assert "local True API does not require it" in setup
-    assert "native Windows WinHTTP / SSPI / CryptoPro" in setup
+    assert "CryptoPro stunnel-msspi child process (GOST TLS only)" in setup
     assert "WBCZ_TRUE_API_WRITE_ENABLED=true" not in setup
     assert "D54CFE9186C4B6DBE9ED73D83F289D31DA7B50000B48BA3E7C278E820578086B" in setup
     assert "Publish-SellariPinnedArtifact" in setup

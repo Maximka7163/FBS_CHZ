@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from wbcz_web.services.tenant import active_tenant
 from wbcz_web.services.wb_sequence import sequence_outcome_for_event
 
 from .bridge import LocalTrueApiReadBridge
+from .journal_evidence import distance_withdraw_journal_reasons
 
 
 def _select_event_ids(
@@ -48,6 +49,9 @@ class LocalTrueApiControlService:
         self.audit = AuditRepository(db)
         self.scope = active_tenant(db)
 
+    def _distance_journal_reasons(self, kizes: list[str]) -> dict[str, str]:
+        return distance_withdraw_journal_reasons(self.db, self.scope, kizes)
+
     def run(
         self,
         import_id: str,
@@ -77,6 +81,9 @@ class LocalTrueApiControlService:
             self.scope.participant_inn,
             list(dict.fromkeys(event.kiz for _, event in effective)),
         ) if effective else {}
+        withdraw_journal = self._distance_journal_reasons(
+            list(dict.fromkeys(event.kiz for _, event in effective))
+        )
 
         # A rolling WB import can commit a later event while /cises/info is in
         # flight. Serialize final history resolution with the same tenant+KIZ
@@ -130,6 +137,14 @@ class LocalTrueApiControlService:
                     )
                 else:
                     snapshot = value
+                    if (
+                        snapshot.status == "WITHDRAWN"
+                        and snapshot.withdrawReason in (None, "")
+                        and event.kiz in withdraw_journal
+                    ):
+                        snapshot = replace(
+                            snapshot, withdrawReason=withdraw_journal[event.kiz]
+                        )
                     outcome = decide(event, snapshot, self.scope.participant_inn)
 
             self.db.add(

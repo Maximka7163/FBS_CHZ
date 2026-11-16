@@ -15,7 +15,7 @@ from typing import Any, Iterable
 
 from wbcz.cis_inventory import MAX_BATCH, SharedRateLimiter
 from wbcz.models import KiState
-from wbcz.true_api import normalize_cis
+from wbcz.true_api import normalize_cis, normalize_wb_kiz
 from wbcz_ui.live_true_api import (
     AuthSession,
     JsonlLiveAudit,
@@ -356,13 +356,26 @@ class LocalTrueApiReadRuntime:
             close()
 
     def read_states(self, cises: Iterable[str]) -> dict[str, KiState | Exception]:
-        requested = tuple(dict.fromkeys(normalize_cis(cis) for cis in cises))
-        if not requested:
+        raw_codes = tuple(dict.fromkeys(str(cis) for cis in cises))
+        if not raw_codes:
             raise ValueError("cises/info batch must contain at least one CIS")
-        bearer = self._bearer()
         result: dict[str, KiState | Exception] = {}
-        for offset in range(0, len(requested), MAX_BATCH):
-            batch = requested[offset : offset + MAX_BATCH]
+        query_by_raw: dict[str, str] = {}
+        raws_by_query: dict[str, list[str]] = {}
+        for raw in raw_codes:
+            try:
+                query = normalize_wb_kiz(raw)
+            except ValueError as exc:
+                result[raw] = exc
+                continue
+            query_by_raw[raw] = query
+            raws_by_query.setdefault(query, []).append(raw)
+        codes = list(dict.fromkeys(query_by_raw.values()))
+        if not codes:
+            return result
+        bearer = self._bearer()
+        for offset in range(0, len(codes), MAX_BATCH):
+            batch = codes[offset : offset + MAX_BATCH]
             self.rate_limiter.acquire()
             try:
                 payload = self.transport.request_json(
@@ -394,15 +407,24 @@ class LocalTrueApiReadRuntime:
                     key = info.get("requestedCis") or info.get("cis")
                     if isinstance(key, str):
                         by_requested[key] = item
-            for cis in batch:
-                item = by_requested.get(cis)
+            for code in batch:
+                raws = raws_by_query.get(code, [])
+                if not raws:
+                    continue
+                item = by_requested.get(code)
                 if item is None:
-                    result[cis] = TrueApiProtocolError("cises/info omitted requested KI")
+                    failure: KiState | Exception = TrueApiProtocolError(
+                        "cises/info omitted requested KI"
+                    )
+                    for raw in raws:
+                        result[raw] = failure
                     continue
                 try:
-                    result[cis] = self.adapter.normalize(cis, item)
+                    state: KiState | Exception = self.adapter.normalize(code, item)
                 except Exception as exc:
-                    result[cis] = exc
+                    state = exc
+                for raw in raws:
+                    result[raw] = state
         return result
 
 

@@ -244,6 +244,11 @@ export interface LocalTrueApiStatus {
   ukep_available: boolean;
   ukep_state: "VISIBLE" | "NOT_VISIBLE" | "DISCOVERY_FAILED";
   gost_transport_available: boolean;
+  stunnel_msspi_present: boolean;
+  stunnel_msspi_executable_valid: boolean;
+  stunnel_msspi_authenticity_valid: boolean;
+  stunnel_msspi_config_supported: boolean;
+  stunnel_msspi_structural_ready: boolean;
   native_winhttp_gost_transport_ready: boolean;
   winhttp_available: boolean;
   cryptopro_tls_sspi_available: boolean;

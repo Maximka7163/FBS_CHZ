@@ -33,9 +33,15 @@ PRODUCTION_HOST = "markirovka.crpt.ru"
 PRODUCTION_PORT = 443
 PRODUCTION_BASE_PATH = "/api/v3/true-api"
 PRODUCTION_BASE_URL = f"https://{PRODUCTION_HOST}{PRODUCTION_BASE_PATH}"
-STUNNEL_MSSPI_FILENAME = "stunnel_msspi.exe"
+STUNNEL_MSSPI_FILENAME = "stunnel-msspi.exe"
+STUNNEL_MSSPI_LEGACY_FILENAME = "stunnel_msspi.exe"
+# Official CryptoPro/stunnel-msspi GitHub release stunnel-5.78-msspi-0.84,
+# asset stunnel-5.78-msspi-0.84-386-windows.zip (latest Windows x86 artifact;
+# 0.85 ships Linux only). SHA-256 computed locally from the downloaded
+# archive's stunnel-msspi.exe. The previous pin C15491EA… matched no official
+# artifact of any version and was rejected during audit.
 STUNNEL_MSSPI_OFFICIAL_SHA256 = (
-    "C15491EA8EAB0ADB7F8F761337DF85DA335A57E3AA18D1CBC19B31D1EEA09F8B"
+    "106f5de201e9d4b768ded05ab463aafc6ef0abfab27f4c081c24471fa3ce660e"
 )
 GOST_ONLY_CIPHERS = (
     "GOST2012-GOST8912-GOST8912:GOST2001-GOST89-GOST89"
@@ -139,23 +145,29 @@ def _candidate_stunnel_paths(explicit: str | Path | None = None) -> list[Path]:
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
-    env_path = os.getenv("WBCZ_CRYPTOPRO_STUNNEL_MSSPI", "").strip()
+    env_path = os.getenv("WBCZ_CRYPTOPRO_STUNNEL_MSSPI", "").strip() or os.getenv(
+        "WBCZ_CRYPTOPRO_STUNNEL", ""
+    ).strip()
     if env_path:
         candidates.append(Path(env_path).expanduser())
-    resolved = shutil.which(STUNNEL_MSSPI_FILENAME)
-    if resolved:
-        candidates.append(Path(resolved))
+    names = (STUNNEL_MSSPI_FILENAME, STUNNEL_MSSPI_LEGACY_FILENAME)
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved:
+            candidates.append(Path(resolved))
     for env_name in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
         root = os.getenv(env_name, "").strip()
         if not root:
             continue
         base = Path(root) / "Crypto Pro"
-        candidates.extend((
-            base / STUNNEL_MSSPI_FILENAME,
-            base / "CSP" / STUNNEL_MSSPI_FILENAME,
-            base / "stunnel_msspi" / STUNNEL_MSSPI_FILENAME,
-            base / "Stunnel MSSPI" / STUNNEL_MSSPI_FILENAME,
-        ))
+        for name in names:
+            candidates.extend((
+                base / name,
+                base / "CSP" / name,
+                base / "stunnel-msspi" / name,
+                base / "stunnel_msspi" / name,
+                base / "Stunnel MSSPI" / name,
+            ))
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -185,7 +197,10 @@ def _sha256_file(path: Path) -> str:
 
 
 def _inspect_stunnel_msspi_executable(path: Path | None) -> tuple[bool, bool]:
-    if path is None or path.name.casefold() != STUNNEL_MSSPI_FILENAME:
+    if path is None or path.name.casefold() not in {
+        STUNNEL_MSSPI_FILENAME,
+        STUNNEL_MSSPI_LEGACY_FILENAME,
+    }:
         return False, False
     try:
         if not path.is_file() or path.suffix.casefold() != ".exe":

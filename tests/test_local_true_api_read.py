@@ -373,7 +373,7 @@ def test_fake_mz_stunnel_is_rejected_by_pinned_sha256(tmp_path: Path) -> None:
     probe = probe_stunnel_msspi(executable, windows_supported=True)
 
     assert STUNNEL_MSSPI_OFFICIAL_SHA256 == (
-        "C15491EA8EAB0ADB7F8F761337DF85DA335A57E3AA18D1CBC19B31D1EEA09F8B"
+        "106f5de201e9d4b768ded05ab463aafc6ef0abfab27f4c081c24471fa3ce660e"
     )
     assert probe.stunnel_msspi_present is True
     assert probe.stunnel_msspi_authenticity_valid is False
@@ -2150,6 +2150,141 @@ def test_local_fbs_control_auth_failure_persists_no_control_result(
         assert db.scalar(select(func.count()).select_from(AgentJobRecord)) == 0
         assert db.scalar(select(func.count()).select_from(WriteOperationRecord)) == 0
 
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_fbs_control_return_uses_own_accepted_distance_journal(
+    local_pg_factory,
+) -> None:
+    """A RETIRED KI is return-ready only with this tenant's SUCCEEDED withdrawal."""
+    user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
+    state = KiState(
+        status="WITHDRAWN",
+        statusEx=None,
+        withdrawReason=None,
+        ownerInn=INN,
+        productGroup="lp",
+    )
+    bridge = StaticStateBridge(state=state)
+
+    with local_pg_factory() as db:
+        bind_tenant_scope(
+            db,
+            organisation_id=org_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            role="OWNER",
+        )
+        sale_event_id = ImportRepository(db).ordered_event_records(import_id)[0].event_id
+        db.add(
+            WriteOperationRecord(
+                operation_id="journal-distance-1",
+                organisation_id=org_id,
+                participant_id=participant_id,
+                business_fingerprint="journal-distance-fp-1",
+                event_id=sale_event_id,
+                decision="READY_TO_WITHDRAW",
+                document_type="LK_RECEIPT",
+                operation_reason="DISTANCE",
+                pg="lp",
+                expected_inn=INN,
+                document_sha256="0" * 64,
+                product_document_base64="eA==",
+                state="SUCCEEDED",
+                document_id="chz-doc-1",
+            )
+        )
+        return_event = Event(
+            kiz=CIS,
+            task_number="local-task-return-1",
+            sticker="local-sticker-return-1",
+            operation=Operation.RETURN,
+            occurred_at=datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+            receipt_number=None,
+            fiscal_drive_number=None,
+            amount=Decimal("1900.00"),
+            currency="RUB",
+            legal_entity_sale=None,
+        )
+        imported = FileImportService(db).import_xlsx(
+            "local-return.xlsx",
+            _workbook_bytes(return_event),
+            user_id,
+        )
+        db.commit()
+
+        result = LocalTrueApiControlService(db, bridge).run(  # type: ignore[arg-type]
+            imported.id,
+            user_id,
+            OperationMode.AUTO,
+        )
+        db.commit()
+
+        event_id = ImportRepository(db).ordered_event_records(imported.id)[0].event_id
+        check = ImportRepository(db).latest_check(event_id)
+        assert check is not None
+        assert check.source == "local-cryptopro-true-api"
+        assert check.decision == Decision.READY_TO_RETURN.value
+        assert check.reason == "RETURN_WITHDRAWN_DISTANCE"
+        assert check.snapshot["status"] == "WITHDRAWN"
+        assert check.snapshot["withdrawReason"] == "DISTANCE"
+        assert result["counts"].get(Decision.READY_TO_RETURN.value, 0) == 1
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_fbs_control_retired_without_journal_evidence_stays_manual_review(
+    local_pg_factory,
+) -> None:
+    """Without an accepted own withdrawal record a RETIRED KI is never guessed."""
+    user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
+    state = KiState(
+        status="WITHDRAWN",
+        statusEx=None,
+        withdrawReason=None,
+        ownerInn=INN,
+        productGroup="lp",
+    )
+    bridge = StaticStateBridge(state=state)
+
+    with local_pg_factory() as db:
+        bind_tenant_scope(
+            db,
+            organisation_id=org_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            role="OWNER",
+        )
+        return_event = Event(
+            kiz=CIS,
+            task_number="local-task-return-2",
+            sticker="local-sticker-return-2",
+            operation=Operation.RETURN,
+            occurred_at=datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+            receipt_number=None,
+            fiscal_drive_number=None,
+            amount=Decimal("1900.00"),
+            currency="RUB",
+            legal_entity_sale=None,
+        )
+        imported = FileImportService(db).import_xlsx(
+            "local-return-nojournal.xlsx",
+            _workbook_bytes(return_event),
+            user_id,
+        )
+        db.commit()
+
+        result = LocalTrueApiControlService(db, bridge).run(  # type: ignore[arg-type]
+            imported.id,
+            user_id,
+            OperationMode.AUTO,
+        )
+        db.commit()
+
+        event_id = ImportRepository(db).ordered_event_records(imported.id)[0].event_id
+        check = ImportRepository(db).latest_check(event_id)
+        assert check is not None
+        assert check.decision == Decision.MANUAL_REVIEW.value
+        assert check.reason == "NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL"
+        assert result["counts"].get(Decision.READY_TO_RETURN.value, 0) == 0
 
 
 def test_live_verified_tracks_gost_transport_before_true_api_auth(

@@ -235,9 +235,18 @@ def test_frontend_browser_boundary_has_no_business_persistence_or_direct_true_ap
     assert "localStorage" not in sources
     assert "sessionStorage" not in sources
     assert "markirovka.crpt.ru" not in sources
-    assert "/api/agent/" not in sources
+    # Browser may only read the session-authenticated agent binding status.
+    # Machine-token agent job/control endpoints must never appear in frontend code.
+    assert "/api/agent/v1" not in sources
+    assert "/api/agent/v2" not in sources
+    assert "/api/agent/jobs" not in sources
+    assert '"/api/agent/status"' in sources
     assert "WBCZ_AGENT_MACHINE_TOKEN" not in sources
-    assert "CryptoPro" not in sources
+    # UI may label CryptoPro state; the browser itself must not talk to WinHTTP
+    # or touch the CAdES plugin API inside these modules (typed flow lives in
+    # local_cades.ts and the backend bridge).
+    assert "WinHTTP" not in sources
+    assert "cadesplugin" not in sources
     assert '"/api/' in sources
     assert "READY_TO_WITHDRAW" not in (ROOT / "frontend" / "src" / "workflow.ts").read_text(encoding="utf-8")
     assert "READY_TO_RETURN" not in (ROOT / "frontend" / "src" / "workflow.ts").read_text(encoding="utf-8")
