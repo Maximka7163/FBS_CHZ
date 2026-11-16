@@ -208,7 +208,7 @@ def _inspect_stunnel_msspi_executable(path: Path | None) -> tuple[bool, bool]:
         with path.open("rb") as handle:
             if handle.read(2) != b"MZ":
                 return False, False
-        authentic = _sha256_file(path) == STUNNEL_MSSPI_OFFICIAL_SHA256
+        authentic = _sha256_file(path).casefold() == STUNNEL_MSSPI_OFFICIAL_SHA256.casefold()
         return True, authentic
     except OSError:
         return False, False

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 import base64
+import hashlib
 import inspect
 import json
 import os
@@ -435,6 +436,34 @@ def test_expected_digest_fixture_is_accepted_without_changing_production_pin(
     assert probe.stunnel_msspi_executable_valid is True
     assert probe.stunnel_msspi_config_supported is True
     assert probe.stunnel_msspi_structural_ready is True
+
+
+def test_authenticity_check_hashes_real_fixture_case_insensitively(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real file hashing (no _sha256_file mock): pin set to the fixture's actual
+    # digest in either case must be accepted; any other digest must be rejected.
+    executable = _fake_stunnel_executable(tmp_path)
+    real_digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+
+    monkeypatch.setattr(stunnel_module, "STUNNEL_MSSPI_OFFICIAL_SHA256", real_digest)
+    assert (
+        probe_stunnel_msspi(executable, windows_supported=True).stunnel_msspi_authenticity_valid
+        is True
+    )
+
+    monkeypatch.setattr(stunnel_module, "STUNNEL_MSSPI_OFFICIAL_SHA256", real_digest.upper())
+    assert (
+        probe_stunnel_msspi(executable, windows_supported=True).stunnel_msspi_authenticity_valid
+        is True
+    )
+
+    monkeypatch.setattr(stunnel_module, "STUNNEL_MSSPI_OFFICIAL_SHA256", "deadbeef" * 8)
+    assert (
+        probe_stunnel_msspi(executable, windows_supported=True).stunnel_msspi_authenticity_valid
+        is False
+    )
 
 
 def test_stunnel_transport_child_is_non_service_non_shell_fixed_loopback_and_cleans_up(
