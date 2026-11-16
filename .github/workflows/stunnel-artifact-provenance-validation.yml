@@ -45,6 +45,11 @@ jobs:
       - name: Verify executable SHA-256 (fail closed on mismatch)
         run: |
           set -euo pipefail
+          actual_zip="$(sha256sum stunnel.zip | cut -d' ' -f1)"
+          if [ "$actual_zip" != "$ZIP_SHA256" ]; then
+            echo "ARCHIVE SHA-256 MISMATCH: $actual_zip" >&2
+            exit 1
+          fi
           actual_exe="$(sha256sum extracted/stunnel-msspi.exe | cut -d' ' -f1)"
           if [ "$actual_exe" != "$EXE_SHA256" ]; then
             echo "EXECUTABLE SHA-256 MISMATCH: $actual_exe" >&2
