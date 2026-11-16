@@ -64,6 +64,21 @@ npm run dev
 
 Ожидаемый frontend: `http://127.0.0.1:5173`.
 
+## Установка официального stunnel-msspi (один раз)
+
+`stunnel-msspi.exe` не входит в установку КриптоПро CSP — его берём из официального релиза CryptoPro на GitHub:
+
+```powershell
+$dst="$PWD\stunnel-dist"
+New-Item -ItemType Directory -Force $dst | Out-Null
+Invoke-WebRequest "https://github.com/CryptoPro/stunnel-msspi/releases/download/stunnel-5.78-msspi-0.84/stunnel-5.78-msspi-0.84-386-windows.zip" -OutFile "$dst\stunnel.zip"
+(Get-FileHash "$dst\stunnel.zip" -Algorithm SHA256).Hash
+Expand-Archive "$dst\stunnel.zip" -DestinationPath $dst -Force
+(Get-FileHash "$dst\stunnel-msspi.exe" -Algorithm SHA256).Hash
+```
+
+Ожидаемый SHA-256 файла `stunnel-msspi.exe`: `106f5de201e9d4b768ded05ab463aafc6ef0abfab27f4c081c24471fa3ce660e` (без учёта регистра). Если хеш не совпал — не запускать файл; приложение тоже проверит хеш перед использованием.
+
 ## Включение LIVE READ-ONLY
 
 Откройте отдельный PowerShell в корне проекта. Подставьте свой ИНН и Thumbprint:
