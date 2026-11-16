@@ -389,15 +389,24 @@ class LocalTrueApiReadRuntime:
             except TrueApiHttpError as exc:
                 if exc.status in {401, 403}:
                     self.clear_session()
-                raise
+                    raise
+                # Packet-level transport failure: retry this batch's codes one
+                # by one so a single broken packet does not hide valid KI results
+                # that the official per-CI contract can still deliver.
+                self._degrade_batch(batch, raws_by_query, result, bearer)
+                continue
             if isinstance(payload, dict) and isinstance(payload.get("results"), list):
                 items = payload["results"]
             elif isinstance(payload, list):
                 items = payload
             else:
-                raise TrueApiProtocolError(
+                failure = TrueApiProtocolError(
                     "cises/info returned an unexpected top-level payload"
                 )
+                for code in batch:
+                    for raw in raws_by_query.get(code, []):
+                        result[raw] = failure
+                continue
             by_requested: dict[str, Any] = {}
             for item in items:
                 if not isinstance(item, dict):
@@ -426,6 +435,68 @@ class LocalTrueApiReadRuntime:
                 for raw in raws:
                     result[raw] = state
         return result
+
+    def _degrade_batch(
+        self,
+        batch: list[str],
+        raws_by_query: dict[str, list[str]],
+        result: dict[str, KiState | Exception],
+        bearer: str,
+    ) -> None:
+        """After a packet-level failure retry each code alone (batch size 1) so
+        valid per-KI answers survive; failures stay isolated per raw code."""
+        for code in batch:
+            raws = raws_by_query.get(code, [])
+            if not raws:
+                continue
+            self.rate_limiter.acquire()
+            try:
+                payload = self.transport.request_json(
+                    "POST",
+                    "/cises/info",
+                    params={"pg": "lp"},
+                    body=[code],
+                    bearer_token=bearer,
+                    cis_count=1,
+                )
+            except TrueApiHttpError as exc:
+                if exc.status in {401, 403}:
+                    self.clear_session()
+                    raise
+                for raw in raws:
+                    result[raw] = exc
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                items = payload["results"]
+            elif isinstance(payload, list):
+                items = payload
+            else:
+                failure = TrueApiProtocolError(
+                    "cises/info returned an unexpected top-level payload"
+                )
+                for raw in raws:
+                    result[raw] = failure
+                continue
+            item: Any | None = None
+            for entry in items:
+                if isinstance(entry, dict):
+                    info = entry.get("cisInfo", entry)
+                    if isinstance(info, dict):
+                        key = info.get("requestedCis") or info.get("cis")
+                        if isinstance(key, str) and key == code:
+                            item = entry
+                            break
+            if item is None:
+                failure = TrueApiProtocolError("cises/info omitted requested KI")
+                for raw in raws:
+                    result[raw] = failure
+                continue
+            try:
+                state: KiState | Exception = self.adapter.normalize(code, item)
+            except Exception as exc:
+                state = exc
+            for raw in raws:
+                result[raw] = state
 
 
 @dataclass(slots=True)

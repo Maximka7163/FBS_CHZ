@@ -23,6 +23,7 @@ from wbcz_ui.live_true_api import (
     ReadOnlyTrueApiTransport,
     TrueApiError,
     TrueApiHttpError,
+    TrueApiProtocolError,
     WindowsCryptoProCertificateDiscovery,
     WindowsCryptoProCertificateInspector,
 )
@@ -935,6 +936,94 @@ def test_local_cises_info_batches_more_than_1000_codes() -> None:
 
     assert len(result) == 1001
     assert transport.batch_sizes == [1000, 1]
+
+
+def test_local_cises_info_packet_failure_degrades_to_single_code_retry() -> None:
+    runtime, transport = _runtime()
+    _browser_auth(runtime)
+    transport.fail_next_info_status = 500
+
+    result = runtime.read_states([CIS])
+
+    state = result[CIS]
+    assert isinstance(state, KiState)
+    assert state.status == "IN_CIRCULATION"
+    assert transport.calls[-1]["path"] == "/cises/info"
+    assert transport.calls[-1]["cis_count"] == 1
+
+
+class DegradeTransport(FakeTransport):
+    """Batch request always fails; single-code requests succeed except BAD_KIZ."""
+
+    BAD_QUERY = "0104617711632008215IK<ZTYIgVPgi"
+
+    def request_json(self, method: str, path: str, **kwargs):
+        if (method, path) == ("POST", "/cises/info"):
+            self.calls.append({
+                "method": method,
+                "path": path,
+                "params": kwargs.get("params"),
+                "body": kwargs.get("body"),
+                "bearer_token": kwargs.get("bearer_token"),
+                "cis_count": kwargs.get("cis_count"),
+            })
+            body = kwargs["body"]
+            if len(body) > 1:
+                raise TrueApiHttpError(500, "synthetic packet failure")
+            cis = body[0]
+            if cis == self.BAD_QUERY:
+                raise TrueApiHttpError(500, "synthetic per-code failure")
+            return [{
+                "cisInfo": {
+                    "requestedCis": cis,
+                    "status": "INTRODUCED",
+                    "statusEx": "EMPTY",
+                    "ownerInn": INN,
+                    "productGroup": "lp",
+                }
+            }]
+        return super().request_json(method, path, **kwargs)
+
+
+def test_local_cises_info_packet_failure_keeps_valid_kiz_results() -> None:
+    transport = DegradeTransport()
+    runtime = LocalTrueApiReadRuntime(
+        participant_inn=INN,
+        transport=transport,  # type: ignore[arg-type]
+    )
+    _browser_auth(runtime)
+    bad_raw = transport.BAD_QUERY
+
+    result = runtime.read_states([CIS, bad_raw])
+
+    assert isinstance(result[CIS], KiState)
+    assert isinstance(result[bad_raw], TrueApiHttpError)
+
+
+def test_local_cises_info_unexpected_payload_isolated_per_batch() -> None:
+    class BadPayloadTransport(FakeTransport):
+        def request_json(self, method: str, path: str, **kwargs):
+            if (method, path) == ("POST", "/cises/info"):
+                self.calls.append({
+                    "method": method,
+                    "path": path,
+                    "params": kwargs.get("params"),
+                    "body": kwargs.get("body"),
+                    "bearer_token": kwargs.get("bearer_token"),
+                    "cis_count": kwargs.get("cis_count"),
+                })
+                return {"unexpected": True}
+            return super().request_json(method, path, **kwargs)
+
+    runtime = LocalTrueApiReadRuntime(
+        participant_inn=INN,
+        transport=BadPayloadTransport(),  # type: ignore[arg-type]
+    )
+    _browser_auth(runtime)
+
+    result = runtime.read_states([CIS])
+
+    assert isinstance(result[CIS], TrueApiProtocolError)
 
 
 @pytest.mark.parametrize("http_status", [401, 403])
@@ -2152,10 +2241,11 @@ def test_local_fbs_control_auth_failure_persists_no_control_result(
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
-def test_local_fbs_control_return_uses_own_accepted_distance_journal(
+def test_local_fbs_control_return_not_proven_by_history_journal_stays_manual_review(
     local_pg_factory,
 ) -> None:
-    """A RETIRED KI is return-ready only with this tenant's SUCCEEDED withdrawal."""
+    """Journal history is not current-reason proof: WITHDRAWN without a fresh
+    ЧЗ reason stays MANUAL_REVIEW even with our own SUCCEEDED DISTANCE row."""
     user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
     state = KiState(
         status="WITHDRAWN",
@@ -2223,11 +2313,15 @@ def test_local_fbs_control_return_uses_own_accepted_distance_journal(
         check = ImportRepository(db).latest_check(event_id)
         assert check is not None
         assert check.source == "local-cryptopro-true-api"
-        assert check.decision == Decision.READY_TO_RETURN.value
-        assert check.reason == "RETURN_WITHDRAWN_DISTANCE"
+        # A historical own DISTANCE withdrawal journal row is NOT proof of the
+        # current withdrawal reason: external return + re-withdrawal (MarkZnak /
+        # ЛК) may have happened in between. Fresh ЧЗ state without a reason
+        # must stay fail-closed MANUAL_REVIEW.
+        assert check.decision == Decision.MANUAL_REVIEW.value
+        assert check.reason == "NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL"
         assert check.snapshot["status"] == "WITHDRAWN"
-        assert check.snapshot["withdrawReason"] == "DISTANCE"
-        assert result["counts"].get(Decision.READY_TO_RETURN.value, 0) == 1
+        assert check.snapshot["withdrawReason"] in (None, "")
+        assert result["counts"].get(Decision.READY_TO_RETURN.value, 0) == 0
 
 
 @pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
@@ -2267,6 +2361,120 @@ def test_local_fbs_control_retired_without_journal_evidence_stays_manual_review(
         )
         imported = FileImportService(db).import_xlsx(
             "local-return-nojournal.xlsx",
+            _workbook_bytes(return_event),
+            user_id,
+        )
+        db.commit()
+
+        result = LocalTrueApiControlService(db, bridge).run(  # type: ignore[arg-type]
+            imported.id,
+            user_id,
+            OperationMode.AUTO,
+        )
+        db.commit()
+
+        event_id = ImportRepository(db).ordered_event_records(imported.id)[0].event_id
+        check = ImportRepository(db).latest_check(event_id)
+        assert check is not None
+        assert check.decision == Decision.MANUAL_REVIEW.value
+        assert check.reason == "NON_DISTANCE_OR_UNKNOWN_WITHDRAWAL"
+        assert result["counts"].get(Decision.READY_TO_RETURN.value, 0) == 0
+
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_fbs_control_return_uses_fresh_chz_distance_reason(
+    local_pg_factory,
+) -> None:
+    """READY_TO_RETURN only when fresh ЧЗ state itself reports DISTANCE."""
+    user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
+    state = KiState(
+        status="WITHDRAWN",
+        statusEx=None,
+        withdrawReason="DISTANCE",
+        ownerInn=INN,
+        productGroup="lp",
+    )
+    bridge = StaticStateBridge(state=state)
+
+    with local_pg_factory() as db:
+        bind_tenant_scope(
+            db,
+            organisation_id=org_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            role="OWNER",
+        )
+        return_event = Event(
+            kiz=CIS,
+            task_number="local-task-return-fresh",
+            sticker="local-sticker-return-fresh",
+            operation=Operation.RETURN,
+            occurred_at=datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc),
+            receipt_number=None,
+            fiscal_drive_number=None,
+            amount=Decimal("1900.00"),
+            currency="RUB",
+            legal_entity_sale=None,
+        )
+        imported = FileImportService(db).import_xlsx(
+            "local-return-fresh.xlsx",
+            _workbook_bytes(return_event),
+            user_id,
+        )
+        db.commit()
+
+        result = LocalTrueApiControlService(db, bridge).run(  # type: ignore[arg-type]
+            imported.id,
+            user_id,
+            OperationMode.AUTO,
+        )
+        db.commit()
+
+        event_id = ImportRepository(db).ordered_event_records(imported.id)[0].event_id
+        check = ImportRepository(db).latest_check(event_id)
+        assert check is not None
+        assert check.decision == Decision.READY_TO_RETURN.value
+        assert check.reason == "RETURN_WITHDRAWN_DISTANCE"
+        assert check.snapshot["withdrawReason"] == "DISTANCE"
+
+@pytest.mark.skipif(not DB_URL, reason="PostgreSQL required")
+def test_local_fbs_control_return_after_external_rewithdrawal_other_reason(
+    local_pg_factory,
+) -> None:
+    """External re-withdrawal changes the reason in fresh ЧЗ state: our own old
+    DISTANCE journal must not turn it into READY_TO_RETURN."""
+    user_id, org_id, participant_id, import_id = _seed_local_sale(local_pg_factory)
+    state = KiState(
+        status="WITHDRAWN",
+        statusEx=None,
+        withdrawReason="OTHER",
+        ownerInn=INN,
+        productGroup="lp",
+    )
+    bridge = StaticStateBridge(state=state)
+
+    with local_pg_factory() as db:
+        bind_tenant_scope(
+            db,
+            organisation_id=org_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            role="OWNER",
+        )
+        return_event = Event(
+            kiz=CIS,
+            task_number="local-task-return-other",
+            sticker="local-sticker-return-other",
+            operation=Operation.RETURN,
+            occurred_at=datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc),
+            receipt_number=None,
+            fiscal_drive_number=None,
+            amount=Decimal("1900.00"),
+            currency="RUB",
+            legal_entity_sale=None,
+        )
+        imported = FileImportService(db).import_xlsx(
+            "local-return-other.xlsx",
             _workbook_bytes(return_event),
             user_id,
         )

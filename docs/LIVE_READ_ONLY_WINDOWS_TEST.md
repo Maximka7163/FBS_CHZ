@@ -1,6 +1,6 @@
 # v0.4 LIVE READ-ONLY: первый тест на Windows
 
-Эта инструкция относится только к ветке `ui/v0.3-first-real-ui` и v0.4 LIVE READ-ONLY. Она специально разделяет проверку ГОСТ TLS, авторизацию и чтение одного КИЗ на три независимых действия.
+Эта инструкция относится к ветке `agent/night-qa-20261116` и v0.4 LIVE READ-ONLY. Она специально разделяет проверку ГОСТ TLS, авторизацию и чтение одного КИЗ на три независимых действия.
 
 В v0.4 отсутствуют production document signing, `LK_RECEIPT`, `LP_RETURN`, `/lk/documents/create`, cancellation и retry submission. Любая production route вне read-only allowlist блокируется локально до network I/O.
 
@@ -15,7 +15,7 @@
 - действующий сертификат УКЭП в `CurrentUser\\My`, связанный с приватным ключом КриптоПро;
 - Python 3.12;
 - Node.js 20/22, пока frontend запускается через Vite;
-- исходники ветки `ui/v0.3-first-real-ui`.
+- исходники ветки `agent/night-qa-20261116`.
 
 Не используйте произвольный OpenSSL/stunnel вместо официального `stunnel-msspi.exe` КриптоПро. Не отключайте проверку сертификата сервера. Не экспортируйте приватный ключ и не передавайте PIN приложению, в GitHub, ChatGPT или облако.
 

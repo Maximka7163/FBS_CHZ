@@ -1,0 +1,50 @@
+name: stunnel artifact provenance validation
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ZIP_URL: https://github.com/CryptoPro/stunnel-msspi/releases/download/stunnel-5.78-msspi-0.84/stunnel-5.78-msspi-0.84-386-windows.zip
+      ZIP_SHA256: 78b6b1363bba796ad2b35622ba58c442072cbc35b5c12ed898319a32db74f6a4
+      EXE_SHA256: 106f5de201e9d4b768ded05ab463aafc6ef0abfab27f4c081c24471fa3ce660e
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Verify pinned hashes exist in source
+        run: |
+          set -euo pipefail
+          grep -q "$EXE_SHA256" src/wbcz_local/stunnel_msspi.py
+          grep -q "$EXE_SHA256" docs/LIVE_READ_ONLY_WINDOWS_TEST.md
+
+      - name: Download official release artifact from GitHub
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --max-time 120 "$ZIP_URL" -o stunnel.zip
+          echo "downloaded archive sha256: $(sha256sum stunnel.zip | cut -d' ' -f1)"
+
+      - name: Verify archive SHA-256 and extract
+        run: |
+          set -euo pipefail
+          actual_zip="$(sha256sum stunnel.zip | cut -d' ' -f1)"
+          if [ "$actual_zip" != "$ZIP_SHA256" ]; then
+            echo "ARCHIVE SHA-256 MISMATCH: $actual_zip" >&2
+            exit 1
+          fi
+          unzip -q -o stunnel.zip -d extracted
+          test -f extracted/stunnel-msspi.exe
+
+      - name: Verify executable SHA-256 (fail closed on mismatch)
+        run: |
+          set -euo pipefail
+          actual_exe="$(sha256sum extracted/stunnel-msspi.exe | cut -d' ' -f1)"
+          if [ "$actual_exe" != "$EXE_SHA256" ]; then
+            echo "EXECUTABLE SHA-256 MISMATCH: $actual_exe" >&2
+            exit 1
+          fi
+          echo "PROVENANCE_VERIFIED archive=$actual_zip exe=$actual_exe"
