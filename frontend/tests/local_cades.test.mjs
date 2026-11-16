@@ -377,7 +377,8 @@ test("local True API diagnostics expose native transport readiness and explicit 
   const mainSource = await fs.readFile(new URL("../src/main.ts", import.meta.url), "utf8");
   const typeSource = await fs.readFile(new URL("../src/types.ts", import.meta.url), "utf8");
 
-  assert.equal(mainSource.includes("WinHTTP READY"), true);
+  assert.equal(mainSource.includes("STUNNEL-MSSPI READY"), true);
+  assert.equal(mainSource.includes("STUNNEL-MSSPI NOT READY"), true);
   assert.equal(mainSource.includes("Technical"), true);
   assert.equal(mainSource.includes("Compliance"), true);
   assert.equal(mainSource.includes("License"), true);
@@ -388,6 +389,7 @@ test("local True API diagnostics expose native transport readiness and explicit 
   assert.equal(mainSource.includes("localTrueApiStatusError"), true);
   assert.equal(mainSource.includes("нужен stunnel_msspi"), false);
   assert.equal(typeSource.includes("native_winhttp_gost_transport_ready"), true);
+  assert.equal(typeSource.includes("stunnel_msspi_structural_ready"), true);
   assert.equal(typeSource.includes("csp_compliance_status"), true);
   assert.equal(typeSource.includes("license_status"), true);
   assert.equal(typeSource.includes("sspi_diagnostic_status"), true);
